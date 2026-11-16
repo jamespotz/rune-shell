@@ -1,0 +1,20 @@
+[package]
+name = "rune-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "canvas", "thread-pool", "crisp", "wayland", "image", "svg"] }
+iced_layershell = { version = "0.19", default-features = false }
+# shortcut: iced_layershell 0.19.1 fails to compile against winit-core beta.4 (non-exhaustive
+# match in iced_exdevtools). Drop this pin once iced_layershell releases a fix.
+winit-core = "=0.31.0-beta.2"
+rune-services = { version = "0.1.0", path = "../rune-services" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+toml = "1"
+tracing = "0.1.44"
+nucleo-matcher = "0.3"
+emojis = "0.9"

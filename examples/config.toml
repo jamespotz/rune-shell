@@ -1,0 +1,85 @@
+# Rune Shell config: copy to ~/.config/rune-shell/config.toml.
+# Every key is optional; the values below are the defaults. Saving reloads the shell.
+# The settings window (rune-shell toggle settings) edits this file too, without comments.
+
+# The bar is a notch: a solid island at the top center of each monitor,
+# flush with the edge, as wide as its content.
+[bar]
+height = 32               # logical px
+radius = 14.0             # bottom corners and the concave top shoulders
+padding = 6.0             # notch side -> outermost widget
+spacing = 10.0            # between widgets (sections get twice this)
+font = "JetBrainsMono Nerd Font"
+font_size = 13.0
+blur = false              # blur behind the notch (needs a transparent background color)
+icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
+outputs = []              # e.g. ["DP-1"]; empty = every monitor
+# Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
+# "weather", "bluetooth", "volume", "network", "battery", "quick_settings", "power",
+# "settings". Reorder freely;
+# the three lists are laid out left to right inside the notch.
+left = ["workspaces"]
+center = ["media", "window_title"]
+right = ["tray", "bluetooth", "network", "volume", "battery", "weather", "clock", "notifications", "quick_settings"]
+
+[workspaces]
+min = 5                   # 1..=min are always shown
+
+[clock]
+format = "%a %d %b  %H:%M" # strftime
+icon = "schedule"         # icon name; "" for none
+
+[window_title]
+max_chars = 50            # longer titles end in "…"
+
+[notifications]
+timeout_ms = 5000         # popups, when the app doesn't say
+history = 100             # kept in the notification center
+dnd = false               # do not disturb: only critical notifications pop up
+
+[weather]                 # pick the place in Settings → Weather; empty location = off
+location = ""
+latitude = 0.0
+longitude = 0.0
+imperial = false          # °F and mph
+
+[calendar]                # ICS links; Google: calendar settings → "Secret address in iCal format"
+urls = []
+
+[power]
+lock_command = "loginctl lock-session"   # e.g. "hyprlock"
+
+[capture]                 # rune-shell screenshot / record / ocr
+screenshot_dir = "~/Pictures/Screenshots"
+copy = true               # also copy screenshots to the clipboard
+record_dir = "~/Videos/Recordings"
+record_audio = true
+fps = 60
+ocr_lang = "eng"          # tesseract languages, e.g. "eng+deu"
+
+[launcher]
+terminal = "kitty"          # runs Terminal=true apps as `<terminal> -e <command>`
+
+[theme]                   # applying a theme rewrites [colors] and the listed apps' themes
+source = "preset"         # "preset" or "wallpaper"
+preset = "Catppuccin Mocha"
+scheme = "tonal_spot"     # wallpaper themes: tonal_spot, vibrant, expressive, fruit_salad, ...
+dark = true               # wallpaper themes only
+apps = []                 # kitty, ghostty, btop, yazi, nvim, zed, vscode, kiro, gtk3, gtk4, qt, kde
+
+[wallpaper]
+dir = "~/Pictures/Wallpapers"
+current = ""
+
+[animations]
+enabled = true
+duration_ms = 250
+reduce_motion = false     # overrides everything above
+
+[colors]                  # Catppuccin Mocha; "#rrggbb" or "#rrggbbaa"
+background = "#11111b"
+foreground = "#cdd6f4"
+accent = "#cba6f7"
+on_accent = "#1e1e2e"
+muted = "#6c7086"
+urgent = "#f38ba8"

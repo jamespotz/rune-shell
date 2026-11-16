@@ -1,0 +1,22 @@
+//! Backend services for Rune Shell. Each service runs on tokio and publishes its
+//! state through a `tokio::sync::watch` channel; the UI only ever reads those.
+
+pub mod apps;
+pub mod art;
+pub mod audio;
+pub mod bluetooth;
+pub mod calc;
+pub mod calendar;
+pub mod capture;
+pub mod clipboard;
+pub mod clock;
+pub mod hyprland;
+pub mod icons;
+pub mod media;
+pub mod notifications;
+pub mod system;
+pub mod theme;
+pub mod tray;
+pub mod visualizer;
+pub mod wallpaper;
+pub mod weather;

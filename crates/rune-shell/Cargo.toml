@@ -1,0 +1,14 @@
+[package]
+name = "rune-shell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+notify = "8"
+rune-services = { version = "0.1.0", path = "../rune-services" }
+rune-ui = { version = "0.1.0", path = "../rune-ui" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
