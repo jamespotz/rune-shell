@@ -1,17 +1,7 @@
 //! Settings window: a sidebar of categories and a page of controls per category.
 //! Every edit updates the config immediately; `App` saves it to disk.
 
-use crate::{
-    config::{Config, Rgba, ThemeSource, Widget, valid_clock_format},
-    notch::{font, icon},
-};
-use iced::{
-    Alignment, Color, Element, Length, border,
-    widget::{
-        Space, button, column, container, pick_list, row, scrollable, slider, text, text_input,
-        toggler,
-    },
-};
+use crate::config::{Config, Rgba, ThemeSource, Widget, valid_clock_format};
 use rune_services::{
     audio::{DeviceCommand, Devices},
     bluetooth::{Command as BtCommand, State as BtState},
@@ -40,6 +30,7 @@ pub enum Page {
 }
 
 impl Page {
+    #[cfg(test)]
     const ALL: [Page; 12] = [
         Page::Appearance,
         Page::Theme,
@@ -55,6 +46,34 @@ impl Page {
         Page::Animations,
     ];
 
+    const GROUPS: [&'static [Page]; 3] = [
+        &[Page::Wifi, Page::Bluetooth, Page::Sound],
+        &[
+            Page::Appearance,
+            Page::Theme,
+            Page::Wallpaper,
+            Page::Bar,
+            Page::Animations,
+        ],
+        &[Page::Launcher, Page::Calendar, Page::Weather, Page::Capture],
+    ];
+
+    fn tint(self) -> u32 {
+        match self {
+            Page::Wifi | Page::Bluetooth => 0x0a84ffff,
+            Page::Sound => 0xff375fff,
+            Page::Appearance => 0x3a3a3cff,
+            Page::Theme => 0xbf5af2ff,
+            Page::Wallpaper => 0x32ade6ff,
+            Page::Bar => 0x636366ff,
+            Page::Animations => 0x30d158ff,
+            Page::Launcher => 0x8e8e93ff,
+            Page::Calendar => 0xff453aff,
+            Page::Weather => 0x64d2ffff,
+            Page::Capture => 0xff9f0aff,
+        }
+    }
+
     fn label(self) -> (&'static str, &'static str) {
         match self {
             Page::Appearance => ("palette", "Appearance"),
@@ -66,11 +85,26 @@ impl Page {
             Page::Sound => ("volume_up", "Sound"),
             Page::Capture => ("screenshot_monitor", "Capture"),
             Page::Calendar => ("calendar_month", "Calendar"),
-            Page::Bar => ("toolbar", "Bar"),
+            Page::Bar => ("toolbar", "Menu Bar"),
             Page::Launcher => ("search", "Launcher"),
             Page::Animations => ("animation", "Animations"),
         }
     }
+}
+
+pub fn visible_groups(query: &str) -> Vec<Vec<Page>> {
+    let query = query.trim().to_lowercase();
+    Page::GROUPS
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .copied()
+                .filter(|page| page.label().1.to_lowercase().contains(&query))
+                .collect::<Vec<_>>()
+        })
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 /// Free-text settings. Edits are kept as drafts so a half-typed value (an
@@ -97,7 +131,6 @@ pub enum Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Num {
     Height,
-    Radius,
     Padding,
     Spacing,
     FontSize,
@@ -163,6 +196,7 @@ pub enum Msg {
     SetWallpaper(PathBuf),
     RefreshWallpapers,
     Search(String),
+    PageSearch(String),
     SearchSubmit,
     PickPlace(usize),
     ClearWeather,
@@ -181,7 +215,7 @@ pub enum Msg {
     RemoveLink(usize),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct State {
     page: Page,
     drafts: HashMap<Field, String>,
@@ -199,11 +233,12 @@ pub struct State {
     /// "Connecting…" or the last Wi-Fi failure.
     pub wifi_status: String,
     /// The secured network asking for a password, and what's typed.
-    wifi_pick: Option<String>,
+    pub(crate) wifi_pick: Option<String>,
     wifi_password: String,
     /// Calendar link being typed, and fetch problems to show.
     new_link: String,
     pub cal_errors: Vec<String>,
+    pub(crate) page_search: String,
 }
 
 static PRESETS: LazyLock<Vec<Palette>> = LazyLock::new(theme::presets);
@@ -227,6 +262,7 @@ impl State {
                 }
             }
             Msg::Search(q) => self.search = q,
+            Msg::PageSearch(q) => self.page_search = q,
             Msg::SearchSubmit if !self.search.trim().is_empty() => {
                 self.search_status = "Searching…".into();
                 return Some(Request::Geocode(self.search.clone()));
@@ -365,1350 +401,13 @@ impl State {
         None
     }
 
-    pub fn view<'a>(&'a self, config: &'a Config) -> Element<'a, Msg> {
-        let colors = &config.colors;
-        let fg: Color = colors.foreground.into();
-        let accent: Color = colors.accent.into();
-        let base = Color {
-            a: 1.0,
-            ..colors.background.into()
-        };
-        let surface = mix(base, fg, 0.06);
-        let sidebar = column(Page::ALL.into_iter().map(|page| {
-            let (glyph, name) = page.label();
-            let selected = page == self.page;
-            button(
-                row![icon(config, glyph, 20.0), text(name).size(14)]
-                    .spacing(10)
-                    .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([8, 12])
-            .on_press(Msg::Page(page))
-            .style(move |_, status| button::Style {
-                background: Some(
-                    if selected {
-                        Color { a: 0.18, ..accent }
-                    } else if matches!(status, button::Status::Hovered) {
-                        Color { a: 0.08, ..fg }
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                ),
-                text_color: if selected { accent } else { fg },
-                border: border::rounded(10),
-                ..Default::default()
-            })
-            .into()
-        }))
-        .spacing(4);
-        let sidebar = container(
-            column![
-                text("Settings").size(20).font(font(&config.bar.font)),
-                sidebar
-            ]
-            .spacing(18),
-        )
-        .padding(16)
-        .width(210)
-        .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(surface.into()),
-            ..Default::default()
-        });
-
-        let (_, title) = self.page.label();
-        let close = button(icon(config, "close", 20.0))
-            .padding(6)
-            .on_press(Msg::Close)
-            .style(move |_, status| button::Style {
-                background: matches!(status, button::Status::Hovered)
-                    .then(|| Color { a: 0.12, ..fg }.into()),
-                text_color: fg,
-                border: border::rounded(8),
-                ..Default::default()
-            });
-        let header = row![
-            text(title).size(22),
-            Space::new().width(Length::Fill),
-            close
-        ]
-        .align_y(Alignment::Center);
-        let page = match self.page {
-            Page::Appearance => self.appearance(config, surface),
-            Page::Bar => self.bar(config, surface),
-            Page::Launcher => self.launcher(config, surface),
-            Page::Theme => self.theme(config, surface),
-            Page::Wallpaper => self.wallpaper(config, surface),
-            Page::Weather => self.weather(config, surface),
-            Page::Wifi => self.wifi(config, surface),
-            Page::Bluetooth => self.bluetooth(config, surface),
-            Page::Sound => self.sound(config, surface),
-            Page::Capture => self.capture(config, surface),
-            Page::Calendar => self.calendar(config, surface),
-            Page::Animations => animations(config, surface),
-        };
-        // Right padding keeps the scrollbar off the cards.
-        let page = container(page).padding(iced::Padding::ZERO.right(14));
-        let content = column![header, scrollable(page).height(Length::Fill)]
-            .spacing(16)
-            .padding(20);
-
-        let border_color = Color { a: 0.15, ..fg };
-        container(row![sidebar, content])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .clip(true)
-            .style(move |_| container::Style {
-                background: Some(base.into()),
-                border: border::rounded(16).color(border_color).width(1),
-                text_color: Some(fg),
-                ..Default::default()
-            })
-            .into()
-    }
-
-    fn appearance<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let fonts = group(
-            "Fonts",
-            surface,
-            vec![
-                setting(
-                    config,
-                    "Text font",
-                    "Used by the bar and panels",
-                    self.input(config, Field::Font),
-                ),
-                setting(
-                    config,
-                    "Icon font",
-                    "Icons are written by name, e.g. \"schedule\"",
-                    self.input(config, Field::IconFont),
-                ),
-                number(
-                    config,
-                    "Font size",
-                    Num::FontSize,
-                    config.bar.font_size,
-                    9.0..=20.0,
-                    0.5,
-                ),
-            ],
-        );
-        let color = |f, label: &'a str| {
-            let swatch: Color = color_of(config, f).into();
-            setting(
-                config,
-                label,
-                "",
-                row![
-                    container(Space::new().width(22).height(22)).style(move |_| container::Style {
-                        background: Some(swatch.into()),
-                        border: border::rounded(6)
-                            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.2))
-                            .width(1),
-                        ..Default::default()
-                    }),
-                    self.input(config, f)
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .into(),
-            )
-        };
-        let colors = group(
-            "Colors",
-            surface,
-            vec![
-                color(Field::Background, "Notch background"),
-                color(Field::Foreground, "Text"),
-                color(Field::Accent, "Accent"),
-                color(Field::OnAccent, "Text on accent"),
-                color(Field::Muted, "Muted text"),
-                color(Field::Urgent, "Urgent"),
-            ],
-        );
-        let blur = group(
-            "Effects",
-            surface,
-            vec![setting(
-                config,
-                "Blur",
-                "Blurs what's behind the notch and panels. Shows when the notch background has transparency, e.g. #11111bcc",
-                toggler(config.bar.blur)
-                    .on_toggle(|on| Msg::Flag(Flag::Blur, on))
-                    .into(),
-            )],
-        );
-        column![fonts, colors, blur].spacing(16).into()
-    }
-
-    fn bar<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let b = &config.bar;
-        let shape = group(
-            "Notch shape",
-            surface,
-            vec![
-                number(
-                    config,
-                    "Height",
-                    Num::Height,
-                    b.height as f32,
-                    24.0..=56.0,
-                    1.0,
-                ),
-                number(
-                    config,
-                    "Corner radius",
-                    Num::Radius,
-                    b.radius,
-                    0.0..=28.0,
-                    1.0,
-                ),
-                number(
-                    config,
-                    "Side padding",
-                    Num::Padding,
-                    b.padding,
-                    0.0..=32.0,
-                    1.0,
-                ),
-                number(
-                    config,
-                    "Widget spacing",
-                    Num::Spacing,
-                    b.spacing,
-                    0.0..=32.0,
-                    1.0,
-                ),
-            ],
-        );
-        let widgets = group(
-            "Widgets",
-            surface,
-            vec![
-                section_editor(config, "Left", Section::Left, &b.left),
-                section_editor(config, "Center", Section::Center, &b.center),
-                section_editor(config, "Right", Section::Right, &b.right),
-            ],
-        );
-        let details = group(
-            "Widget options",
-            surface,
-            vec![
-                number(
-                    config,
-                    "Always show workspaces",
-                    Num::WorkspacesMin,
-                    config.workspaces.min as f32,
-                    1.0..=10.0,
-                    1.0,
-                ),
-                setting(
-                    config,
-                    "Clock format",
-                    "strftime, e.g. %H:%M",
-                    self.input(config, Field::ClockFormat),
-                ),
-                setting(
-                    config,
-                    "Clock icon",
-                    "Icon name; empty for none",
-                    self.input(config, Field::ClockIcon),
-                ),
-                number(
-                    config,
-                    "Window title length",
-                    Num::TitleChars,
-                    config.window_title.max_chars as f32,
-                    10.0..=120.0,
-                    1.0,
-                ),
-            ],
-        );
-        column![shape, widgets, details].spacing(16).into()
-    }
-
-    fn theme<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let t = &config.theme;
-        let fg: Color = config.colors.foreground.into();
-        let accent: Color = config.colors.accent.into();
-        let muted: Color = config.colors.muted.into();
-        let chip = move |label: String, selected: bool, msg: Msg| {
-            button(text(label).size(13))
-                .padding([6, 14])
-                .on_press(msg)
-                .style(move |_, status| button::Style {
-                    background: Some(
-                        if selected {
-                            Color { a: 0.2, ..accent }
-                        } else if matches!(status, button::Status::Hovered) {
-                            Color { a: 0.08, ..fg }
-                        } else {
-                            Color { a: 0.04, ..fg }
-                        }
-                        .into(),
-                    ),
-                    text_color: if selected { accent } else { fg },
-                    border: border::rounded(10)
-                        .color(if selected { accent } else { Color::TRANSPARENT })
-                        .width(1),
-                    ..Default::default()
-                })
-        };
-        let source = row![
-            chip(
-                "Presets".into(),
-                t.source == ThemeSource::Preset,
-                Msg::Source(ThemeSource::Preset)
-            ),
-            chip(
-                "From wallpaper".into(),
-                t.source == ThemeSource::Wallpaper,
-                Msg::Source(ThemeSource::Wallpaper)
-            ),
-        ]
-        .spacing(8);
-        let body: Element<'a, Msg> = match t.source {
-            ThemeSource::Preset => column(PRESETS.chunks(2).map(|pair| {
-                row(pair.iter().map(|p| {
-                    let selected = p.name == t.preset;
-                    let swatches = row([p.bg_dim, p.primary, p.secondary, p.tertiary, p.fg].map(
-                        |c| {
-                            let c = Color::from_rgb8(c.0[0], c.0[1], c.0[2]);
-                            container(Space::new().width(22).height(22))
-                                .style(move |_| container::Style {
-                                    background: Some(c.into()),
-                                    border: border::rounded(11)
-                                        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.15))
-                                        .width(1),
-                                    ..Default::default()
-                                })
-                                .into()
-                        },
-                    ))
-                    .spacing(6);
-                    button(column![text(p.name.clone()).size(14), swatches].spacing(8))
-                        .width(Length::Fill)
-                        .padding(12)
-                        .on_press(Msg::Preset(p.name.clone()))
-                        .style(move |_, status| button::Style {
-                            background: Some(
-                                if matches!(status, button::Status::Hovered) {
-                                    Color { a: 0.08, ..fg }
-                                } else {
-                                    Color { a: 0.04, ..fg }
-                                }
-                                .into(),
-                            ),
-                            text_color: fg,
-                            border: border::rounded(12)
-                                .color(if selected { accent } else { Color::TRANSPARENT })
-                                .width(2),
-                            ..Default::default()
-                        })
-                        .into()
-                }))
-                .spacing(10)
-                .into()
-            }))
-            .spacing(10)
-            .into(),
-            ThemeSource::Wallpaper => {
-                let current = Variant::from_id(&t.scheme).unwrap_or(Variant::TonalSpot);
-                column![
-                    setting(
-                        config,
-                        "Dark mode",
-                        "Light or dark version of the wallpaper colors",
-                        toggler(t.dark)
-                            .on_toggle(|on| Msg::Flag(Flag::ThemeDark, on))
-                            .into(),
-                    ),
-                    text("Scheme").size(14),
-                    row(Variant::ALL
-                        .map(|v| chip(v.label().into(), v == current, Msg::Scheme(v)).into()))
-                    .spacing(8)
-                    .wrap(),
-                ]
-                .spacing(12)
-                .into()
-            }
-        };
-        let colors = group("Colors", surface, vec![source.into(), body]);
-        let apps = group(
-            "Apply to apps",
-            surface,
-            ThemeApp::ALL
-                .iter()
-                .map(|&app| {
-                    let on = t.apps.iter().any(|a| a == app.id());
-                    setting(
-                        config,
-                        app.label(),
-                        "",
-                        toggler(on)
-                            .on_toggle(move |v| Msg::Flag(Flag::ThemeApp(app), v))
-                            .into(),
-                    )
-                })
-                .collect(),
-        );
-        let actions = group(
-            "Theme files",
-            surface,
-            vec![
-                text("Rune backs up every file it changes the first time. Restore puts all of them back as they were.")
-                    .size(13)
-                    .color(muted)
-                    .into(),
-                row![
-                    chip("Apply again".into(), false, Msg::ApplyTheme),
-                    chip("Restore original app themes".into(), false, Msg::RestoreThemes),
-                ]
-                .spacing(8)
-                .into(),
-                text(self.status.clone()).size(12).color(muted).into(),
-            ],
-        );
-        column![colors, apps, actions].spacing(16).into()
-    }
-
-    fn wallpaper<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let fg: Color = config.colors.foreground.into();
-        let accent: Color = config.colors.accent.into();
-        let muted: Color = config.colors.muted.into();
-        let refresh = button(icon(config, "refresh", 20.0))
-            .padding(6)
-            .on_press(Msg::RefreshWallpapers)
-            .style(move |_, s| button::Style {
-                background: matches!(s, button::Status::Hovered)
-                    .then(|| Color { a: 0.12, ..fg }.into()),
-                text_color: fg,
-                border: border::rounded(8),
-                ..Default::default()
-            });
-        let folder = setting(
-            config,
-            "Folder",
-            "Images (jpg, png, webp, gif) and videos (mp4, webm, mkv)",
-            row![self.input(config, Field::WallpaperDir), refresh]
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .into(),
-        );
-        let tiles: Element<'a, Msg> = if self.wallpapers.is_empty() {
-            text("No images or videos here yet. Check the folder, then refresh.")
-                .size(13)
-                .color(muted)
-                .into()
-        } else {
-            column(self.wallpapers.chunks(3).map(|chunk| {
-                row(chunk.iter().map(|w| {
-                    let selected = config.wallpaper.current == w.path.display().to_string();
-                    let thumb: Element<'a, Msg> = match &w.thumb {
-                        // Thumbnails are pre-cropped to 16:9, so they fill the tile exactly.
-                        Some(t) => iced::widget::image(t.clone())
-                            .width(Length::Fill)
-                            .height(110)
-                            .content_fit(iced::ContentFit::Fill)
-                            .border_radius(8)
-                            .into(),
-                        None => container(icon(config, "hourglass_empty", 24.0))
-                            .center_x(Length::Fill)
-                            .center_y(110)
-                            .into(),
-                    };
-                    let name = w
-                        .path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let caption = row![
-                        icon(config, if w.video { "movie" } else { "image" }, 14.0),
-                        text(truncate(&name, 22))
-                            .size(11)
-                            .color(muted)
-                            .wrapping(text::Wrapping::None),
-                    ]
-                    .spacing(4)
-                    .align_y(Alignment::Center);
-                    button(column![thumb, caption].spacing(6))
-                        .width(Length::Fill)
-                        .padding(6)
-                        .on_press(Msg::SetWallpaper(w.path.clone()))
-                        .style(move |_, status| button::Style {
-                            background: matches!(status, button::Status::Hovered)
-                                .then(|| Color { a: 0.08, ..fg }.into()),
-                            text_color: fg,
-                            border: border::rounded(12)
-                                .color(if selected { accent } else { Color::TRANSPARENT })
-                                .width(2),
-                            ..Default::default()
-                        })
-                        .into()
-                }))
-                .spacing(8)
-                .into()
-            }))
-            .spacing(8)
-            .into()
-        };
-        column![
-            group("Wallpaper", surface, vec![folder]),
-            tiles,
-            text(self.status.clone()).size(12).color(muted)
-        ]
-        .spacing(16)
-        .into()
-    }
-
     pub fn page(&self) -> Page {
         self.page
     }
-
-    fn weather<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let w = &config.weather;
-        let fg: Color = config.colors.foreground.into();
-        let muted: Color = config.colors.muted.into();
-        let small = |label: &'a str, msg: Msg| {
-            button(text(label).size(13))
-                .padding([6, 12])
-                .on_press(msg)
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        Color {
-                            a: if matches!(s, button::Status::Hovered) {
-                                0.16
-                            } else {
-                                0.08
-                            },
-                            ..fg
-                        }
-                        .into(),
-                    ),
-                    text_color: fg,
-                    border: border::rounded(8),
-                    ..Default::default()
-                })
-        };
-        let current: Element<'a, Msg> = if w.location.is_empty() {
-            text("Not set. Weather stays hidden until you pick a place.")
-                .size(13)
-                .color(muted)
-                .into()
-        } else {
-            row![
-                text(w.location.clone()).size(14).width(Length::Fill),
-                small("Clear", Msg::ClearWeather)
-            ]
-            .align_y(Alignment::Center)
-            .into()
-        };
-        let search = row![
-            text_input("Search a city", &self.search)
-                .on_input(Msg::Search)
-                .on_submit(Msg::SearchSubmit)
-                .padding([6, 10])
-                .size(14),
-            small("Search", Msg::SearchSubmit),
-        ]
-        .spacing(8);
-        let mut rows: Vec<Element<'a, Msg>> = vec![current, search.into()];
-        if !self.search_status.is_empty() {
-            rows.push(
-                text(self.search_status.clone())
-                    .size(12)
-                    .color(muted)
-                    .into(),
-            );
-        }
-        for (i, place) in self.places.iter().enumerate() {
-            rows.push(
-                button(text(place.label()).size(13))
-                    .width(Length::Fill)
-                    .padding([6, 10])
-                    .on_press(Msg::PickPlace(i))
-                    .style(move |_, s| button::Style {
-                        background: matches!(s, button::Status::Hovered)
-                            .then(|| Color { a: 0.1, ..fg }.into()),
-                        text_color: fg,
-                        border: border::rounded(8),
-                        ..Default::default()
-                    })
-                    .into(),
-            );
-        }
-        let units = group(
-            "Units",
-            surface,
-            vec![setting(
-                config,
-                "Fahrenheit and mph",
-                "Instead of Celsius and km/h",
-                toggler(w.imperial).on_toggle(Msg::Imperial).into(),
-            )],
-        );
-        let note = text(
-            "Forecasts come from Open-Meteo. Only the place you pick is sent, never your position.",
-        )
-        .size(12)
-        .color(muted);
-        column![group("Location", surface, rows), units, note]
-            .spacing(16)
-            .into()
-    }
-
-    fn wifi<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let fg: Color = config.colors.foreground.into();
-        let muted: Color = config.colors.muted.into();
-        let Some(n) = &self.network else {
-            return text("NetworkManager isn't running.")
-                .size(13)
-                .color(muted)
-                .into();
-        };
-        let small = move |label: &'a str, msg: Msg| {
-            button(text(label).size(12))
-                .padding([5, 10])
-                .on_press(msg)
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        Color {
-                            a: if matches!(s, button::Status::Hovered) {
-                                0.16
-                            } else {
-                                0.08
-                            },
-                            ..fg
-                        }
-                        .into(),
-                    ),
-                    text_color: fg,
-                    border: border::rounded(8),
-                    ..Default::default()
-                })
-        };
-        let status = match () {
-            _ if !n.wifi_enabled => "Off".to_owned(),
-            _ if n.connected && !n.name.is_empty() => format!("Connected to {}", n.name),
-            _ => "On".to_owned(),
-        };
-        let mut top: Vec<Element<'a, Msg>> = vec![
-            setting(
-                config,
-                "Wi-Fi",
-                "",
-                toggler(n.wifi_enabled).on_toggle(Msg::WifiPower).into(),
-            ),
-            text(status).size(12).color(muted).into(),
-        ];
-        if !self.wifi_status.is_empty() {
-            top.push(text(self.wifi_status.clone()).size(12).color(muted).into());
-        }
-        if !n.wifi_enabled {
-            return column![group("Adapter", surface, top)].into();
-        }
-        let mut rows: Vec<Element<'a, Msg>> = Vec::new();
-        for (i, w) in self.wifi.iter().enumerate() {
-            let mut info = Vec::new();
-            if w.active {
-                info.push("Connected");
-            } else if w.saved.is_some() {
-                info.push("Saved");
-            }
-            if w.secured {
-                info.push("Secured");
-            }
-            let mut controls = row![].spacing(6).align_y(Alignment::Center);
-            if w.saved.is_some() {
-                controls = controls.push(small("Forget", Msg::WifiForget(i)));
-            }
-            if !w.active {
-                controls = controls.push(small("Join", Msg::WifiPick(i)));
-            }
-            rows.push(
-                row![
-                    icon(config, crate::status::wifi_icon(w.strength), 22.0),
-                    column![
-                        text(w.ssid.clone()).size(14),
-                        text(info.join(" · ")).size(11).color(muted)
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    controls,
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .into(),
-            );
-            if self.wifi_pick.as_ref() == Some(&w.ssid) {
-                rows.push(
-                    row![
-                        text_input("Password", &self.wifi_password)
-                            .secure(true)
-                            .on_input(Msg::WifiPassword)
-                            .on_submit(Msg::WifiJoin)
-                            .padding([6, 10])
-                            .size(13),
-                        small("Connect", Msg::WifiJoin),
-                        small("Cancel", Msg::WifiCancel),
-                    ]
-                    .spacing(8)
-                    .into(),
-                );
-            }
-        }
-        if rows.is_empty() {
-            rows.push(text("Looking for networks…").size(13).color(muted).into());
-        }
-        rows.push(small("Scan again", Msg::WifiRescan).into());
-        column![
-            group("Adapter", surface, top),
-            group("Networks", surface, rows)
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    fn sound<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let fg: Color = config.colors.foreground.into();
-        let accent: Color = config.colors.accent.into();
-        let muted: Color = config.colors.muted.into();
-        let list = |devices: &'a [rune_services::audio::Device], output: bool, empty: &'a str| {
-            let mut rows: Vec<Element<'a, Msg>> = devices
-                .iter()
-                .map(|d| {
-                    let glyph = if d.default {
-                        "radio_button_checked"
-                    } else {
-                        "radio_button_unchecked"
-                    };
-                    button(
-                        row![
-                            icon(config, glyph, 18.0),
-                            text(d.description.clone()).size(13).width(Length::Fill),
-                        ]
-                        .spacing(10)
-                        .align_y(Alignment::Center),
-                    )
-                    .width(Length::Fill)
-                    .padding([6, 8])
-                    .on_press(Msg::Audio(DeviceCommand::SetDefault(
-                        output,
-                        d.name.clone(),
-                    )))
-                    .style(move |_, s| button::Style {
-                        background: matches!(s, button::Status::Hovered)
-                            .then(|| Color { a: 0.08, ..fg }.into()),
-                        text_color: if d.default { accent } else { fg },
-                        border: border::rounded(8),
-                        ..Default::default()
-                    })
-                    .into()
-                })
-                .collect();
-            if rows.is_empty() {
-                rows.push(text(empty).size(13).color(muted).into());
-            }
-            rows
-        };
-        let mut inputs = list(&self.audio.inputs, false, "No microphones found.");
-        if let Some(mic) = self.audio.mic() {
-            inputs.push(setting(
-                config,
-                "Mute microphone",
-                "",
-                toggler(mic.muted)
-                    .on_toggle(|_| Msg::Audio(DeviceCommand::ToggleMicMute))
-                    .into(),
-            ));
-        }
-        column![
-            group(
-                "Output",
-                surface,
-                list(
-                    &self.audio.outputs,
-                    true,
-                    "No speakers or headphones found."
-                )
-            ),
-            group("Input", surface, inputs),
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    fn bluetooth<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let bt = &self.bt;
-        let fg: Color = config.colors.foreground.into();
-        let muted: Color = config.colors.muted.into();
-        let accent: Color = config.colors.accent.into();
-        if !bt.available {
-            return text("No Bluetooth adapter found (or BlueZ isn't running).")
-                .size(13)
-                .color(muted)
-                .into();
-        }
-        let action = move |label: String, msg: Msg, active: bool| {
-            button(text(label).size(12))
-                .padding([5, 10])
-                .on_press(msg)
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        if active {
-                            Color { a: 0.25, ..accent }
-                        } else {
-                            Color {
-                                a: if matches!(s, button::Status::Hovered) {
-                                    0.16
-                                } else {
-                                    0.08
-                                },
-                                ..fg
-                            }
-                        }
-                        .into(),
-                    ),
-                    text_color: if active { accent } else { fg },
-                    border: border::rounded(8),
-                    ..Default::default()
-                })
-        };
-        let status = if !bt.powered {
-            "Off"
-        } else if bt.discovering {
-            "On · looking for devices…"
-        } else {
-            "On"
-        };
-        let mut top = vec![setting(
-            config,
-            "Bluetooth",
-            status,
-            toggler(bt.powered)
-                .on_toggle(|on| Msg::Bt(BtCommand::Power(on)))
-                .into(),
-        )];
-        if let Some(code) = &bt.pairing_code {
-            let accent: Color = config.colors.accent.into();
-            top.push(
-                container(
-                    column![
-                        text("Type this code on the device, then press Enter:").size(13),
-                        text(code.clone()).size(28).font(font(&config.bar.font)),
-                    ]
-                    .spacing(4),
-                )
-                .padding(12)
-                .width(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(Color { a: 0.15, ..accent }.into()),
-                    border: border::rounded(10).color(accent).width(1),
-                    ..Default::default()
-                })
-                .into(),
-            );
-        }
-        if !bt.error.is_empty() {
-            top.push(
-                text(bt.error.clone())
-                    .size(12)
-                    .color(Color::from(config.colors.urgent))
-                    .into(),
-            );
-        }
-        let devices: Vec<Element<'a, Msg>> = bt
-            .devices
-            .iter()
-            .map(|d| {
-                let mut info = vec![
-                    if d.connected {
-                        "Connected"
-                    } else if d.paired {
-                        "Paired"
-                    } else {
-                        "Available"
-                    }
-                    .to_owned(),
-                ];
-                if let Some(b) = d.battery {
-                    info.push(format!("{b}% battery"));
-                }
-                info.push(d.address.clone());
-                let mut controls = row![].spacing(6).align_y(Alignment::Center);
-                if let Some(p) = d.profiles.as_ref().filter(|_| d.connected) {
-                    // Music sounds best in A2DP; calls need the headset profile for the microphone.
-                    if let Some(audio) = &p.audio {
-                        controls = controls.push(action(
-                            "Audio".into(),
-                            Msg::Bt(BtCommand::Profile(d.address.clone(), audio.clone())),
-                            &p.active == audio,
-                        ));
-                    }
-                    if let Some(call) = &p.call {
-                        controls = controls.push(action(
-                            "Call".into(),
-                            Msg::Bt(BtCommand::Profile(d.address.clone(), call.clone())),
-                            &p.active == call,
-                        ));
-                    }
-                }
-                controls = controls.push(if d.connected {
-                    action(
-                        "Disconnect".into(),
-                        Msg::Bt(BtCommand::Disconnect(d.path.clone())),
-                        false,
-                    )
-                } else if d.paired {
-                    action(
-                        "Connect".into(),
-                        Msg::Bt(BtCommand::Connect(d.path.clone())),
-                        false,
-                    )
-                } else {
-                    action(
-                        "Pair".into(),
-                        Msg::Bt(BtCommand::Pair(d.path.clone())),
-                        false,
-                    )
-                });
-                let mut card = column![
-                    row![
-                        icon(config, crate::bt::device_icon(&d.icon), 26.0),
-                        column![
-                            text(d.name.clone()).size(14),
-                            text(info.join(" · ")).size(11).color(muted)
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                        controls,
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                ]
-                .spacing(8);
-                if d.paired {
-                    let path = d.path.clone();
-                    card = card.push(
-                        row![
-                            text("Connect automatically").size(12).color(muted),
-                            toggler(d.trusted)
-                                .on_toggle(move |on| Msg::Bt(BtCommand::Trust(path.clone(), on)))
-                                .size(16),
-                            Space::new().width(Length::Fill),
-                            action(
-                                "Forget".into(),
-                                Msg::Bt(BtCommand::Remove(d.path.clone())),
-                                false
-                            ),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
-                }
-                container(card)
-                    .padding(12)
-                    .width(Length::Fill)
-                    .style(move |_| container::Style {
-                        background: Some(Color { a: 0.04, ..fg }.into()),
-                        border: border::rounded(10),
-                        ..Default::default()
-                    })
-                    .into()
-            })
-            .collect();
-        let devices = if devices.is_empty() {
-            vec![
-                text(if bt.powered {
-                    "No devices yet. Put your device in pairing mode."
-                } else {
-                    "Turn Bluetooth on to see devices."
-                })
-                .size(13)
-                .color(muted)
-                .into(),
-            ]
-        } else {
-            devices
-        };
-        column![
-            group("Adapter", surface, top),
-            group("Devices", surface, devices)
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    fn calendar<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let fg: Color = config.colors.foreground.into();
-        let muted: Color = config.colors.muted.into();
-        let small = |label: &'a str, msg: Msg| {
-            button(text(label).size(12))
-                .padding([5, 10])
-                .on_press(msg)
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        Color {
-                            a: if matches!(s, button::Status::Hovered) {
-                                0.16
-                            } else {
-                                0.08
-                            },
-                            ..fg
-                        }
-                        .into(),
-                    ),
-                    text_color: fg,
-                    border: border::rounded(8),
-                    ..Default::default()
-                })
-        };
-        let mut rows: Vec<Element<'a, Msg>> = config
-            .calendar
-            .urls
-            .iter()
-            .enumerate()
-            .map(|(i, url)| {
-                // Links are secrets (anyone with one can read the calendar), so only show the start.
-                let shown: String = url.chars().take(48).collect::<String>()
-                    + if url.chars().count() > 48 { "…" } else { "" };
-                row![
-                    icon(config, "calendar_month", 18.0),
-                    text(shown)
-                        .size(12)
-                        .width(Length::Fill)
-                        .wrapping(text::Wrapping::None),
-                    small("Remove", Msg::RemoveLink(i)),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .into()
-            })
-            .collect();
-        if rows.is_empty() {
-            rows.push(text("No calendars yet.").size(13).color(muted).into());
-        }
-        rows.push(
-            row![
-                text_input(
-                    "https://calendar.google.com/calendar/ical/…/basic.ics",
-                    &self.new_link
-                )
-                .on_input(Msg::NewLink)
-                .on_submit(Msg::AddLink)
-                .padding([6, 10])
-                .size(13),
-                small("Add", Msg::AddLink),
-            ]
-            .spacing(8)
-            .into(),
-        );
-        for e in &self.cal_errors {
-            rows.push(
-                text(e.clone())
-                    .size(12)
-                    .color(Color::from(config.colors.urgent))
-                    .into(),
-            );
-        }
-        let help = group(
-            "Where to find the link",
-            surface,
-            vec![
-                text("Google Calendar: Settings → pick a calendar → Integrate calendar → \"Secret address in iCal format\".").size(13).into(),
-                text("Outlook: Settings → Calendar → Shared calendars → Publish a calendar → ICS link.").size(13).into(),
-                text("Apple, Nextcloud, Proton and others: their \"share\" or \"subscribe\" link (webcal:// works too).").size(13).into(),
-                text("Calendars are read-only here and refresh every 15 minutes. Click the clock in the bar to see them.").size(12).color(muted).into(),
-            ],
-        );
-        column![group("Calendars", surface, rows), help]
-            .spacing(16)
-            .into()
-    }
-
-    fn capture<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let c = &config.capture;
-        let muted: Color = config.colors.muted.into();
-        let shots = group(
-            "Screenshots",
-            surface,
-            vec![
-                setting(
-                    config,
-                    "Folder",
-                    "",
-                    self.input(config, Field::ScreenshotDir),
-                ),
-                setting(
-                    config,
-                    "Copy to clipboard",
-                    "As well as saving the file",
-                    toggler(c.copy)
-                        .on_toggle(|on| Msg::Flag(Flag::CaptureCopy, on))
-                        .into(),
-                ),
-            ],
-        );
-        let recording = group(
-            "Screen recording",
-            surface,
-            vec![
-                setting(config, "Folder", "", self.input(config, Field::RecordDir)),
-                setting(
-                    config,
-                    "Record audio",
-                    "What your speakers play",
-                    toggler(c.record_audio)
-                        .on_toggle(|on| Msg::Flag(Flag::RecordAudio, on))
-                        .into(),
-                ),
-                number(
-                    config,
-                    "Frame rate",
-                    Num::Fps,
-                    c.fps as f32,
-                    24.0..=144.0,
-                    1.0,
-                ),
-            ],
-        );
-        let ocr = group(
-            "Text extraction",
-            surface,
-            vec![setting(
-                config,
-                "Languages",
-                "Tesseract codes, e.g. eng or eng+deu (install the language packs)",
-                self.input(config, Field::OcrLang),
-            )],
-        );
-        let snippet = |s: &'a str| text(s).size(12).font(font(&config.bar.font));
-        let keys = group(
-            "Keybinds",
-            surface,
-            vec![
-                text("Add any of these to your Hyprland config. Run a record command again (or click the timer in the bar) to stop.").size(13).color(muted).into(),
-                snippet("hl.bind(\"Print\", hl.dsp.exec_cmd(\"rune-shell screenshot selection\"))").into(),
-                snippet("hl.bind(\"SHIFT + Print\", hl.dsp.exec_cmd(\"rune-shell screenshot window\"))").into(),
-                snippet("hl.bind(\"CTRL + Print\", hl.dsp.exec_cmd(\"rune-shell screenshot screen\"))").into(),
-                snippet("hl.bind(\"SUPER + Print\", hl.dsp.exec_cmd(\"rune-shell record selection\"))").into(),
-                snippet("hl.bind(\"SUPER + SHIFT + T\", hl.dsp.exec_cmd(\"rune-shell ocr\"))").into(),
-            ],
-        );
-        column![shots, recording, ocr, keys].spacing(16).into()
-    }
-
-    fn launcher<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
-        let general = group(
-            "Launcher",
-            surface,
-            vec![setting(
-                config,
-                "Terminal",
-                "Runs terminal apps (btop, nvim...) as <terminal> -e <app>",
-                self.input(config, Field::Terminal),
-            )],
-        );
-        let muted: Color = config.colors.muted.into();
-        let snippet = |s: &'a str| text(s).size(13).font(font(&config.bar.font));
-        let keybinds = group(
-            "Keybinds",
-            surface,
-            vec![
-                text("Keybinds live in your Hyprland config. Add these lines, using any keys you like:")
-                    .size(13)
-                    .color(muted)
-                    .into(),
-                snippet("hl.bind(\"SUPER + SPACE\", hl.dsp.exec_cmd(\"rune-shell toggle launcher\"))").into(),
-                snippet("hl.bind(\"SUPER + SLASH\", hl.dsp.exec_cmd(\"rune-shell toggle keybinds\"))").into(),
-                snippet("hl.bind(\"SUPER + COMMA\", hl.dsp.exec_cmd(\"rune-shell toggle settings\"))").into(),
-                text("In the launcher: type to search apps and Steam games, start with : for emoji, or type a sum like 12*3 to calculate.")
-                    .size(13)
-                    .color(muted)
-                    .into(),
-            ],
-        );
-        column![general, keybinds].spacing(16).into()
-    }
-
-    fn input<'a>(&'a self, config: &Config, field: Field) -> Element<'a, Msg> {
-        let value = self
-            .drafts
-            .get(&field)
-            .cloned()
-            .unwrap_or_else(|| text_of(config, field));
-        let invalid = self.drafts.contains_key(&field);
-        text_input("", &value)
-            .on_input(move |v| Msg::Text(field, v))
-            .padding([6, 10])
-            .size(14)
-            .style(move |theme: &iced::Theme, status| {
-                let mut style = text_input::default(theme, status);
-                if invalid {
-                    style.border.color = theme.palette().danger;
-                }
-                style
-            })
-            .into()
-    }
 }
 
-fn animations(config: &Config, surface: Color) -> Element<'_, Msg> {
-    let a = &config.animations;
-    let toggle = |label, desc, flag, on| {
-        setting(
-            config,
-            label,
-            desc,
-            toggler(on).on_toggle(move |v| Msg::Flag(flag, v)).into(),
-        )
-    };
-    group(
-        "Motion",
-        surface,
-        vec![
-            toggle(
-                "Animations",
-                "Animate state changes across the shell",
-                Flag::AnimEnabled,
-                a.enabled,
-            ),
-            number(
-                config,
-                "Duration (ms)",
-                Num::AnimDuration,
-                a.duration_ms as f32,
-                50.0..=1000.0,
-                10.0,
-            ),
-            toggle(
-                "Reduce motion",
-                "Turn off all animation, whatever the settings above say",
-                Flag::ReduceMotion,
-                a.reduce_motion,
-            ),
-        ],
-    )
-}
-
-fn group<'a>(title: &'a str, surface: Color, rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
-    column![
-        text(title).size(13).style(|t: &iced::Theme| text::Style {
-            color: Some(t.palette().primary)
-        }),
-        container(column(rows).spacing(14))
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(surface.into()),
-                border: border::rounded(12),
-                ..Default::default()
-            }),
-    ]
-    .spacing(8)
-    .into()
-}
-
-fn setting<'a>(
-    config: &Config,
-    label: &'a str,
-    desc: &'a str,
-    control: Element<'a, Msg>,
-) -> Element<'a, Msg> {
-    let muted: Color = config.colors.muted.into();
-    let mut labels = column![text(label).size(14)].spacing(2);
-    if !desc.is_empty() {
-        labels = labels.push(text(desc).size(12).color(muted));
-    }
-    row![labels.width(Length::Fill), container(control).width(280)]
-        .spacing(16)
-        .align_y(Alignment::Center)
-        .into()
-}
-
-fn number<'a>(
-    config: &Config,
-    label: &'a str,
-    num: Num,
-    value: f32,
-    range: std::ops::RangeInclusive<f32>,
-    step: f32,
-) -> Element<'a, Msg> {
-    let shown = if step < 1.0 {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.0}")
-    };
-    setting(
-        config,
-        label,
-        "",
-        row![
-            slider(range, value, move |v| Msg::Num(num, v)).step(step),
-            text(shown).size(13).width(44).align_x(Alignment::End)
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .into(),
-    )
-}
-
-fn section_editor<'a>(
-    config: &'a Config,
-    label: &'a str,
-    section: Section,
-    list: &'a [Widget],
-) -> Element<'a, Msg> {
-    let fg: Color = config.colors.foreground.into();
-    let small = |glyph: &str, msg: Msg| {
-        button(icon(config, glyph, 16.0))
-            .padding(2)
-            .on_press(msg)
-            .style(move |_, status| button::Style {
-                background: matches!(status, button::Status::Hovered)
-                    .then(|| Color { a: 0.15, ..fg }.into()),
-                text_color: fg,
-                border: border::rounded(6),
-                ..Default::default()
-            })
-    };
-    let chips = row(list.iter().enumerate().map(|(i, w)| {
-        container(
-            row![
-                small("chevron_left", Msg::Move(section, i, -1)),
-                text(w.to_string()).size(13),
-                small("chevron_right", Msg::Move(section, i, 1)),
-                small("close", Msg::Remove(section, i)),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        )
-        .padding([4, 6])
-        .style(move |_| container::Style {
-            background: Some(Color { a: 0.08, ..fg }.into()),
-            border: border::rounded(8),
-            ..Default::default()
-        })
-        .into()
-    }))
-    .spacing(6)
-    .wrap();
-    let add = pick_list(&Widget::ALL[..], None::<Widget>, move |w| {
-        Msg::Add(section, w)
-    })
-    .placeholder("Add widget")
-    .text_size(13)
-    .padding([4, 8]);
-    column![
-        row![text(label).size(14).width(Length::Fill), add].align_y(Alignment::Center),
-        chips
-    ]
-    .spacing(8)
-    .into()
-}
+#[path = "gpui_settings.rs"]
+pub(crate) mod gpui_view;
 
 fn section_mut(config: &mut Config, section: Section) -> &mut Vec<Widget> {
     match section {
@@ -1786,7 +485,6 @@ fn set(slot: &mut String, value: &str) -> bool {
 fn set_num(config: &mut Config, num: Num, v: f32) {
     match num {
         Num::Height => config.bar.height = v.round() as u32,
-        Num::Radius => config.bar.radius = v,
         Num::Padding => config.bar.padding = v,
         Num::Spacing => config.bar.spacing = v,
         Num::FontSize => config.bar.font_size = v,
@@ -1795,11 +493,6 @@ fn set_num(config: &mut Config, num: Num, v: f32) {
         Num::AnimDuration => config.animations.duration_ms = v.round() as u64,
         Num::Fps => config.capture.fps = v.round() as u32,
     }
-}
-
-fn mix(a: Color, b: Color, t: f32) -> Color {
-    let l = |x: f32, y: f32| x + (y - x) * t;
-    Color::from_rgba(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b), l(a.a, b.a))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1814,6 +507,20 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_search_filters_groups() {
+        assert_eq!(visible_groups("").len(), 3);
+        assert_eq!(visible_groups("").iter().map(Vec::len).sum::<usize>(), 12);
+        assert_eq!(visible_groups("wi"), [vec![Page::Wifi]]);
+        assert_eq!(visible_groups("SOUND"), [vec![Page::Sound]]);
+        assert!(visible_groups("zzz").is_empty());
+        let mut config = Config::default();
+        let mut state = State::default();
+        state.update(&mut config, Msg::PageSearch("menu".into()));
+        assert_eq!(state.page_search, "menu");
+        assert_eq!(visible_groups(&state.page_search), [vec![Page::Bar]]);
+    }
+
     use super::*;
 
     #[test]
@@ -1893,6 +600,86 @@ mod tests {
             Some(Request::Bluetooth(BtCommand::Scan(false)))
         );
         assert_eq!(state.update(&mut config, Msg::Page(Page::Appearance)), None);
+    }
+
+    #[test]
+    fn secured_wifi_requires_password_then_clears_secret() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        let network = WifiNetwork {
+            ssid: "Office".into(),
+            strength: 90,
+            secured: true,
+            active: false,
+            saved: None,
+            device: "/device/1".into(),
+            ap: "/ap/1".into(),
+        };
+        state.wifi.push(network.clone());
+        assert_eq!(state.update(&mut config, Msg::WifiPick(0)), None);
+        assert_eq!(state.wifi_pick.as_deref(), Some("Office"));
+        state.update(&mut config, Msg::WifiPassword("short".into()));
+        assert_eq!(state.update(&mut config, Msg::WifiJoin), None);
+        assert!(state.wifi_pick.is_some());
+        state.update(&mut config, Msg::WifiPassword("long-password".into()));
+        assert_eq!(
+            state.update(&mut config, Msg::WifiJoin),
+            Some(Request::WifiConnect(network, Some("long-password".into())))
+        );
+        assert!(state.wifi_pick.is_none());
+        assert!(state.wifi_password.is_empty());
+        state.update(&mut config, Msg::WifiPick(0));
+        state.update(&mut config, Msg::WifiPassword("discard-me".into()));
+        state.update(&mut config, Msg::WifiCancel);
+        assert!(state.wifi_pick.is_none());
+        assert!(state.wifi_password.is_empty());
+    }
+
+    #[test]
+    fn calendar_links_validate_and_deduplicate() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(&mut config, Msg::NewLink("not a link".into()));
+        state.update(&mut config, Msg::AddLink);
+        assert!(config.calendar.urls.is_empty());
+        state.update(
+            &mut config,
+            Msg::NewLink(" webcal://calendar.example/private.ics ".into()),
+        );
+        state.update(&mut config, Msg::AddLink);
+        assert_eq!(
+            config.calendar.urls,
+            ["webcal://calendar.example/private.ics"]
+        );
+        assert!(state.new_link.is_empty());
+        state.update(
+            &mut config,
+            Msg::NewLink("webcal://calendar.example/private.ics".into()),
+        );
+        state.update(&mut config, Msg::AddLink);
+        assert_eq!(config.calendar.urls.len(), 1);
+        state.update(&mut config, Msg::RemoveLink(99));
+        assert_eq!(config.calendar.urls.len(), 1);
+        state.update(&mut config, Msg::RemoveLink(0));
+        assert!(config.calendar.urls.is_empty());
+    }
+
+    #[test]
+    fn ocr_and_clock_drafts_preserve_valid_config() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        let original = config.capture.ocr_lang.clone();
+        state.update(&mut config, Msg::Text(Field::OcrLang, "   ".into()));
+        assert_eq!(config.capture.ocr_lang, original);
+        assert_eq!(state.drafts[&Field::OcrLang], "   ");
+        state.update(&mut config, Msg::Text(Field::OcrLang, " eng+deu ".into()));
+        assert_eq!(config.capture.ocr_lang, "eng+deu");
+        assert!(!state.drafts.contains_key(&Field::OcrLang));
+        state.update(&mut config, Msg::Text(Field::ClockFormat, "%Q".into()));
+        assert_eq!(state.drafts[&Field::ClockFormat], "%Q");
+        state.update(&mut config, Msg::Text(Field::ClockFormat, "%H:%M".into()));
+        assert_eq!(config.clock.format, "%H:%M");
+        assert!(!state.drafts.contains_key(&Field::ClockFormat));
     }
 
     #[test]

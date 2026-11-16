@@ -570,3 +570,156 @@ mod tests {
         assert_eq!((nets[0].strength, nets[0].active), (80, true));
     }
 }
+
+/// Requests for the system controls (Wi-Fi, power, idle, night light).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Wifi(bool),
+    /// List networks now, scan, and list again once the scan has had time.
+    WifiScan,
+    WifiConnect(WifiNetwork, Option<String>),
+    WifiForget(String),
+    PowerProfile(String),
+    /// Hold off idle screen-off, lock and suspend.
+    KeepAwake(bool),
+    /// Warm screen colors (hyprsunset).
+    NightLight(bool),
+    /// A power-menu action; `Lock` runs `lock_command`.
+    Power {
+        action: PowerAction,
+        lock_command: String,
+    },
+}
+
+/// What [`Controls::handle`] reports back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reply {
+    WifiNetworks(Vec<WifiNetwork>),
+    /// Result of joining a network (empty on success).
+    WifiStatus(String),
+    /// Whether it is now on, or why it couldn't start.
+    KeepAwake(Result<bool, String>),
+    NightLight(Result<bool, String>),
+}
+
+/// Carries out [`Command`]s; holds what stays alive while a feature is on.
+#[derive(Clone)]
+pub struct Controls {
+    conn: Option<Connection>,
+    hypr: Option<crate::hyprland::Hyprland>,
+    /// Dropping the fd ends the idle inhibitor; the lock keeps toggles in order.
+    keep_awake: std::sync::Arc<tokio::sync::Mutex<Option<zbus::zvariant::OwnedFd>>>,
+    /// Dropping the child stops hyprsunset, which restores the colors.
+    night_light: std::sync::Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+}
+
+impl Controls {
+    pub fn new(conn: Option<Connection>, hypr: Option<crate::hyprland::Hyprland>) -> Self {
+        Self {
+            conn,
+            hypr,
+            keep_awake: Default::default(),
+            night_light: Default::default(),
+        }
+    }
+
+    pub async fn handle(
+        &self,
+        command: Command,
+        reply: impl Fn(Reply) + Send + Sync,
+    ) -> Result<(), String> {
+        let bus = || self.conn.as_ref().ok_or("no system bus");
+        let err = |e: zbus::Error| e.to_string();
+        match command {
+            Command::Wifi(on) => set_wifi(bus()?, on).await.map_err(err),
+            Command::WifiScan => {
+                let conn = bus()?;
+                reply(Reply::WifiNetworks(wifi_networks(conn).await.map_err(err)?));
+                if wifi_scan(conn).await.is_ok() {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    reply(Reply::WifiNetworks(wifi_networks(conn).await.map_err(err)?));
+                }
+                Ok(())
+            }
+            Command::WifiConnect(net, password) => {
+                let conn = bus()?;
+                let status = wifi_connect(conn, &net, password.as_deref()).await;
+                reply(Reply::WifiStatus(status.err().unwrap_or_default()));
+                reply(Reply::WifiNetworks(wifi_networks(conn).await.map_err(err)?));
+                Ok(())
+            }
+            Command::WifiForget(profile) => {
+                let conn = bus()?;
+                let forgot = wifi_forget(conn, &profile).await.map_err(err);
+                reply(Reply::WifiNetworks(wifi_networks(conn).await.map_err(err)?));
+                forgot
+            }
+            Command::PowerProfile(name) => set_power_profile(bus()?, &name).await.map_err(err),
+            Command::KeepAwake(on) => {
+                let mut held = self.keep_awake.lock().await;
+                drop(held.take());
+                let state = match (&self.conn, on) {
+                    (_, false) => Ok(false),
+                    (Some(conn), true) => match inhibit_idle(conn).await {
+                        Ok(fd) => {
+                            *held = Some(fd);
+                            Ok(true)
+                        }
+                        Err(e) => {
+                            tracing::warn!("keep awake: {e}");
+                            Err("Unavailable".to_owned())
+                        }
+                    },
+                    (None, true) => Err("Unavailable".to_owned()),
+                };
+                reply(Reply::KeepAwake(state));
+                Ok(())
+            }
+            Command::NightLight(on) => {
+                let mut held = self.night_light.lock().await;
+                drop(held.take());
+                let state = if on {
+                    tokio::process::Command::new("hyprsunset")
+                        .args(["-t", "4500"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()
+                        .map(|child| *held = Some(child))
+                        .map(|()| true)
+                        .map_err(|_| "Install hyprsunset".to_owned())
+                } else {
+                    Ok(false)
+                };
+                reply(Reply::NightLight(state));
+                Ok(())
+            }
+            Command::Power {
+                action,
+                lock_command,
+            } => self.power(action, &lock_command).await,
+        }
+    }
+
+    async fn power(&self, action: PowerAction, lock_command: &str) -> Result<(), String> {
+        let run = |program: &str, args: &[&str]| {
+            let mut cmd = tokio::process::Command::new(program);
+            cmd.args(args);
+            cmd
+        };
+        let status = match action {
+            PowerAction::Lock => run("sh", &["-c", lock_command]).status().await,
+            PowerAction::Logout => {
+                let hypr = self.hypr.as_ref().ok_or("logging out needs Hyprland")?;
+                return hypr
+                    .dispatch("hl.dsp.exit()")
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+            PowerAction::Suspend => run("systemctl", &["suspend"]).status().await,
+            PowerAction::Reboot => run("systemctl", &["reboot"]).status().await,
+            PowerAction::Shutdown => run("systemctl", &["poweroff"]).status().await,
+        };
+        status.map(drop).map_err(|e| format!("{action:?}: {e}"))
+    }
+}

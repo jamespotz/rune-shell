@@ -212,17 +212,13 @@ fn daemon() -> Result<()> {
             None
         }
     };
-    let lock_command = config.power.lock_command.clone();
+    let system_controls = system::Controls::new(system_conn.clone(), hypr.clone());
+    let audio_controls = audio::Controls::new(volume);
     let (recording, record_cmds) = capture::spawn_recorder(hypr.clone(), capture_conn.clone());
     forward(recording, ui.clone(), UiEvent::Recording);
     let actions_ui = ui.clone();
     let media_handle = media;
     tokio::spawn(async move {
-        // Held while on; dropping them turns the feature off.
-        let mut night_light: Option<tokio::process::Child> = None;
-        // Shared with the task that takes the inhibitor; the lock keeps toggles in order.
-        let keep_awake: std::sync::Arc<tokio::sync::Mutex<Option<zbus::zvariant::OwnedFd>>> =
-            Default::default();
         while let Some(action) = action_rx.recv().await {
             // Each action runs on its own task so a slow app scan never delays a click.
             let (hypr, icons, ui, media) = (
@@ -235,12 +231,24 @@ fn daemon() -> Result<()> {
                 Action::SaveConfig(config) => {
                     let _ = save.send(Some(*config)); // writer lives as long as the runtime
                 }
-                Action::FocusWorkspace(id) => {
-                    tokio::spawn(async move {
-                        let Some(h) = hypr else { return };
-                        if let Err(e) = h.focus_workspace(id).await {
-                            warn!("focus workspace {id}: {e}");
-                        }
+                Action::Hypr(cmd) => {
+                    let Some(h) = hypr else { continue };
+                    spawn_handled("hyprland", ui, async move |reply| {
+                        h.handle(cmd, reply).await
+                    });
+                }
+                Action::System(cmd) => {
+                    let c = system_controls.clone();
+                    spawn_handled("system", ui, async move |reply| c.handle(cmd, reply).await);
+                }
+                Action::Audio(cmd) => {
+                    let c = audio_controls.clone();
+                    spawn_handled("audio", ui, async move |reply| c.handle(cmd, reply).await);
+                }
+                Action::Clipboard(cmd) => {
+                    let Some(c) = clips.clone() else { continue };
+                    spawn_handled("clipboard", ui, async move |reply| {
+                        c.handle(cmd, reply).await
                     });
                 }
                 Action::Launch(command) => {
@@ -280,176 +288,8 @@ fn daemon() -> Result<()> {
                     calendar_urls.send_if_modified(|u| std::mem::replace(u, urls.clone()) != urls);
                 }
                 Action::RefreshCalendar => calendar_refresh.notify_one(),
-                Action::Wifi(on) => {
-                    let Some(sys) = system_conn.clone() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = system::set_wifi(&sys, on).await {
-                            warn!("wi-fi: {e}");
-                        }
-                    });
-                }
-                Action::NightLight(on) => {
-                    drop(night_light.take()); // kill_on_drop stops hyprsunset, which restores the colors
-                    let state = if on {
-                        tokio::process::Command::new("hyprsunset")
-                            .args(["-t", "4500"])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .kill_on_drop(true)
-                            .spawn()
-                            .map(|child| night_light = Some(child))
-                            .map(|()| true)
-                            .map_err(|_| "Install hyprsunset".to_owned())
-                    } else {
-                        Ok(false)
-                    };
-                    let _ = ui.send(UiEvent::NightLight(state));
-                }
-                Action::KeepAwake(on) => {
-                    // On its own task: awaiting logind here would hold up every later action.
-                    let (held, sys) = (keep_awake.clone(), system_conn.clone());
-                    tokio::spawn(async move {
-                        let mut held = held.lock().await;
-                        drop(held.take()); // closing the fd ends the inhibitor
-                        let state = match (sys, on) {
-                            (_, false) => Ok(false),
-                            (Some(sys), true) => system::inhibit_idle(&sys)
-                                .await
-                                .map(|fd| *held = Some(fd))
-                                .map(|()| true)
-                                .map_err(|e| {
-                                    warn!("keep awake: {e}");
-                                    "Unavailable".to_owned()
-                                }),
-                            (None, true) => Err("Unavailable".to_owned()),
-                        };
-                        let _ = ui.send(UiEvent::KeepAwake(state));
-                    });
-                }
-                Action::PowerProfile(name) => {
-                    let Some(sys) = system_conn.clone() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = system::set_power_profile(&sys, &name).await {
-                            warn!("power profile: {e}");
-                        }
-                    });
-                }
-                Action::WifiScan => {
-                    let Some(sys) = system_conn.clone() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        let list =
-                            async |ui: &UnboundedSender<UiEvent>| match system::wifi_networks(&sys)
-                                .await
-                            {
-                                Ok(nets) => drop(ui.send(UiEvent::WifiNetworks(nets))),
-                                Err(e) => warn!("wi-fi list: {e}"),
-                            };
-                        list(&ui).await;
-                        if system::wifi_scan(&sys).await.is_ok() {
-                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                            list(&ui).await;
-                        }
-                    });
-                }
-                Action::WifiConnect(net, password) => {
-                    let Some(sys) = system_conn.clone() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        let status = system::wifi_connect(&sys, &net, password.as_deref()).await;
-                        let _ = ui.send(UiEvent::WifiStatus(status.err().unwrap_or_default()));
-                        if let Ok(nets) = system::wifi_networks(&sys).await {
-                            let _ = ui.send(UiEvent::WifiNetworks(nets));
-                        }
-                    });
-                }
-                Action::WifiForget(profile) => {
-                    let Some(sys) = system_conn.clone() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = system::wifi_forget(&sys, &profile).await {
-                            warn!("wi-fi forget: {e}");
-                        }
-                        if let Ok(nets) = system::wifi_networks(&sys).await {
-                            let _ = ui.send(UiEvent::WifiNetworks(nets));
-                        }
-                    });
-                }
-                Action::Power(action) => {
-                    tokio::spawn(power(action, hypr, lock_command.clone()));
-                }
-                Action::LoadClipboard => {
-                    let Some(clips) = clips.clone() else { continue };
-                    tokio::spawn(send_clips(clips, ui));
-                }
-                Action::ClipboardFavorite(id) => {
-                    let Some(clips) = clips.clone() else { continue };
-                    tokio::spawn(async move {
-                        if let Err(e) = clips.toggle_favorite(id).await {
-                            warn!("clipboard: {e}");
-                        }
-                        send_clips(clips, ui).await;
-                    });
-                }
-                Action::ClipboardClear => {
-                    let Some(clips) = clips.clone() else { continue };
-                    tokio::spawn(async move {
-                        if let Err(e) = clips.clear().await {
-                            warn!("clipboard: {e}");
-                        }
-                        send_clips(clips, ui).await;
-                    });
-                }
-                Action::ClipboardCopy(id) => {
-                    let Some(clips) = clips.clone() else { continue };
-                    tokio::spawn(async move {
-                        if let Err(e) = clips.copy(id).await {
-                            warn!("clipboard: {e}");
-                        }
-                    });
-                }
-                Action::Audio(cmd) => {
-                    tokio::spawn(async move {
-                        if let Err(e) = audio::device_command(cmd).await {
-                            warn!("audio: {e}");
-                        }
-                    });
-                }
-                Action::Volume(change) => {
-                    let current = *volume.borrow();
-                    tokio::spawn(async move {
-                        if let Err(e) = audio::change_volume(change, current).await {
-                            warn!("volume: {e}");
-                        }
-                    });
-                }
-                Action::Brightness(change) => {
-                    tokio::spawn(async move {
-                        match audio::change_brightness(change).await {
-                            Ok(level) => {
-                                let _ = ui.send(UiEvent::Brightness(level));
-                            }
-                            Err(e) => warn!("brightness: {e}"),
-                        }
-                    });
-                }
                 Action::Record(cmd) => {
                     let _ = record_cmds.send(cmd); // the recorder lives as long as the runtime
-                }
-                Action::GameMode(on) => {
-                    tokio::spawn(async move {
-                        let Some(h) = hypr else { return };
-                        if let Err(e) = h.game_mode(on).await {
-                            warn!("game mode: {e}");
-                        }
-                    });
                 }
                 Action::Notif(cmd) => {
                     if let Some(cmds) = &notif_cmds {
@@ -512,17 +352,6 @@ fn daemon() -> Result<()> {
                         }
                     });
                 }
-                Action::LoadBinds => {
-                    tokio::spawn(async move {
-                        let Some(h) = hypr else { return };
-                        match h.binds().await {
-                            Ok(binds) => {
-                                let _ = ui.send(UiEvent::Binds(binds));
-                            }
-                            Err(e) => warn!("keybinds: {e}"),
-                        }
-                    });
-                }
             }
         }
     });
@@ -539,6 +368,26 @@ fn daemon() -> Result<()> {
     let result = rune_ui::run(config, ui_events, actions, hyprland);
     ipc::remove_socket();
     Ok(result?)
+}
+
+/// Runs a service command on its own task, so a slow one never delays the next
+/// action. Its replies go to the UI; a failure is logged under `what`.
+fn spawn_handled<R, E, F>(
+    what: &'static str,
+    ui: UnboundedSender<UiEvent>,
+    work: impl FnOnce(Box<dyn Fn(R) + Send + Sync>) -> F,
+) where
+    R: Into<UiEvent>,
+    E: std::fmt::Display,
+    F: Future<Output = std::result::Result<(), E>> + Send + 'static,
+{
+    let reply = Box::new(move |r: R| drop(ui.send(r.into())));
+    let task = work(reply);
+    tokio::spawn(async move {
+        if let Err(e) = task.await {
+            warn!("{what}: {e}");
+        }
+    });
 }
 
 /// Pushes every value of a service channel into the UI loop.
@@ -776,18 +625,6 @@ fn restore_themes() -> String {
     }
 }
 
-async fn send_clips(
-    clips: std::sync::Arc<clipboard::Clipboard<clipboard::Cliphist>>,
-    ui: UnboundedSender<UiEvent>,
-) {
-    match clips.list().await {
-        Ok(entries) => {
-            let _ = ui.send(UiEvent::Clipboard(entries));
-        }
-        Err(e) => warn!("clipboard: {e}"),
-    }
-}
-
 /// Sends the folder listing right away, then again as thumbnails get made.
 async fn load_wallpapers(dir: PathBuf, ui: UnboundedSender<UiEvent>) {
     let Ok(mut list) = tokio::task::spawn_blocking(move || wallpaper::list(&dir)).await else {
@@ -819,9 +656,16 @@ async fn load_wallpapers(dir: PathBuf, ui: UnboundedSender<UiEvent>) {
 /// Hyprland layer rule (named, so re-sending it updates rather than duplicates).
 fn blur_rule(on: bool) -> String {
     format!(
-        "hl.layer_rule({{ name = \"rune-blur\", match = {{ namespace = \"^({}|{})$\" }}, blur = {on}, ignore_alpha = 0.3 }})",
-        Surface::Bar(String::new()).namespace(),
-        Surface::Settings.namespace(),
+        "hl.layer_rule({{ name = \"rune-blur\", match = {{ namespace = \"^({})$\" }}, blur = {on}, ignore_alpha = 0.3 }})",
+        [
+            Surface::Bar(String::new()),
+            Surface::Settings,
+            Surface::Panel,
+            Surface::Popups,
+            Surface::Osd,
+        ]
+        .map(|surface| surface.namespace())
+        .join("|"),
     )
 }
 
@@ -863,41 +707,19 @@ async fn tray_request(
 
 pub(crate) use rune_ui::capture_options;
 
-/// Runs a power-menu action.
-async fn power(action: system::PowerAction, hypr: Option<Hyprland>, lock_command: String) {
-    use system::PowerAction as P;
-    let run = |program: &str, args: &[&str]| {
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args);
-        cmd
-    };
-    let result = match action {
-        P::Lock => run("sh", &["-c", &lock_command])
-            .status()
-            .await
-            .map(drop)
-            .map_err(|e| e.to_string()),
-        P::Logout => match hypr {
-            Some(h) => h.dispatch("hl.dsp.exit()").await.map_err(|e| e.to_string()),
-            None => Err("logging out needs Hyprland".into()),
-        },
-        P::Suspend => run("systemctl", &["suspend"])
-            .status()
-            .await
-            .map(drop)
-            .map_err(|e| e.to_string()),
-        P::Reboot => run("systemctl", &["reboot"])
-            .status()
-            .await
-            .map(drop)
-            .map_err(|e| e.to_string()),
-        P::Shutdown => run("systemctl", &["poweroff"])
-            .status()
-            .await
-            .map(drop)
-            .map_err(|e| e.to_string()),
-    };
-    if let Err(e) = result {
-        warn!("power {action:?}: {e}");
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn blur_rule_covers_every_frosted_surface() {
+        let rule = super::blur_rule(true);
+        for namespace in [
+            "rune-bar",
+            "rune-settings",
+            "rune-panel",
+            "rune-notifications",
+            "rune-osd",
+        ] {
+            assert!(rule.contains(namespace), "{namespace}");
+        }
     }
 }

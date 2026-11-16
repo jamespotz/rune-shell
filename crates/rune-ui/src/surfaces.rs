@@ -1,119 +1,85 @@
-//! Every layer surface Rune shows, by kind: one place that opens, resizes and
-//! closes them, maps window ids back to kinds, and names their namespaces.
-
-use crate::Message;
-use iced::{Task, window};
-use iced_layershell::reexport::NewLayerShellSettings;
+//! Toolkit-independent desired shell surfaces.
+pub use crate::surface::Surface;
+use crate::{Message, backend::Effects};
 use std::collections::HashMap;
-use window::Id;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Surface {
-    /// The notch bar on one monitor ("" = the compositor's choice).
-    Bar(String),
-    Panel,
-    /// Transparent, full screen, under the panel: a click on it closes the panel.
-    Catcher,
-    /// Notification popups.
-    Popups,
-    Osd,
-    Settings,
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum OutputOption {
+    #[default]
+    Active,
+    OutputName(String),
 }
-
-impl Surface {
-    /// Layer namespace, for compositor rules (`hl.layer_rule`).
-    pub fn namespace(&self) -> &'static str {
-        match self {
-            Self::Bar(_) => "rune-bar",
-            Self::Panel => "rune-panel",
-            Self::Catcher => "rune-catcher",
-            Self::Popups => "rune-notifications",
-            Self::Osd => "rune-osd",
-            Self::Settings => "rune-settings",
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct WindowSpec {
+    pub size: Option<(u32, u32)>,
+    pub margin: Option<(i32, i32, i32, i32)>,
+    pub output_option: OutputOption,
+    pub grabs_keyboard: bool,
 }
-
 #[derive(Debug, Default)]
 pub struct Surfaces {
-    ids: HashMap<Surface, Id>,
+    pub(crate) desired: HashMap<Surface, WindowSpec>,
 }
-
 impl Surfaces {
-    /// Opens `surface` unless it already is; the namespace is filled in here.
-    pub fn open(&mut self, surface: Surface, settings: NewLayerShellSettings) -> Task<Message> {
-        if self.ids.contains_key(&surface) {
-            return Task::none();
+    pub(crate) fn open(&mut self, surface: Surface, spec: WindowSpec) -> Effects<Message> {
+        self.desired.entry(surface).or_insert(spec);
+        Effects::none()
+    }
+    pub(crate) fn close(&mut self, surface: &Surface) -> Effects<Message> {
+        self.desired.remove(surface);
+        Effects::none()
+    }
+    pub(crate) fn resize(&mut self, surface: &Surface, size: (u32, u32)) -> Effects<Message> {
+        if let Some(spec) = self.desired.get_mut(surface) {
+            spec.size = Some(size);
         }
-        let id = Id::unique();
-        let settings = NewLayerShellSettings {
-            namespace: Some(surface.namespace().to_owned()),
-            ..settings
-        };
-        self.ids.insert(surface, id);
-        Task::done(Message::NewLayerShell { settings, id })
+        Effects::none()
     }
-
-    pub fn close(&mut self, surface: &Surface) -> Task<Message> {
-        self.ids
-            .remove(surface)
-            .map_or_else(Task::none, window::close)
+    pub(crate) fn margin(
+        &mut self,
+        surface: &Surface,
+        margin: (i32, i32, i32, i32),
+    ) -> Effects<Message> {
+        if let Some(spec) = self.desired.get_mut(surface) {
+            spec.margin = Some(margin);
+        }
+        Effects::none()
     }
-
-    pub fn resize(&self, surface: &Surface, size: (u32, u32)) -> Task<Message> {
-        self.with(surface, |id| Message::SizeChange { id, size })
-    }
-
-    /// Margin: top, right, bottom, left.
-    pub fn margin(&self, surface: &Surface, margin: (i32, i32, i32, i32)) -> Task<Message> {
-        self.with(surface, |id| Message::MarginChange { id, margin })
-    }
-
     pub fn is_open(&self, surface: &Surface) -> bool {
-        self.ids.contains_key(surface)
+        self.desired.contains_key(surface)
     }
-
-    /// Which surface a window id belongs to.
-    pub fn kind(&self, id: Id) -> Option<&Surface> {
-        self.ids.iter().find(|(_, i)| **i == id).map(|(s, _)| s)
-    }
-
-    /// Monitors that have a bar.
     pub fn bars(&self) -> Vec<String> {
-        self.ids
+        self.desired
             .keys()
-            .filter_map(|s| match s {
-                Surface::Bar(m) => Some(m.clone()),
-                _ => None,
+            .filter_map(|s| {
+                if let Surface::Bar(m) = s {
+                    Some(m.clone())
+                } else {
+                    None
+                }
             })
             .collect()
     }
-
-    fn with(&self, surface: &Surface, msg: impl FnOnce(Id) -> Message) -> Task<Message> {
-        self.ids
-            .get(surface)
-            .map_or_else(Task::none, |id| Task::done(msg(*id)))
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn tracks_ids_by_kind() {
-        let mut s = Surfaces::default();
-        let _ = s.open(
+    fn desired_specs_follow_open_resize_and_close() {
+        let mut surfaces = Surfaces::default();
+        surfaces.open(
             Surface::Bar("DP-1".into()),
-            NewLayerShellSettings::default(),
+            WindowSpec {
+                size: Some((0, 32)),
+                ..Default::default()
+            },
         );
-        let _ = s.open(Surface::Panel, NewLayerShellSettings::default());
-        assert!(s.is_open(&Surface::Panel));
-        assert_eq!(s.bars(), ["DP-1"]);
-        let id = s.ids[&Surface::Panel];
-        assert_eq!(s.kind(id), Some(&Surface::Panel));
-        let _ = s.close(&Surface::Panel);
-        assert!(!s.is_open(&Surface::Panel));
-        assert_eq!(s.kind(id), None);
+        surfaces.open(Surface::Panel, WindowSpec::default());
+        surfaces.resize(&Surface::Panel, (480, 300));
+        surfaces.margin(&Surface::Panel, (8, 0, 0, 0));
+        assert_eq!(surfaces.bars(), ["DP-1"]);
+        assert_eq!(surfaces.desired[&Surface::Panel].size, Some((480, 300)));
+        assert_eq!(surfaces.desired[&Surface::Panel].margin, Some((8, 0, 0, 0)));
+        surfaces.close(&Surface::Panel);
+        assert!(!surfaces.is_open(&Surface::Panel));
     }
 }

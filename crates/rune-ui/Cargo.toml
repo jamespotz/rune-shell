@@ -4,14 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+unicode-segmentation = "1"
+uuid = { version = "1", features = ["v5"] }
+futures = "0.3"
+anyhow = "1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# Software rendering only (tiny-skia): a fraction of the GPU path's memory. Transparency
-# relies on the patched softbuffer in vendor/ (see the workspace Cargo.toml).
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "canvas", "thread-pool", "crisp", "wayland", "image", "svg"] }
-iced_layershell = { version = "0.19", default-features = false }
-# shortcut: iced_layershell 0.19.1 fails to compile against winit-core beta.4 (non-exhaustive
-# match in iced_exdevtools). Drop this pin once iced_layershell releases a fix.
-winit-core = "=0.31.0-beta.2"
 rune-services = { version = "0.1.0", path = "../rune-services" }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2"
@@ -20,3 +18,7 @@ toml = "1"
 tracing = "0.1.44"
 nucleo-matcher = "0.3"
 emojis = "0.9"
+
+# Immutable upstream revision with native Wayland layer-shell support.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "917559da35dd4d626205da705b071c800c9c2553", default-features = false, features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "917559da35dd4d626205da705b071c800c9c2553", default-features = false, features = ["wayland"] }

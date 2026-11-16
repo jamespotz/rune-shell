@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::Command,
+    process::Command as Process,
     sync::watch,
 };
 use tracing::info;
@@ -81,7 +81,7 @@ pub fn spawn_volume() -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devic
     let (dev_tx, dev_rx) = watch::channel(Devices::default());
     tokio::spawn(async move {
         loop {
-            let child = Command::new("pactl")
+            let child = Process::new("pactl")
                 .arg("subscribe")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -142,12 +142,12 @@ fn replace<T: PartialEq>(slot: &mut T, new: T) -> bool {
 }
 
 async fn read_volume() -> Option<Volume> {
-    let vol = Command::new("pactl")
+    let vol = Process::new("pactl")
         .args(["get-sink-volume", "@DEFAULT_SINK@"])
         .output()
         .await
         .ok()?;
-    let mute = Command::new("pactl")
+    let mute = Process::new("pactl")
         .args(["get-sink-mute", "@DEFAULT_SINK@"])
         .output()
         .await
@@ -184,7 +184,7 @@ fn changes_devices(line: &str) -> bool {
 
 async fn read_devices() -> Devices {
     let run = async |args: &[&str]| {
-        Command::new("pactl")
+        Process::new("pactl")
             .args(args)
             .output()
             .await
@@ -232,7 +232,7 @@ pub async fn device_command(cmd: DeviceCommand) -> Result<(), String> {
         DeviceCommand::SetDefault(false, name) => vec!["set-default-source", name.as_str()],
         DeviceCommand::ToggleMicMute => vec!["set-source-mute", "@DEFAULT_SOURCE@", "toggle"],
     };
-    let ok = Command::new("pactl")
+    let ok = Process::new("pactl")
         .args(&args)
         .status()
         .await
@@ -273,7 +273,7 @@ pub async fn change_volume(change: Change, current: Option<Volume>) -> Result<()
             format!("-{step}%"),
         ],
     };
-    let ok = Command::new("pactl")
+    let ok = Process::new("pactl")
         .args(&args)
         .status()
         .await
@@ -281,7 +281,7 @@ pub async fn change_volume(change: Change, current: Option<Volume>) -> Result<()
         .success();
     // Raising the volume also unmutes, as people expect.
     if ok && matches!(change, Change::Up(_)) && current.is_some_and(|v| v.muted) {
-        let _ = Command::new("pactl")
+        let _ = Process::new("pactl")
             .args(["set-sink-mute", "@DEFAULT_SINK@", "0"])
             .status()
             .await;
@@ -295,7 +295,7 @@ pub async fn change_volume(change: Change, current: Option<Volume>) -> Result<()
 
 /// Backlight brightness in percent, or `None` without a backlight (desktops).
 pub async fn read_brightness() -> Option<u8> {
-    let out = Command::new("brightnessctl")
+    let out = Process::new("brightnessctl")
         .args(["-m", "-c", "backlight"])
         .output()
         .await
@@ -326,7 +326,7 @@ pub async fn change_brightness(change: Change) -> Result<Option<u8>, String> {
         Change::ToggleMute => return Ok(read_brightness().await),
     };
     // Never all the way to black: 1% stays visible.
-    let ok = Command::new("brightnessctl")
+    let ok = Process::new("brightnessctl")
         .args(["-c", "backlight", "-n", "1%", "set", &value])
         .stdout(Stdio::null())
         .status()
@@ -393,5 +393,52 @@ mod tests {
         assert_eq!(Change::parse(&["mute"]), Some(Change::ToggleMute));
         assert_eq!(Change::parse(&["louder"]), None);
         assert_eq!(Change::parse(&["up", "lots"]), None);
+    }
+}
+
+/// Requests for volume, audio devices and brightness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Volume(Change),
+    /// Default output/input and microphone mute.
+    Device(DeviceCommand),
+    Brightness(Change),
+}
+
+/// What [`Controls::handle`] reports back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// New backlight level after a change.
+    Brightness(Option<u8>),
+}
+
+/// Carries out [`Command`]s.
+#[derive(Clone)]
+pub struct Controls {
+    volume: watch::Receiver<Option<Volume>>,
+}
+
+impl Controls {
+    /// `volume` is the current volume, which relative changes start from.
+    pub fn new(volume: watch::Receiver<Option<Volume>>) -> Self {
+        Self { volume }
+    }
+
+    pub async fn handle(
+        &self,
+        command: Command,
+        reply: impl Fn(Reply) + Send + Sync,
+    ) -> Result<(), String> {
+        match command {
+            Command::Volume(change) => {
+                let current = *self.volume.borrow();
+                change_volume(change, current).await
+            }
+            Command::Device(cmd) => device_command(cmd).await,
+            Command::Brightness(change) => {
+                reply(Reply::Brightness(change_brightness(change).await?));
+                Ok(())
+            }
+        }
     }
 }

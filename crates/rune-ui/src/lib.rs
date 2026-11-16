@@ -1,13 +1,28 @@
-//! Rune Shell's UI, built on iced + iced_layershell.
+//! Rune Shell GPUI state and application lifecycle.
 //!
 //! One `rune-bar` layer surface (the notch) per Hyprland monitor, plus an
 //! on-demand `rune-settings` overlay. The notch on the focused monitor can
 //! expand into the launcher or keybind cheat sheet. The UI never does I/O:
 //! it receives [`UiEvent`]s from the daemon and sends [`Action`]s back.
 
+mod animation;
+mod backend;
+mod gpui_images;
+mod gpui_notch;
+mod gpui_overlays;
+mod gpui_panels;
+mod gpui_surfaces;
+mod gpui_widgets;
+mod outputs;
+mod protocol;
+#[cfg(test)]
+mod runtime;
+pub use protocol::{Action, TrayRequest, UiEvent};
+
 mod bt;
 mod calendar;
 pub mod config;
+mod controls;
 mod launcher;
 mod media;
 mod notch;
@@ -15,219 +30,51 @@ mod notify;
 mod panel;
 mod quick;
 mod settings;
+mod state;
 mod status;
+mod surface;
 mod surfaces;
 mod tray;
 mod weather;
 
-use chrono::{DateTime, Datelike, Local};
+use backend::Effects;
+use chrono::{Datelike, Local};
 pub use config::Config;
-use iced::{
-    Color, Element, Event, Subscription, Task, Theme, event,
-    futures::stream,
-    keyboard::{self, key::Named},
-    time::Instant,
-    widget::text,
-    window::{self, Id},
-};
-use iced_layershell::{
-    build_pattern::daemon,
-    reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption},
-    settings::{LayerShellSettings, Settings, StartMode},
-    to_layer_message,
-};
 use launcher::{Kind, Launcher, Outcome};
 pub use panel::Panel;
 use panel::Panels;
 use rune_services::{
-    apps::App as DesktopApp,
-    audio, bluetooth, calendar as cal, capture, clipboard,
-    hyprland::{Bind, HyprState},
-    media::{Control, Media},
+    audio, bluetooth, capture, clipboard, hyprland,
+    media::Control,
     notifications::{self, Image},
-    system::{Battery, Network, PowerAction, PowerProfile, WifiNetwork},
-    tray::{MenuEntry, TrayItem},
-    weather::{Location, Query as WeatherQuery, Weather},
+    system::{self, Network, PowerAction, PowerProfile},
+    tray::MenuEntry,
+    weather::Query as WeatherQuery,
 };
-use std::{collections::HashMap, sync::Mutex};
+use std::time::Instant;
+use std::{collections::HashMap, sync::Arc};
 pub use surfaces::Surface;
 use surfaces::Surfaces;
+use surfaces::{OutputOption, WindowSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-
-/// Something the user asked for; the daemon carries it out.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    FocusWorkspace(i32),
-    /// Write this config to `config.toml` (sent by the settings window).
-    SaveConfig(Box<Config>),
-    /// Run a shell command, detached from the shell.
-    Launch(String),
-    /// Rescan applications; answered with [`UiEvent::Apps`].
-    LoadApps,
-    /// Fetch Hyprland keybinds; answered with [`UiEvent::Binds`].
-    LoadBinds,
-    /// Compute the theme in `config.theme`, write `[colors]` and the enabled apps' files;
-    /// answered with [`UiEvent::Config`] and [`UiEvent::Status`].
-    ApplyTheme(Box<Config>),
-    /// Put back every file the theme engine changed.
-    RestoreThemes,
-    /// List a wallpaper folder; answered with [`UiEvent::Wallpapers`] (repeatedly, as thumbnails appear).
-    LoadWallpapers(std::path::PathBuf),
-    SetWallpaper(std::path::PathBuf),
-    /// Turn Hyprland blur behind Rune's surfaces on or off.
-    Blur(bool),
-    /// Send a transport control to the current media player.
-    Media(Control),
-    /// Notification center and popup requests.
-    Notif(notifications::Command),
-    Tray(TrayRequest),
-    /// Where to fetch weather for (`None` turns it off).
-    Weather(Option<WeatherQuery>),
-    RefreshWeather,
-    /// Search places; answered with [`UiEvent::Geocoded`].
-    Geocode(String),
-    Bluetooth(bluetooth::Command),
-    Screenshot(capture::Target, capture::Options),
-    /// Extract text from a selected region.
-    Ocr(capture::Options),
-    Record(capture::RecordCommand),
-    GameMode(bool),
-    Volume(audio::Change),
-    /// Default output/input and microphone mute.
-    Audio(audio::DeviceCommand),
-    Brightness(audio::Change),
-    Wifi(bool),
-    /// Warm screen colors (hyprsunset).
-    NightLight(bool),
-    /// Hold off idle screen-off, lock and suspend.
-    KeepAwake(bool),
-    PowerProfile(String),
-    /// List Wi-Fi networks and ask for a fresh scan; answered with [`UiEvent::WifiNetworks`].
-    WifiScan,
-    WifiConnect(WifiNetwork, Option<String>),
-    WifiForget(String),
-    Power(PowerAction),
-    /// Fetch clipboard history; answered with [`UiEvent::Clipboard`].
-    LoadClipboard,
-    /// Put a history entry (cliphist id) back on the clipboard.
-    ClipboardCopy(clipboard::Id),
-    /// Favorite or unfavorite an entry; answered with [`UiEvent::Clipboard`].
-    ClipboardFavorite(clipboard::Id),
-    /// Wipe history (not favorites); answered with [`UiEvent::Clipboard`].
-    ClipboardClear,
-    /// Calendar links to follow.
-    Calendar(Vec<String>),
-    RefreshCalendar,
-}
-
-/// Input from the daemon.
-#[derive(Debug, Clone)]
-pub enum UiEvent {
-    Hypr(HyprState),
-    Clock(DateTime<Local>),
-    Config(Box<Config>),
-    Apps(Vec<DesktopApp>),
-    Binds(Vec<Bind>),
-    Media(Option<Media>),
-    /// Visualizer bars, 0..=100 each; empty while nothing plays.
-    Bars(Vec<u8>),
-    /// Open, switch to, or close a panel.
-    Toggle(Panel),
-    ToggleSettings,
-    /// Open settings on the Bluetooth page.
-    OpenBluetooth,
-    Weather(Option<Weather>),
-    Bluetooth(bluetooth::State),
-    Geocoded(Result<Vec<Location>, String>),
-    Recording(Option<capture::Recording>),
-    Calendar(cal::State),
-    Volume(Option<audio::Volume>),
-    AudioDevices(audio::Devices),
-    /// New backlight level after a brightness change (shows the OSD).
-    Brightness(Option<u8>),
-    Network(Option<Network>),
-    WifiNetworks(Vec<WifiNetwork>),
-    /// Whether night light / keep awake is now on, or why it couldn't start.
-    NightLight(Result<bool, String>),
-    KeepAwake(Result<bool, String>),
-    PowerProfile(Option<PowerProfile>),
-    /// Result of joining a network (empty on success).
-    WifiStatus(String),
-    Battery(Option<Battery>),
-    Stats(Option<rune_services::stats::Stats>),
-    Clipboard(Vec<clipboard::Entry>),
-    /// Turn game mode on, off, or (`None`) toggle it.
-    GameMode(Option<bool>),
-    Notifications(notifications::State),
-    Tray(Vec<TrayItem>),
-    /// An app's tray menu (item key, entries), answering [`TrayRequest::LoadMenu`].
-    TrayMenu(String, Vec<MenuEntry>),
-    Wallpapers(Vec<rune_services::wallpaper::Wallpaper>),
-    /// Outcome of a theme or wallpaper job, shown in settings.
-    Status(String),
-    Quit,
-}
 
 /// Fatal UI errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(transparent)]
-    Iced(#[from] iced_layershell::Error),
+    #[error("GPUI could not open a shell surface: {0}")]
+    Window(String),
 }
 
-/// Runs the UI on the calling thread until [`UiEvent::Quit`].
-/// `hyprland` says whether monitor info will arrive; without it a single notch
-/// opens on whichever output the compositor picks.
+/// Runs the GPUI shell on the calling thread until Quit or channel closure.
 pub fn run(
     config: Config,
     events: UnboundedReceiver<UiEvent>,
     actions: UnboundedSender<Action>,
     hyprland: bool,
 ) -> Result<(), Error> {
-    let boot = Mutex::new(Some((config, events, actions)));
-    daemon(
-        move || {
-            // iced calls boot exactly once, so the inputs are always still there.
-            #[allow(clippy::unwrap_used)]
-            let (config, events, actions) = boot.lock().unwrap().take().unwrap();
-            App::new(config, events, actions, hyprland)
-        },
-        || "rune-shell".to_owned(),
-        App::update,
-        App::view,
-    )
-    .subscription(App::subscription)
-    .theme(App::theme)
-    .style(|_, theme: &Theme| iced::theme::Style {
-        background_color: Color::TRANSPARENT,
-        text_color: theme.palette().text,
-    })
-    .settings(Settings {
-        layer_settings: LayerShellSettings {
-            start_mode: StartMode::Background,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .run()?;
-    Ok(())
+    backend::run(config, events, actions, hyprland)
 }
 
-/// Tray requests for the daemon; items are named by [`TrayItem::key`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrayRequest {
-    Activate {
-        key: String,
-        secondary: bool,
-    },
-    /// For apps without a dbusmenu: ask them to show their own menu.
-    ContextMenu(String),
-    /// Fetch the menu; answered with [`UiEvent::TrayMenu`].
-    LoadMenu(String),
-    Click(String, i32),
-}
-
-#[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     Ui(UiEvent),
@@ -238,17 +85,14 @@ pub(crate) enum Message {
     /// Open, switch to, or close a panel (a bar widget was clicked).
     Toggle(Panel),
     MediaControl(Control),
-    /// Open settings on the Bluetooth page.
-    OpenBluetooth,
-    OpenWifi,
+    OpenSettingsPage(settings::Page),
+    WifiDropdownPick(usize),
     StopRecording,
     GameModeOff,
     VolumeMute,
     VolumeStep(i8),
-    /// The notch content's natural width on a monitor.
-    NotchWidth(String, f32),
     /// Natural size of the open panel's content.
-    PanelSize(iced::Size),
+    PanelSize(gpui::Size<gpui::Pixels>),
     /// Pointer over a monitor's bar (monitor, x), or `None` once it leaves.
     BarCursor(Option<(String, f32)>),
     /// A monitor's bar width (= the monitor's logical width).
@@ -289,9 +133,9 @@ pub(crate) enum Message {
 }
 
 pub(crate) struct App {
+    pub snapshot: state::Snapshot,
     pub config: Config,
-    pub hypr: HyprState,
-    pub now: DateTime<Local>,
+    pub images: gpui_images::Images,
     /// Frame clock for animations.
     pub instant: Instant,
     actions: UnboundedSender<Action>,
@@ -300,52 +144,34 @@ pub(crate) struct App {
     pub panels: Panels,
     settings_ui: settings::State,
     /// Active-workspace pill animations, per (monitor, workspace).
-    pub pills: HashMap<(String, i32), iced::Animation<bool>>,
+    pub pills: HashMap<(String, i32), animation::Animation<bool>>,
     pub launcher: Launcher,
-    pub media: Option<Media>,
     /// Decoded once per track, not per frame.
-    pub art: Option<iced::widget::image::Handle>,
-    pub bars: Vec<u8>,
-    pub notif: notifications::State,
+    pub art: Option<Arc<[u8]>>,
     /// Decoded once per notification, not per frame.
-    pub notif_images: HashMap<u32, iced::widget::image::Handle>,
+    pub notif_images: HashMap<u32, Image>,
     /// Height of the popup surface, while there are popups.
     popup_size: u32,
     popup_hover: bool,
-    pub popup_expand: iced::Animation<bool>,
-    pub tray: Vec<TrayItem>,
-    pub weather: Option<Weather>,
+    pub popup_expand: animation::Animation<bool>,
     weather_at: Option<Instant>,
-    pub bt: bluetooth::State,
-    pub recording: Option<capture::Recording>,
-    pub volume: Option<audio::Volume>,
-    pub audio: audio::Devices,
-    pub night_light: Result<bool, String>,
-    pub keep_awake: Result<bool, String>,
-    pub power_profile: Option<PowerProfile>,
-    pub stats: Option<rune_services::stats::Stats>,
-    pub network: Option<Network>,
-    pub battery: Option<Battery>,
     /// Per monitor: notch width animating from `.0` to `.1`.
-    notch_widths: HashMap<String, (f32, f32, iced::Animation<bool>)>,
     /// Keep frames running until then so the notch can measure its new content.
     measure_until: Instant,
     /// Where the position slider is being dragged to, in seconds.
     pub seek: Option<f32>,
-    pub brightness: Option<u8>,
     /// A power action waiting for its confirming second click.
     pub power_confirm: Option<PowerAction>,
     /// What the OSD shows and until when.
     pub osd: Option<status::Osd>,
     osd_until: Instant,
-    pub calendar: cal::State,
     /// First day of the month shown, and the selected day.
     pub cal_month: chrono::NaiveDate,
     pub cal_day: chrono::NaiveDate,
     pub game_mode: bool,
     /// Do-not-disturb before game mode turned it on.
     dnd_before_game: Option<bool>,
-    pub tray_images: HashMap<String, iced::widget::image::Handle>,
+    pub tray_images: HashMap<String, Image>,
     /// The tray item whose menu is open, and its entries once loaded.
     tray_menu_for: Option<String>,
     pub tray_menu: Option<(String, Vec<MenuEntry>)>,
@@ -354,14 +180,14 @@ pub(crate) struct App {
 impl App {
     fn new(
         config: Config,
-        events: UnboundedReceiver<UiEvent>,
+        _events: UnboundedReceiver<UiEvent>,
         actions: UnboundedSender<Action>,
         hyprland: bool,
-    ) -> (Self, Task<Message>) {
+    ) -> (Self, Effects<Message>) {
         let mut app = Self {
+            snapshot: state::Snapshot::default(),
+            images: gpui_images::Images::default(),
             config,
-            hypr: HyprState::default(),
-            now: Local::now(),
             instant: Instant::now(),
             actions,
             hyprland,
@@ -370,35 +196,17 @@ impl App {
             settings_ui: settings::State::default(),
             pills: HashMap::new(),
             launcher: Launcher::default(),
-            media: None,
             art: None,
-            bars: Vec::new(),
-            notif: notifications::State::default(),
             notif_images: HashMap::new(),
             popup_size: 0,
             popup_hover: false,
-            popup_expand: iced::Animation::new(false),
-            tray: Vec::new(),
-            weather: None,
+            popup_expand: animation::Animation::new(false),
             weather_at: None,
-            bt: bluetooth::State::default(),
-            recording: None,
-            volume: None,
-            audio: audio::Devices::default(),
-            night_light: Ok(false),
-            keep_awake: Ok(false),
-            power_profile: None,
-            stats: None,
-            network: None,
-            battery: None,
-            notch_widths: HashMap::new(),
             measure_until: Instant::now(),
             seek: None,
-            brightness: None,
             power_confirm: None,
             osd: None,
             osd_until: Instant::now(),
-            calendar: cal::State::default(),
             cal_month: Local::now().date_naive().with_day(1).unwrap_or_default(),
             cal_day: Local::now().date_naive(),
             game_mode: false,
@@ -410,24 +218,20 @@ impl App {
         app.send(Action::LoadApps); // warm the list so the first open is instant
         app.send(Action::Weather(weather_query(&app.config)));
         app.send(Action::Calendar(app.config.calendar.urls.clone()));
-        let events = stream::unfold(
-            events,
-            |mut rx| async move { rx.recv().await.map(|e| (e, rx)) },
-        );
         let sync = app.sync_notches();
-        (app, Task::batch([Task::run(events, Message::Ui), sync]))
+        (app, sync)
     }
 
     fn send(&self, action: Action) {
         let _ = self.actions.send(action); // fails only while exiting
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
+    fn update(&mut self, message: Message) -> Effects<Message> {
         // The notch's width sensor only measures on frames, and frames only run while
         // something animates; so after anything that can change the bar, run them briefly.
         let reshapes = match &message {
             Message::Ui(UiEvent::Clock(now)) => {
-                now.format("%H%M").to_string() != self.now.format("%H%M").to_string()
+                now.format("%H%M").to_string() != self.snapshot.now.format("%H%M").to_string()
             }
             Message::Ui(
                 UiEvent::Hypr(_)
@@ -452,41 +256,40 @@ impl App {
         }
         match message {
             Message::Ui(UiEvent::Hypr(state)) => {
-                self.hypr = state;
+                self.snapshot.hypr = state;
                 self.instant = Instant::now();
                 self.animate_pills();
                 self.sync_notches()
             }
             Message::Ui(UiEvent::Clock(now)) => {
-                self.now = now;
-                Task::none()
+                self.snapshot.now = now;
+                Effects::none()
             }
             Message::Ui(UiEvent::Config(config)) => self.set_config(*config),
             Message::Ui(UiEvent::Apps(apps)) => {
                 self.launcher.set_apps(apps);
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::Media(media)) => {
-                let old_art = self.media.as_ref().and_then(|m| m.art.clone());
+                let old_art = self.snapshot.media.as_ref().and_then(|m| m.art.clone());
                 let new_art = media.as_ref().and_then(|m| m.art.clone());
                 if old_art != new_art {
-                    self.art = new_art
-                        .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec()));
+                    self.art = new_art;
                 }
-                self.media = media;
+                self.snapshot.media = media;
                 self.seek = None;
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::Bars(bars)) => {
-                self.bars = bars;
-                Task::none()
+                self.snapshot.bars = bars;
+                Effects::none()
             }
             Message::Ui(UiEvent::Toggle(panel)) | Message::Toggle(panel) => {
                 self.toggle_panel(panel)
             }
             Message::MediaControl(control) => {
                 self.send(Action::Media(control));
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::Notifications(state)) => {
                 let keep: Vec<u32> = state
@@ -503,12 +306,16 @@ impl App {
                         data,
                     }) = &n.image
                     {
-                        self.notif_images.entry(n.id).or_insert_with(|| {
-                            iced::widget::image::Handle::from_rgba(*width, *height, data.to_vec())
-                        });
+                        self.notif_images
+                            .entry(n.id)
+                            .or_insert_with(|| Image::Rgba {
+                                width: *width,
+                                height: *height,
+                                data: data.clone(),
+                            });
                     }
                 }
-                self.notif = state;
+                self.snapshot.notif = state;
                 self.sync_popups()
             }
             Message::Ui(UiEvent::Tray(items)) => {
@@ -520,19 +327,22 @@ impl App {
                         data,
                     }) = &item.image
                     {
-                        let handle =
-                            iced::widget::image::Handle::from_rgba(*width, *height, data.to_vec());
+                        let handle = Image::Rgba {
+                            width: *width,
+                            height: *height,
+                            data: data.clone(),
+                        };
                         self.tray_images.insert(item.key.clone(), handle);
                     }
                 }
-                self.tray = items;
-                Task::none()
+                self.snapshot.tray = items;
+                Effects::none()
             }
             Message::Ui(UiEvent::TrayMenu(key, entries)) => {
                 if self.tray_menu_for.as_ref() == Some(&key) {
                     self.tray_menu = Some((key, entries));
                 }
-                Task::none()
+                Effects::none()
             }
             Message::NotifDismiss(id) => self.notif_command(notifications::Command::Dismiss(id)),
             Message::NotifRemove(id) => self.notif_command(notifications::Command::Remove(id)),
@@ -550,7 +360,11 @@ impl App {
             Message::PopupHover(on) => {
                 self.popup_hover = on;
                 self.instant = Instant::now();
-                self.popup_expand.go_mut(on, self.instant);
+                self.popup_expand = self
+                    .popup_expand
+                    .clone()
+                    .duration(self.config.animations.duration());
+                self.popup_expand = self.popup_expand.clone().go(on, self.instant);
                 self.notif_command(notifications::Command::Hover(on))
             }
             Message::TrayClick(key, click) => self.tray_click(key, click),
@@ -562,19 +376,19 @@ impl App {
             }
             Message::Ui(UiEvent::Binds(binds)) => {
                 self.launcher.set_binds(binds);
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::ToggleSettings) | Message::ToggleSettings => {
                 self.toggle_settings()
             }
-            Message::Ui(UiEvent::Quit) => iced::exit(),
+            Message::Ui(UiEvent::Quit) => Effects::quit(),
             Message::Focus(id) => {
-                self.send(Action::FocusWorkspace(id));
-                Task::none()
+                self.send(Action::Hypr(hyprland::Command::Focus(id)));
+                Effects::none()
             }
             Message::Escape if self.power_confirm.is_some() => {
                 self.power_confirm = None;
-                Task::none()
+                Effects::none()
             }
             Message::Escape if self.panels.current().is_some() => self.close_panel(),
             Message::Settings(settings::Msg::Close) | Message::Escape => {
@@ -585,16 +399,16 @@ impl App {
             }
             Message::Ui(UiEvent::Calendar(state)) => {
                 self.settings_ui.cal_errors = state.errors.clone();
-                self.calendar = state;
-                Task::none()
+                self.snapshot.calendar = state;
+                Effects::none()
             }
             Message::CalMonth(by) => {
                 self.cal_month = calendar::shift_month(self.cal_month, by);
-                Task::none()
+                Effects::none()
             }
             Message::CalDay(day) => {
                 self.cal_day = day;
-                Task::none()
+                Effects::none()
             }
             Message::OpenLink(url) => {
                 self.send(Action::Launch(format!(
@@ -605,89 +419,107 @@ impl App {
             }
             Message::Ui(UiEvent::AudioDevices(d)) => {
                 self.settings_ui.audio = d.clone();
-                self.audio = d;
-                Task::none()
+                self.snapshot.audio = d;
+                Effects::none()
             }
             Message::Ui(UiEvent::Volume(v)) => {
                 // The first reading is the starting point, not a change worth an OSD.
-                let changed = self.volume.is_some() && v != self.volume;
-                self.volume = v;
+                let changed = self.snapshot.volume.is_some() && v != self.snapshot.volume;
+                self.snapshot.volume = v;
                 match v.filter(|_| changed) {
                     Some(v) => self.show_osd(status::Osd::Volume(v)),
-                    None => Task::none(),
+                    None => Effects::none(),
                 }
             }
             Message::Ui(UiEvent::Brightness(Some(b))) => {
                 // The first reading (at startup) just sets the level.
-                let first = self.brightness.is_none();
-                self.brightness = Some(b);
+                let first = self.snapshot.brightness.is_none();
+                self.snapshot.brightness = Some(b);
                 if first {
-                    Task::none()
+                    Effects::none()
                 } else {
                     self.show_osd(status::Osd::Brightness(b))
                 }
             }
             Message::Ui(UiEvent::Clipboard(entries)) => {
                 self.launcher.set_clips(entries);
-                Task::none()
+                Effects::none()
             }
             Message::Power(action) => {
                 let (run, confirm) = power_click(self.power_confirm, action);
                 self.power_confirm = confirm;
                 if !run {
-                    return Task::none();
+                    return Effects::none();
                 }
-                self.send(Action::Power(action));
+                self.send(Action::System(system::Command::Power {
+                    action,
+                    lock_command: self.config.power.lock_command.clone(),
+                }));
                 self.close_panel()
             }
             Message::WifiToggle(on) => {
-                self.send(Action::Wifi(on));
-                Task::none()
+                self.send(Action::System(system::Command::Wifi(on)));
+                Effects::none()
             }
             Message::MicMuteToggle => {
-                self.send(Action::Audio(audio::DeviceCommand::ToggleMicMute));
-                Task::none()
+                self.send(Action::Audio(audio::Command::Device(
+                    audio::DeviceCommand::ToggleMicMute,
+                )));
+                Effects::none()
             }
             Message::NightLightToggle => {
-                self.send(Action::NightLight(self.night_light != Ok(true)));
-                Task::none()
+                self.send(Action::System(system::Command::NightLight(
+                    self.snapshot.night_light != Ok(true),
+                )));
+                Effects::none()
             }
             Message::KeepAwakeToggle => {
-                self.send(Action::KeepAwake(self.keep_awake != Ok(true)));
-                Task::none()
+                self.send(Action::System(system::Command::KeepAwake(
+                    self.snapshot.keep_awake != Ok(true),
+                )));
+                Effects::none()
             }
             Message::PowerProfileNext => {
-                if let Some(next) = self.power_profile.as_ref().and_then(PowerProfile::next) {
-                    self.send(Action::PowerProfile(next.to_owned()));
+                if let Some(next) = self
+                    .snapshot
+                    .power_profile
+                    .as_ref()
+                    .and_then(PowerProfile::next)
+                {
+                    self.send(Action::System(system::Command::PowerProfile(
+                        next.to_owned(),
+                    )));
                 }
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::NightLight(r)) => {
-                self.night_light = r;
-                Task::none()
+                self.snapshot.night_light = r;
+                Effects::none()
             }
             Message::Ui(UiEvent::KeepAwake(r)) => {
-                self.keep_awake = r;
-                Task::none()
+                self.snapshot.keep_awake = r;
+                Effects::none()
             }
             Message::Ui(UiEvent::PowerProfile(p)) => {
-                self.power_profile = p;
-                Task::none()
+                self.snapshot.power_profile = p;
+                Effects::none()
             }
             Message::BtPower(on) => {
                 self.send(Action::Bluetooth(bluetooth::Command::Power(on)));
-                Task::none()
+                Effects::none()
             }
             Message::GameModeToggle => self.set_game_mode(!self.game_mode),
             Message::QuickVolume(v) => {
-                self.send(Action::Volume(audio::Change::Set(v.round() as u8)));
-                Task::none()
+                self.send(Action::Audio(audio::Command::Volume(audio::Change::Set(
+                    v.round() as u8,
+                ))));
+                Effects::none()
             }
             Message::QuickBrightness(v) => {
-                self.send(Action::Brightness(audio::Change::Set(
-                    (v.round() as u8).max(1),
+                self.send(Action::Audio(audio::Command::Brightness(
+                    audio::Change::Set((v.round() as u8).max(1)),
                 )));
-                Task::none()
+                Effects::none()
             }
             Message::QuickScreenshot => {
                 self.send(Action::Screenshot(
@@ -701,33 +533,33 @@ impl App {
                 let key = |n: &Option<Network>| n.as_ref().map(|n| (n.connected, n.name.clone()));
                 if self.settings_ui.page() == settings::Page::Wifi
                     && self.surfaces.is_open(&Surface::Settings)
-                    && key(&n) != key(&self.network)
+                    && key(&n) != key(&self.snapshot.network)
                 {
-                    self.send(Action::WifiScan);
+                    self.send(Action::System(system::Command::WifiScan));
                 }
                 self.settings_ui.network = n.clone();
-                self.network = n;
-                Task::none()
+                self.snapshot.network = n;
+                Effects::none()
             }
             Message::Ui(UiEvent::WifiNetworks(list)) => {
                 self.settings_ui.wifi = list;
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::WifiStatus(status)) => {
                 self.settings_ui.wifi_status = status;
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::Stats(s)) => {
-                self.stats = s;
-                Task::none()
+                self.snapshot.stats = s;
+                Effects::none()
             }
             Message::Ui(UiEvent::Battery(b)) => {
-                self.battery = b;
-                Task::none()
+                self.snapshot.battery = b;
+                Effects::none()
             }
             Message::SeekDrag(secs) => {
                 self.seek = Some(secs);
-                Task::none()
+                Effects::none()
             }
             Message::SeekCommit => {
                 if let Some(secs) = self.seek {
@@ -736,39 +568,27 @@ impl App {
                     )));
                 }
                 // Keep showing the dragged spot until the player reports the new position.
-                Task::none()
+                Effects::none()
             }
             Message::PanelSize(size) => {
-                let fit = self.panels.measured(size.width, size.height);
+                let fit = self
+                    .panels
+                    .measured(f32::from(size.width), f32::from(size.height));
                 self.run_panel(fit.into_iter().collect())
             }
             Message::BarCursor(at) => {
                 self.panels.pointer(at);
-                Task::none()
+                Effects::none()
             }
             Message::BarWidth(monitor, width) => {
                 self.panels.bar_width(monitor, width);
-                Task::none()
-            }
-            Message::NotchWidth(monitor, width) => {
-                let now = Instant::now();
-                let duration = self.config.animations.duration();
-                let current = self.notch_width(&monitor);
-                match self.notch_widths.get(&monitor) {
-                    Some((_, to, _)) if (to - width).abs() < 0.5 => {}
-                    _ => {
-                        // Start from wherever it is now, so mid-animation changes stay smooth.
-                        let from = current.unwrap_or(width);
-                        let anim = iced::Animation::new(false).duration(duration).go(true, now);
-                        self.notch_widths.insert(monitor, (from, width, anim));
-                        self.instant = now;
-                    }
-                }
-                Task::none()
+                Effects::none()
             }
             Message::VolumeMute => {
-                self.send(Action::Volume(audio::Change::ToggleMute));
-                Task::none()
+                self.send(Action::Audio(audio::Command::Volume(
+                    audio::Change::ToggleMute,
+                )));
+                Effects::none()
             }
             Message::VolumeStep(step) => {
                 let change = if step > 0 {
@@ -776,16 +596,16 @@ impl App {
                 } else {
                     audio::Change::Down(step.unsigned_abs())
                 };
-                self.send(Action::Volume(change));
-                Task::none()
+                self.send(Action::Audio(audio::Command::Volume(change)));
+                Effects::none()
             }
             Message::Ui(UiEvent::Recording(r)) => {
-                self.recording = r;
-                Task::none()
+                self.snapshot.recording = r;
+                Effects::none()
             }
             Message::StopRecording => {
                 self.send(Action::Record(capture::RecordCommand::Stop));
-                Task::none()
+                Effects::none()
             }
             Message::GameModeOff => self.set_game_mode(false),
             Message::Ui(UiEvent::GameMode(want)) => {
@@ -793,13 +613,13 @@ impl App {
             }
             Message::Ui(UiEvent::Weather(w)) => {
                 self.weather_at = w.as_ref().map(|_| Instant::now());
-                self.weather = w;
-                Task::none()
+                self.snapshot.weather = w;
+                Effects::none()
             }
             Message::Ui(UiEvent::Bluetooth(state)) => {
                 self.settings_ui.bt = state.clone();
-                self.bt = state;
-                Task::none()
+                self.snapshot.bt = state;
+                Effects::none()
             }
             Message::Ui(UiEvent::Geocoded(result)) => {
                 match result {
@@ -813,21 +633,31 @@ impl App {
                     }
                     Err(e) => self.settings_ui.search_status = e,
                 }
-                Task::none()
+                Effects::none()
             }
-            Message::Ui(UiEvent::OpenBluetooth) | Message::OpenBluetooth => {
+            Message::Ui(UiEvent::OpenBluetooth) => {
                 self.open_settings_page(settings::Page::Bluetooth)
             }
-            Message::OpenWifi => {
+            Message::OpenSettingsPage(page) => {
                 let close = self.close_panel();
-                Task::batch([close, self.open_settings_page(settings::Page::Wifi)])
+                Effects::batch([close, self.open_settings_page(page)])
+            }
+            Message::WifiDropdownPick(index) => {
+                let pick = self.update(Message::Settings(settings::Msg::WifiPick(index)));
+                if self.settings_ui.wifi_pick.is_none() {
+                    return pick;
+                }
+                Effects::batch([
+                    pick,
+                    self.update(Message::OpenSettingsPage(settings::Page::Wifi)),
+                ])
             }
             Message::Settings(msg) => {
                 let mut config = self.config.clone();
                 let was = self.settings_ui.page();
                 let request = self.settings_ui.update(&mut config, msg);
                 if was != settings::Page::Wifi && self.settings_ui.page() == settings::Page::Wifi {
-                    self.send(Action::WifiScan);
+                    self.send(Action::System(system::Command::WifiScan));
                 }
                 if let Some(request) = request {
                     self.settings_ui.status.clear();
@@ -842,13 +672,21 @@ impl App {
                         settings::Request::Blur(on) => self.send(Action::Blur(on)),
                         settings::Request::Geocode(q) => self.send(Action::Geocode(q)),
                         settings::Request::Bluetooth(cmd) => self.send(Action::Bluetooth(cmd)),
-                        settings::Request::Audio(cmd) => self.send(Action::Audio(cmd)),
-                        settings::Request::WifiScan => self.send(Action::WifiScan),
-                        settings::Request::WifiPower(on) => self.send(Action::Wifi(on)),
-                        settings::Request::WifiConnect(net, pw) => {
-                            self.send(Action::WifiConnect(net, pw))
+                        settings::Request::Audio(cmd) => {
+                            self.send(Action::Audio(audio::Command::Device(cmd)))
                         }
-                        settings::Request::WifiForget(p) => self.send(Action::WifiForget(p)),
+                        settings::Request::WifiScan => {
+                            self.send(Action::System(system::Command::WifiScan))
+                        }
+                        settings::Request::WifiPower(on) => {
+                            self.send(Action::System(system::Command::Wifi(on)))
+                        }
+                        settings::Request::WifiConnect(net, pw) => {
+                            self.send(Action::System(system::Command::WifiConnect(net, pw)))
+                        }
+                        settings::Request::WifiForget(p) => {
+                            self.send(Action::System(system::Command::WifiForget(p)))
+                        }
                         settings::Request::SetWallpaper(path) => {
                             self.send(Action::SetWallpaper(path));
                             if config.theme.source == config::ThemeSource::Wallpaper {
@@ -858,18 +696,18 @@ impl App {
                     }
                 }
                 if config == self.config {
-                    return Task::none();
+                    return Effects::none();
                 }
                 self.send(Action::SaveConfig(Box::new(config.clone())));
                 self.set_config(config)
             }
             Message::Ui(UiEvent::Wallpapers(list)) => {
                 self.settings_ui.wallpapers = list;
-                Task::none()
+                Effects::none()
             }
             Message::Ui(UiEvent::Status(status)) => {
                 self.settings_ui.status = status;
-                Task::none()
+                Effects::none()
             }
             Message::Launcher(msg) => match self.launcher.update(msg, &self.config) {
                 Some(Outcome::Launch(command)) => {
@@ -877,24 +715,25 @@ impl App {
                     self.close_panel()
                 }
                 Some(Outcome::Copy(text)) => {
-                    Task::batch([iced::clipboard::write(text), self.close_panel()])
+                    Effects::batch([Effects::copy(text), self.close_panel()])
                 }
                 Some(Outcome::Clip(id)) => {
-                    self.send(Action::ClipboardCopy(id));
+                    self.send(Action::Clipboard(clipboard::Command::Copy(id)));
                     self.close_panel()
                 }
                 Some(Outcome::Favorite(id)) => {
-                    self.send(Action::ClipboardFavorite(id));
-                    Task::none()
+                    self.send(Action::Clipboard(clipboard::Command::ToggleFavorite(id)));
+                    Effects::none()
                 }
                 Some(Outcome::ClearClips) => {
-                    self.send(Action::ClipboardClear);
-                    Task::none()
+                    self.send(Action::Clipboard(clipboard::Command::Clear));
+                    Effects::none()
                 }
-                None => Task::none(),
+                None => Effects::none(),
             },
             Message::Nav(by) if matches!(self.panels.current(), Some(Panel::Launcher(_))) => {
-                self.launcher.select(by)
+                self.launcher.select(by);
+                Effects::none()
             }
             Message::ClosePanel => self.close_panel(),
             Message::Frame(at) => {
@@ -902,89 +741,55 @@ impl App {
                 let osd = if at >= self.osd_until {
                     self.surfaces.close(&Surface::Osd)
                 } else {
-                    Task::none()
+                    Effects::none()
                 };
-                Task::batch([self.sync_popups(), osd])
+                Effects::batch([self.sync_popups(), osd])
             }
-            _ => Task::none(), // layer-shell control messages are handled by iced_layershell
+            _ => Effects::none(),
         }
     }
 
-    fn view(&self, id: Id) -> Element<'_, Message> {
-        match self.surfaces.kind(id) {
-            Some(Surface::Bar(monitor)) => notch::view(self, monitor),
-            Some(Surface::Panel) => notch::panel(self),
-            Some(Surface::Catcher) => notch::catcher(self),
-            Some(Surface::Popups) => notify::popups(self),
-            Some(Surface::Osd) => status::osd(self),
-            Some(Surface::Settings) => self.settings_ui.view(&self.config).map(Message::Settings),
-            None => text("").into(),
-        }
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        let keys = event::listen_with(|event, _, _| match event {
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(key),
-                ..
-            }) => match key {
-                Named::Escape => Some(Message::Escape),
-                Named::ArrowUp => Some(Message::Nav(-1)),
-                Named::ArrowDown => Some(Message::Nav(1)),
-                Named::PageUp => Some(Message::Nav(-8)),
-                Named::PageDown => Some(Message::Nav(8)),
-                _ => None,
-            },
-            _ => None,
-        });
-        let animating = self.pills.values().any(|a| a.is_animating(self.instant))
-            || self.popup_expand.is_animating(self.instant)
-            || self.surfaces.is_open(&Surface::Osd) // the frame clock hides the OSD on time
-            || self.notch_widths.values().any(|(_, _, a)| a.is_animating(self.instant))
-            || self.instant < self.measure_until;
-        let frames = if animating {
-            window::frames().map(Message::Frame)
+    fn next_wake(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let animating = self.pills.values().any(|a| a.is_animating(now))
+            || self.popup_expand.is_animating(now)
+            || now < self.measure_until;
+        if animating {
+            Some(now + std::time::Duration::from_millis(16))
+        } else if self.surfaces.is_open(&Surface::Osd) {
+            Some(self.osd_until.max(now))
         } else {
-            Subscription::none()
-        };
-        Subscription::batch([keys, frames])
+            None
+        }
     }
 
-    fn theme(&self, _: Id) -> Theme {
-        let c = &self.config.colors;
-        Theme::custom(
-            "Rune".to_owned(),
-            iced::theme::Palette {
-                background: c.background.into(),
-                text: c.foreground.into(),
-                primary: c.accent.into(),
-                success: Color::from_rgb8(0xa6, 0xe3, 0xa1),
-                warning: Color::from_rgb8(0xf9, 0xe2, 0xaf),
-                danger: c.urgent.into(),
-            },
-        )
-    }
-
-    /// The notch content's visible width on `monitor`, once measured.
-    pub fn notch_width(&self, monitor: &str) -> Option<f32> {
-        let (from, to, anim) = self.notch_widths.get(monitor)?;
-        Some(anim.interpolate(*from, *to, self.instant))
-    }
-
-    fn set_config(&mut self, config: Config) -> Task<Message> {
+    fn set_config(&mut self, config: Config) -> Effects<Message> {
         if config.calendar != self.config.calendar {
             self.send(Action::Calendar(config.calendar.urls.clone()));
         }
         if config.weather != self.config.weather {
             self.send(Action::Weather(weather_query(&config)));
         }
+        let n = (&config.notifications, &self.config.notifications);
+        if (n.0.timeout_ms, n.0.history) != (n.1.timeout_ms, n.1.history) {
+            self.send(Action::Notif(notifications::Command::SetOptions(
+                notifications::Options {
+                    timeout: std::time::Duration::from_millis(n.0.timeout_ms),
+                    history: n.0.history,
+                },
+            )));
+        }
         let rebuild = config.bar.height != self.config.bar.height
             || config.bar.outputs != self.config.bar.outputs;
         self.config = config;
+        self.popup_expand = self
+            .popup_expand
+            .clone()
+            .duration(self.config.animations.duration());
         self.pills.clear(); // picks up the new animation duration
         self.animate_pills();
         if !rebuild {
-            return Task::none();
+            return Effects::none();
         }
         // The notch height is baked into the layer surface; reopen them.
         let mut close: Vec<_> = self
@@ -994,13 +799,14 @@ impl App {
             .map(|m| self.surfaces.close(&Surface::Bar(m)))
             .collect();
         close.push(self.close_panel());
-        Task::batch(close).chain(self.sync_notches())
+        Effects::batch(close).chain(self.sync_notches())
     }
 
     /// Opens a notch on every monitor that lacks one and closes orphans.
-    fn sync_notches(&mut self) -> Task<Message> {
+    fn sync_notches(&mut self) -> Effects<Message> {
         let outputs = &self.config.bar.outputs;
         let mut wanted: Vec<String> = self
+            .snapshot
             .hypr
             .monitors
             .iter()
@@ -1032,21 +838,17 @@ impl App {
             };
             tasks.push(self.surfaces.open(
                 Surface::Bar(name),
-                NewLayerShellSettings {
+                WindowSpec {
                     size: Some((0, h)),
-                    layer: Layer::Top,
-                    anchor: Anchor::Top | Anchor::Left | Anchor::Right,
-                    exclusive_zone: Some(h as i32),
-                    keyboard_interactivity: KeyboardInteractivity::None,
                     output_option,
                     ..Default::default()
                 },
             ));
         }
-        Task::batch(tasks)
+        Effects::batch(tasks)
     }
 
-    fn toggle_settings(&mut self) -> Task<Message> {
+    fn toggle_settings(&mut self) -> Effects<Message> {
         if self.surfaces.is_open(&Surface::Settings) {
             self.stop_bt_scan();
             return self.surfaces.close(&Surface::Settings);
@@ -1055,16 +857,12 @@ impl App {
             self.send(Action::Bluetooth(bluetooth::Command::Scan(true)));
         }
         if self.settings_ui.page() == settings::Page::Wifi {
-            self.send(Action::WifiScan);
+            self.send(Action::System(system::Command::WifiScan));
         }
         self.surfaces.open(
             Surface::Settings,
-            NewLayerShellSettings {
+            WindowSpec {
                 size: Some((860, 580)),
-                layer: Layer::Overlay,
-                anchor: Anchor::empty(), // centered
-                exclusive_zone: None,
-                keyboard_interactivity: KeyboardInteractivity::OnDemand,
                 output_option: OutputOption::Active,
                 ..Default::default()
             },
@@ -1072,26 +870,26 @@ impl App {
     }
 
     /// Opens `panel`, switches to it, or closes it if it's already open.
-    fn toggle_panel(&mut self, panel: Panel) -> Task<Message> {
+    fn toggle_panel(&mut self, panel: Panel) -> Effects<Message> {
         let commands = self.panels.toggle(panel, &self.focused_monitor());
         self.run_panel(commands)
     }
 
-    fn close_panel(&mut self) -> Task<Message> {
+    fn close_panel(&mut self) -> Effects<Message> {
         let commands = self.panels.close();
         self.run_panel(commands)
     }
 
     /// The focused monitor's name, for panels not opened from a bar.
     fn focused_monitor(&self) -> String {
-        match self.hypr.monitors.iter().find(|m| m.focused) {
+        match self.snapshot.hypr.monitors.iter().find(|m| m.focused) {
             Some(m) => m.name.clone(),
             None => self.surfaces.bars().into_iter().next().unwrap_or_default(),
         }
     }
 
     /// Carries out the Panel module's commands on the layer surfaces.
-    fn run_panel(&mut self, commands: Vec<panel::Command>) -> Task<Message> {
+    fn run_panel(&mut self, commands: Vec<panel::Command>) -> Effects<Message> {
         let mut tasks = Vec::new();
         for command in commands {
             match command {
@@ -1116,35 +914,19 @@ impl App {
                     };
                     tasks.push(self.surfaces.open(
                         Surface::Catcher,
-                        NewLayerShellSettings {
+                        WindowSpec {
                             size: Some((0, 0)),
-                            layer: Layer::Top,
-                            anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-                            exclusive_zone: None, // stays clear of the bar's zone, so the bar still works
-                            keyboard_interactivity: KeyboardInteractivity::None,
                             output_option: output_option.clone(),
                             ..Default::default()
                         },
                     ));
                     tasks.push(self.surfaces.open(
                         Surface::Panel,
-                        NewLayerShellSettings {
+                        WindowSpec {
                             size: Some(size),
-                            layer: Layer::Overlay,
-                            anchor: if left.is_some() {
-                                Anchor::Top | Anchor::Left
-                            } else {
-                                Anchor::Top
-                            },
-                            exclusive_zone: None,
-                            margin: Some(panel_margin(left)),
-                            keyboard_interactivity: if panel.grabs_keyboard() {
-                                KeyboardInteractivity::Exclusive
-                            } else {
-                                KeyboardInteractivity::OnDemand
-                            },
+                            margin: left.map(|_| panel_margin(left)),
+                            grabs_keyboard: panel.grabs_keyboard(),
                             output_option,
-                            ..Default::default()
                         },
                     ));
                     // After the surface exists, so the launcher can focus its search box.
@@ -1155,19 +937,20 @@ impl App {
         // In order: a switch must close the old surfaces before opening new ones.
         tasks
             .into_iter()
-            .fold(Task::none(), |chain, task| chain.chain(task))
+            .fold(Effects::none(), |chain, task| chain.chain(task))
     }
 
     /// What each panel does as it opens.
-    fn on_open(&mut self, panel: Panel) -> Task<Message> {
+    fn on_open(&mut self, panel: Panel) -> Effects<Message> {
         match panel {
             Panel::Launcher(kind) => {
                 self.send(match kind {
                     Kind::Apps => Action::LoadApps,
-                    Kind::Keybinds => Action::LoadBinds,
-                    Kind::Clipboard => Action::LoadClipboard,
+                    Kind::Keybinds => Action::Hypr(hyprland::Command::Binds),
+                    Kind::Clipboard => Action::Clipboard(clipboard::Command::Load),
                 });
-                return self.launcher.reset(kind);
+                self.launcher.reset(kind);
+                return Effects::none();
             }
             Panel::Weather => {
                 // Refresh on open if the forecast is getting old.
@@ -1186,21 +969,28 @@ impl App {
                 self.send(Action::RefreshCalendar);
             }
             Panel::Power => self.power_confirm = None,
-            Panel::Media | Panel::Notifications | Panel::TrayMenu | Panel::Quick => {}
+            Panel::Wifi => self.send(Action::System(system::Command::WifiScan)),
+            Panel::Media
+            | Panel::Notifications
+            | Panel::TrayMenu
+            | Panel::Quick
+            | Panel::Bluetooth
+            | Panel::Sound
+            | Panel::Battery => {}
         }
-        Task::none()
+        Effects::none()
     }
 
     /// Starts a transition for every pill whose active state changed.
     fn animate_pills(&mut self) {
         let duration = self.config.animations.duration();
-        for m in &self.hypr.monitors {
-            for id in notch::workspace_ids(&self.config, &self.hypr) {
+        for m in &self.snapshot.hypr.monitors {
+            for id in notch::workspace_ids(&self.config, &self.snapshot.hypr) {
                 let active = m.active_workspace.id == id;
                 let anim = self
                     .pills
                     .entry((m.name.clone(), id))
-                    .or_insert_with(|| iced::Animation::new(active).duration(duration));
+                    .or_insert_with(|| animation::Animation::new(active).duration(duration));
                 if anim.value() != active {
                     anim.go_mut(active, self.instant);
                 }
@@ -1208,31 +998,31 @@ impl App {
         }
     }
 
-    fn notif_command(&mut self, command: notifications::Command) -> Task<Message> {
+    fn notif_command(&mut self, command: notifications::Command) -> Effects<Message> {
         self.send(Action::Notif(command));
-        Task::none()
+        Effects::none()
     }
 
     /// Opens, resizes or closes the popup surface to fit the popups.
-    fn sync_popups(&mut self) -> Task<Message> {
-        if self.notif.popups.is_empty() {
+    fn sync_popups(&mut self) -> Effects<Message> {
+        if self.snapshot.notif.popups.is_empty() {
             self.popup_size = 0;
             if self.popup_hover {
                 self.popup_hover = false;
-                self.popup_expand = iced::Animation::new(false);
+                self.popup_expand = animation::Animation::new(false);
                 self.send(Action::Notif(notifications::Command::Hover(false)));
             }
             return self.surfaces.close(&Surface::Popups);
         }
         // Fanned-out size while hovered or animating, so the stack never gets cut off.
         let open = self.popup_hover || self.popup_expand.is_animating(self.instant);
-        let height = notify::stack_height(&self.notif.popups, if open { 1.0 } else { 0.0 }).ceil()
-            as u32
+        let height = notify::stack_height(&self.snapshot.notif.popups, if open { 1.0 } else { 0.0 })
+            .ceil() as u32
             + 4;
         let width = notify::WIDTH as u32;
         if self.surfaces.is_open(&Surface::Popups) {
             if self.popup_size == height {
-                return Task::none();
+                return Effects::none();
             }
             self.popup_size = height;
             return self.surfaces.resize(&Surface::Popups, (width, height));
@@ -1241,33 +1031,29 @@ impl App {
         let top = self.config.bar.height as i32 + 8;
         self.surfaces.open(
             Surface::Popups,
-            NewLayerShellSettings {
+            WindowSpec {
                 size: Some((width, height)),
-                layer: Layer::Overlay,
-                anchor: Anchor::Top | Anchor::Right,
-                exclusive_zone: None,
                 margin: Some((top, 12, 0, 12)),
-                keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::Active,
                 ..Default::default()
             },
         )
     }
 
-    fn tray_click(&mut self, key: String, click: tray::Click) -> Task<Message> {
-        let Some(item) = self.tray.iter().find(|i| i.key == key) else {
-            return Task::none();
+    fn tray_click(&mut self, key: String, click: tray::Click) -> Effects<Message> {
+        let Some(item) = self.snapshot.tray.iter().find(|i| i.key == key) else {
+            return Effects::none();
         };
         let wants_menu =
             click == tray::Click::Right || (click == tray::Click::Left && item.item_is_menu);
         if click == tray::Click::Middle || !wants_menu {
             let secondary = click == tray::Click::Middle;
             self.send(Action::Tray(TrayRequest::Activate { key, secondary }));
-            return Task::none();
+            return Effects::none();
         }
         if item.menu.is_none() {
             self.send(Action::Tray(TrayRequest::ContextMenu(key)));
-            return Task::none();
+            return Effects::none();
         }
         let same = self.tray_menu_for.as_ref() == Some(&key);
         self.tray_menu = None;
@@ -1282,35 +1068,30 @@ impl App {
     }
 
     /// Shows (or refreshes) the OSD for 1.5 s.
-    fn show_osd(&mut self, osd: status::Osd) -> Task<Message> {
+    fn show_osd(&mut self, osd: status::Osd) -> Effects<Message> {
         self.osd = Some(osd);
         self.instant = Instant::now();
         self.osd_until = self.instant + std::time::Duration::from_millis(1500);
         self.surfaces.open(
             Surface::Osd,
-            NewLayerShellSettings {
+            WindowSpec {
                 size: Some((status::OSD_W, status::OSD_H)),
-                layer: Layer::Overlay,
-                anchor: Anchor::Bottom,
-                exclusive_zone: None,
                 margin: Some((0, 0, 90, 0)),
-                keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::Active,
-                events_transparent: true,
                 ..Default::default()
             },
         )
     }
 
     /// Game mode strips Hyprland's effects and silences notifications until it ends.
-    fn set_game_mode(&mut self, on: bool) -> Task<Message> {
+    fn set_game_mode(&mut self, on: bool) -> Effects<Message> {
         if on == self.game_mode {
-            return Task::none();
+            return Effects::none();
         }
         self.game_mode = on;
-        self.send(Action::GameMode(on));
+        self.send(Action::Hypr(hyprland::Command::GameMode(on)));
         if on {
-            self.dnd_before_game = Some(self.notif.dnd);
+            self.dnd_before_game = Some(self.snapshot.notif.dnd);
             self.send(Action::Notif(notifications::Command::SetDnd(true)));
         } else {
             let dnd = self
@@ -1323,20 +1104,20 @@ impl App {
                 self.send(Action::Blur(true));
             }
         }
-        Task::none()
+        Effects::none()
     }
 
     /// Opens settings (if closed) on `page`.
-    fn open_settings_page(&mut self, page: settings::Page) -> Task<Message> {
+    fn open_settings_page(&mut self, page: settings::Page) -> Effects<Message> {
         let open = if !self.surfaces.is_open(&Surface::Settings) {
             self.toggle_settings()
         } else {
-            Task::none()
+            Effects::none()
         };
         if self.settings_ui.page() == page {
             return open;
         }
-        Task::batch([
+        Effects::batch([
             open,
             self.update(Message::Settings(settings::Msg::Page(page))),
         ])
@@ -1390,6 +1171,64 @@ fn power_click(pending: Option<PowerAction>, action: PowerAction) -> (bool, Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_motion_settles_popup_expansion() {
+        let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+        let (_, events) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = Config::default();
+        config.animations.reduce_motion = true;
+        let (mut app, _) = App::new(config.clone(), events, actions, false);
+        app.update(Message::PopupHover(true));
+        assert_eq!(app.popup_expand.interpolate(0., 1., app.instant), 1.);
+        assert!(!app.popup_expand.is_animating(app.instant));
+        config.animations.reduce_motion = false;
+        app.set_config(config.clone());
+        app.update(Message::PopupHover(false));
+        assert!(app.popup_expand.is_animating(app.instant));
+        config.animations.reduce_motion = true;
+        app.set_config(config);
+        assert_eq!(app.popup_expand.interpolate(0., 1., app.instant), 0.);
+        assert!(!app.popup_expand.is_animating(app.instant));
+    }
+
+    fn test_app() -> (App, tokio::sync::mpsc::UnboundedReceiver<Action>) {
+        let (actions, received) = tokio::sync::mpsc::unbounded_channel();
+        let (_, events) = tokio::sync::mpsc::unbounded_channel();
+        let (app, _) = App::new(Config::default(), events, actions, false);
+        (app, received)
+    }
+
+    #[test]
+    fn wifi_dropdown_scans_on_open() {
+        let (mut app, mut received) = test_app();
+        app.update(Message::Toggle(Panel::Wifi));
+        let mut scanned = false;
+        while let Ok(action) = received.try_recv() {
+            scanned |= matches!(action, Action::System(system::Command::WifiScan));
+        }
+        assert!(scanned);
+    }
+
+    #[test]
+    fn wifi_dropdown_hands_secured_network_to_settings() {
+        let (mut app, _received) = test_app();
+        app.settings_ui.wifi = vec![system::WifiNetwork {
+            ssid: "Office".into(),
+            strength: 70,
+            secured: true,
+            active: false,
+            saved: None,
+            device: "wlan0".into(),
+            ap: "/ap/1".into(),
+        }];
+        app.update(Message::Toggle(Panel::Wifi));
+        app.update(Message::WifiDropdownPick(0));
+        assert_eq!(app.settings_ui.wifi_pick.as_deref(), Some("Office"));
+        assert_eq!(app.settings_ui.page(), settings::Page::Wifi);
+        assert!(app.surfaces.is_open(&Surface::Settings));
+        assert_eq!(app.panels.current(), None);
+    }
 
     #[test]
     fn power_menu_asks_twice() {

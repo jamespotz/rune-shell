@@ -2,110 +2,83 @@
 
 ## Data flow
 
-```
-            tokio runtime (2 worker threads)                 main thread (calloop)
- ┌───────────────────────────────────────────┐        ┌──────────────────────────────┐
- │ hyprland::watch ──watch<HyprState>──┐     │        │ rune_ui::run                 │
- │ clock::spawn ─────watch<DateTime>───┼─fwd─┼─chan──▶│  UiEvent → state → redraw    │
- │ config watcher (notify) ──Config────┤     │        │  if the item list changed    │
- │ control socket (rune-shell.sock) ───┘     │        │                              │
- │ action loop ◀────────mpsc<Action>─────────┼────────┤  pointer click → Action      │
- └───────────────────────────────────────────┘        └──────────────────────────────┘
-```
+The daemon owns a two-worker Tokio runtime and all service I/O. Services publish
+snapshots through watch channels; the forwarder sends each snapshot to
+`rune_ui::run` as a `UiEvent`. The UI runs GPUI on the calling thread and waits on
+that channel without polling. User actions return through `mpsc<Action>` to the
+daemon. CLI commands and configuration hot reload use the same event path.
 
-- **Services** own every piece of I/O. Each one publishes a single `watch` value. The
-  forwarder task in `main.rs` pushes each new value into the UI's calloop channel.
-- **UI** keeps the latest copy of every state, builds `Item`s for each bar, and repaints only
-  when those items differ from what is already on screen. When idle it makes no syscalls apart
-  from the clock tick, which redraws once a minute.
-- **Actions** (clicks) travel back through an `mpsc`, and the daemon runs them on tokio.
+`rune-ui/src/state.rs` holds service snapshots. `App` owns transitions, settings
+drafts, launcher matching, panel placement and animation state. `surfaces.rs`
+records desired window specifications. The GPUI backend reconciles those specs
+with real windows, applies clipboard/quit effects, and observes output changes.
+Views read the shared state entity and emit messages; they do not perform service
+I/O. Window changes are deferred until state and window callbacks release their
+borrows, because GPUI may render a new window synchronously.
 
-## Decisions
+## Rendering and windows
 
-**UI: iced + iced_layershell, rendered in software (tiny-skia).** Phase 1 hand-drew the bar
-with smithay-client-toolkit, as yami does. The feature list that followed (a settings window,
-launcher search, sliders, a calendar, animations everywhere) needs a real widget toolkit,
-so the UI moved to iced, which is pure Rust. Measured with a test build on this machine:
+Rune uses native GPUI Wayland layer-shell windows and the wgpu renderer. GPUI and
+its matching platform package are pinned to revision
+`917559da35dd4d626205da705b071c800c9c2553`. The published GPUI 0.2.2 package does
+not include the required layer-shell support. Updating the pin requires checking
+both the platform API and connector identity implementation. A local patch of
+`gpui_linux` defers viewport destinations until zero layer-shell stretch
+dimensions have been resolved by configure, avoiding fractional-scale startup
+protocol errors. See `vendor/gpui_linux/README.rune.md`.
 
-| backend | memory | idle CPU |
-|---|---|---|
-| iced, GPU (wgpu) | ~190 MB | small but nonzero |
-| iced, software (tiny-skia) | ~14 MB | none |
-| old hand-drawn version | ~10 MB | none |
+Bars target selected Hyprland connector names. The pinned Wayland backend derives
+a display UUID from the connector name using UUID v5 with the DNS namespace;
+`outputs.rs` uses the same mapping rather than relying on enumeration order.
+Unresolved outputs wait for discovery and never fall back to an unrelated output.
+Display change notifications trigger reconciliation and monitor removal closes
+orphaned bars and panels.
 
-Software rendering is the default (`ICED_BACKEND=wgpu` switches to the GPU). Notches are opened
-and closed to match Hyprland's monitor list, which also covers hotplug.
-Known wrinkle: iced_layershell 0.19.1 doesn't compile against winit-core beta.4, so
-`rune-ui/Cargo.toml` pins beta.2. Remove the pin once that's fixed upstream.
+The stable compositor namespaces are `rune-bar`, `rune-panel`, `rune-catcher`,
+`rune-settings`, `rune-notifications`, and `rune-osd`. The bar reserves its height.
+Panels open near the clicked widget, clamp to the output, remember measured sizes,
+and have a separate transparent click-outside catcher. Launcher windows take
+exclusive keyboard focus; settings and other panels use on-demand focus. The OSD
+has an empty input region so input passes through it.
 
-**Hyprland IPC: a hand-written client (~150 lines), not the `hyprland` crate.** Hyprland 0.56
-changed `dispatch` so that it evaluates its payload as Lua (`hl.dsp.focus({ workspace = 3 })`),
-and the old `dispatch workspace 3` form now returns a Lua syntax error. A wrapper crate that
-hasn't caught up breaks without warning, while a payload we own is one line to fix.
-Events are used only as a trigger to re-query `j/monitors` and `j/workspaces` (bursts are
-coalesced over 5 ms), so new or renamed events can't leave the state stale. The single
-exception is `urgent`, which carries data that no query exposes.
+Custom GPUI painting draws the notch shoulders. Shared controls implement native
+text input, Unicode/IME selection, clipboard shortcuts, password masking and
+pointer-driven sliders. Media seek changes are committed on release. Views cache
+image conversions and replace them only when their source changes. Raw service
+RGBA pixels are converted to GPUI's BGRA format.
 
-**Audio: not decided yet (Phase 2).** The mainstream crates (`pipewire`, `libpulse-binding`)
-link against C. The no-C route is to speak the PulseAudio wire protocol to `pipewire-pulse`
-using a pure-Rust protocol crate. If that turns out immature, `pipewire-rs` is the
-pragmatic fallback, with one C dependency.
+Tween durations and reduced-motion settings retain their configuration schema.
+Frame work is scheduled while transitions or measurement need it. Timed OSD
+expiration is handled even when no animation is active. GPUI uses explicit quit
+mode, so temporarily closing the last window does not terminate the shell.
 
-**Config: TOML, with the palette defined in config instead of CSS.** There's no CSS engine
-without GTK. `deny_unknown_fields` catches typos.
+## Service boundaries and compatibility
 
-## Risks
+Hyprland IPC remains a small query-driven client. Events trigger snapshots;
+workspace names and active IDs are read from Hyprland rather than reconstructed
+from an event history. Commands retain the compositor's Lua dispatch syntax.
 
-- **Hyprland IPC churn.** Mitigated by the query-driven design above. The JSON field names
-  `lastwindowtitle` and `activeWorkspace` are the remaining coupling.
-- **Keyboard input.** iced_layershell loads libxkbcommon at runtime rather than linking it,
-  and every Hyprland system already has it. The settings window's text fields already use it.
+Calendar, notifications, tray, Bluetooth, audio, NetworkManager, UPower, weather,
+capture, wallpaper and theme exports remain service responsibilities. Optional
+backends publish unavailable states so the corresponding controls can hide or
+report their status. Bluetooth scanning follows the settings page lifecycle.
 
-## Roadmap
+Configuration remains TOML with defaults, strict unknown-field rejection and
+validated clock formats. Invalid settings input stays in a draft. Loading a broken
+config keeps the prior state, or defaults at startup. Existing config, theme
+backups and clipboard metadata need no data conversion for this migration.
 
-1. **MVP bar** *(done)*: a bar per monitor with hotplug, workspaces (active, occupied,
-   empty, urgent, click to focus), window title, clock, control socket and CLI, TOML
-   config with hot reload.
-1b. **iced + settings** *(done)*: notch rebuilt in iced, Material icons, animated workspace
-   pills, settings window (Appearance, Bar with widget add/remove/reorder, Animations with
-   reduce motion), and settings saved to `config.toml`.
-1c. **Launcher** *(done)*: the notch expands into the panel; apps from `.desktop` files and
-   Steam manifests, icons from the GTK icon theme (indexed once, ~0.3 s), nucleo fuzzy
-   matching, emoji, calculator, and the keybind cheat sheet from `j/binds`. Apps launch via
-   `hl.dsp.exec_cmd`.
-1d. **Music** *(done)*: MPRIS over zbus (signals trigger a re-read; position extrapolated),
-   art as bytes (local or curl-cached), cava visualizer started only while playing, compact
-   widget plus an expanded player in the notch.
-1e. **Wallpaper and theming** *(done)*: awww/mpvpaper wallpapers with cached 16:9 thumbnails;
-   presets plus Material You schemes (material-colors) from the wallpaper; exporters for 12 apps
-   that write `rune` files plus a one-line include or key; a backup store (manifest written
-   before each change) that restores files, symlinks, created folders and gsettings; Hyprland blur
-   via a runtime `eval` layer rule. Not yet: Firefox, Chrome and Vivaldi.
-1f. **Notifications and tray** *(done)*: notification daemon (polite name request, expiry with
-   hover pause, history, DnD, actions, image-data), Sonner-style popup stack on its own layer
-   surface sized to the stack, notification center panel; StatusNotifierWatcher (when free) plus
-   host, item icons (theme, IconThemePath or pixmaps), dbusmenu menus as a notch panel.
-1g. **Weather and Bluetooth** *(done)*: Open-Meteo via curl (geocoding search, current/hourly/
-   daily), widget plus forecast panel; BlueZ over the system bus (object-manager re-reads,
-   non-default confirm-only agent for our own pairings, trust = auto connect), PipeWire profile
-   switching through `pactl`, scanning tied to the settings page.
-1h. **Capture, game mode, calendar** *(done)*: grim/slurp/gpu-screen-recorder/tesseract driven
-   from the control socket (config re-read per capture), results announced through whichever
-   notification daemon runs; game mode via `hl.config` eval and `reload` to restore; ICS calendar
-   with RRULE expansion (DAILY/WEEKLY/MONTHLY/YEARLY, BYDAY incl. ordinals, BYMONTHDAY, COUNT,
-   UNTIL, EXDATE, RECURRENCE-ID), chrono-tz zones, meeting-link detection.
-1i. **Status, OSD, quick settings, power, clipboard** *(done)*: volume via `pactl subscribe`
-   (no polling), NetworkManager and UPower over the system bus, brightnessctl; an OSD layer
-   surface hidden by the frame clock; quick-settings and power panels in the notch; cliphist
-   history through the launcher's search.
-2. **Full bar**: MPRIS, UPower battery, NetworkManager, audio volume and the
-   StatusNotifierItem tray, all over zbus (pure Rust). Each service is optional: it
-   publishes `None` when its backend is missing, and its widget hides. Adds icons
-   (resvg + an icon-theme lookup) and hover cursors.
-3. **Launcher**: `.desktop` parsing, fuzzy matching (`nucleo`), and an overlay layer surface
-   with keyboard focus. Launches through `hl.dsp.exec_cmd`. `rune-shell toggle launcher`
-   opens it.
-4. **Notifications**: `org.freedesktop.Notifications` on zbus, popups, actions, urgency,
-   and a history panel.
-5. **Polish**: animate the notch width on resize (Dynamic Island style; it currently snaps), volume/brightness OSDs, power menu, quick settings, hyprlock integration,
-   wallpaper, clipboard history, fractional scaling.
+## Build and verification
+
+Linux builds need the Rust toolchain plus native fontconfig, FreeType,
+libxkbcommon and Wayland development libraries, and runtime Vulkan drivers.
+See README for Fedora packages. The old software-renderer memory figures are
+historical and are not a GPUI performance guarantee.
+
+Run `cargo fmt --all -- --check`, `cargo check --workspace`,
+`cargo test --workspace --no-fail-fast`, and `cargo build --release`. Native
+Wayland tests are ignored in the default suite; invoke individual tests by name
+with `--ignored --exact --test-threads=1`. They exercise settings pages, native
+text editing, sliders, named-output targeting, window transitions, feature panels,
+and the complete backend lifecycle. A single-output test cannot establish
+multi-monitor hotplug or mixed-scale correctness; report those checks separately.

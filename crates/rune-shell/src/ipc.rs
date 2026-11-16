@@ -1,7 +1,11 @@
 //! Control socket at `$XDG_RUNTIME_DIR/rune-shell.sock`: one line in, one line out.
 
 use anyhow::{Context, Result, bail};
-use rune_services::capture::{RecordCommand, Target};
+use rune_services::{
+    audio,
+    capture::{RecordCommand, Target},
+    system,
+};
 use rune_ui::{Action, Panel, UiEvent};
 use std::{
     io::{Read, Write},
@@ -121,7 +125,13 @@ fn command(
             Err(e) => format!("error: {e:#}"),
         },
         ["toggle", "settings"] => sent(UiEvent::ToggleSettings),
-        ["lock"] => send_action(Action::Power(rune_services::system::PowerAction::Lock)),
+        ["lock"] => match crate::load_config(config) {
+            Ok(c) => send_action(Action::System(system::Command::Power {
+                action: system::PowerAction::Lock,
+                lock_command: c.power.lock_command,
+            })),
+            Err(e) => format!("error: {e:#}"),
+        },
         ["open", "bluetooth"] => sent(UiEvent::OpenBluetooth),
         ["screenshot"] => act(&|o| Action::Screenshot(Target::Screen, o)),
         ["screenshot", t] => match Target::from_word(t) {
@@ -138,18 +148,18 @@ fn command(
             Some(t) => act(&|o| Action::Record(RecordCommand::Toggle(t, o))),
             None => format!("error: unknown target {t:?} (try: screen, window, selection, stop)"),
         },
-        ["volume", rest @ ..] => match rune_services::audio::Change::parse(rest) {
-            Some(c) => send_action(Action::Volume(c)),
+        ["volume", rest @ ..] => match audio::Change::parse(rest) {
+            Some(c) => send_action(Action::Audio(audio::Command::Volume(c))),
             None => {
                 "error: try volume up|down|mute|set <0-100> (up/down take an optional step)".into()
             }
         },
-        ["brightness", rest @ ..] => match rune_services::audio::Change::parse(rest)
-            .filter(|c| *c != rune_services::audio::Change::ToggleMute)
-        {
-            Some(c) => send_action(Action::Brightness(c)),
-            None => "error: try brightness up|down|set <0-100>".into(),
-        },
+        ["brightness", rest @ ..] => {
+            match audio::Change::parse(rest).filter(|c| *c != audio::Change::ToggleMute) {
+                Some(c) => send_action(Action::Audio(audio::Command::Brightness(c))),
+                None => "error: try brightness up|down|set <0-100>".into(),
+            }
+        }
         ["game-mode"] | ["game-mode", "toggle"] => sent(UiEvent::GameMode(None)),
         ["game-mode", "on"] => sent(UiEvent::GameMode(Some(true))),
         ["game-mode", "off"] => sent(UiEvent::GameMode(Some(false))),

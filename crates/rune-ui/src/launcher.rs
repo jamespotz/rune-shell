@@ -1,13 +1,10 @@
 //! The panel that grows out of the notch: app launcher (with Steam games,
 //! emoji via a `:` prefix, and a calculator) and the keybind cheat sheet.
 
-use crate::{config::Config, notch::icon};
-use iced::{
-    Alignment, Color, ContentFit, Element, Length, Task, border,
-    widget::{
-        self, Id, Space, button, column, container, image, row, scrollable, svg, text, text_input,
-    },
-};
+#[path = "gpui_launcher.rs"]
+pub(crate) mod gpui_view;
+
+use crate::config::Config;
 use nucleo_matcher::{
     Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
@@ -18,16 +15,14 @@ use rune_services::{
     clipboard::{Entry as ClipEntry, Id as ClipId},
     hyprland::Bind,
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 /// Height of one result row; used to keep the selection scrolled into view.
 pub const ROW_H: f32 = 52.0;
 pub const PANEL_W: f32 = 640.0;
 /// Room for the result list so search and footer still fit under [`crate::panel::MAX_H`].
-const LIST_MAX_H: f32 = 330.0;
+pub(super) const LIST_MAX_H: f32 = 330.0;
 
-const SEARCH: &str = "launcher-search";
-const LIST: &str = "launcher-list";
 const MAX_RESULTS: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -76,18 +71,17 @@ pub struct Launcher {
     results: Vec<Hit>,
     apps: Vec<App>,
     /// Icons without a usable extension, loaded from their bytes (see [`app_icon`]).
-    sniffed: HashMap<PathBuf, image::Handle>,
+    sniffed: HashMap<PathBuf, Arc<[u8]>>,
     binds: Vec<Bind>,
     clips: Vec<ClipEntry>,
 }
 
 impl Launcher {
     /// Starts a fresh search and focuses the search box.
-    pub fn reset<M: Send + 'static>(&mut self, kind: Kind) -> Task<M> {
+    pub fn reset(&mut self, kind: Kind) {
         self.kind = kind;
         self.query.clear();
         self.refilter();
-        widget::operation::focus(Id::new(SEARCH))
     }
 
     pub fn set_apps(&mut self, apps: Vec<App>) {
@@ -101,10 +95,10 @@ impl Launcher {
             })
             .filter_map(|p| {
                 let bytes = std::fs::read(p).ok()?;
-                // Only data we're sure iced can decode; anything else gets a glyph.
+                // Decode extensionless raster icons from bytes.
                 let png = bytes.starts_with(b"\x89PNG");
                 let jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
-                (png || jpeg).then(|| (p.clone(), image::Handle::from_bytes(bytes)))
+                (png || jpeg).then(|| (p.clone(), Arc::from(bytes)))
             })
             .collect();
         self.apps = apps;
@@ -122,21 +116,13 @@ impl Launcher {
     }
 
     /// Moves the selection and scrolls it into view.
-    pub fn select<M: Send + 'static>(&mut self, by: isize) -> Task<M> {
-        if self.results.is_empty() {
-            return Task::none();
+    pub fn select(&mut self, by: isize) {
+        if !self.results.is_empty() {
+            self.selected = self
+                .selected
+                .saturating_add_signed(by)
+                .min(self.results.len() - 1);
         }
-        let last = self.results.len() - 1;
-        self.selected = self.selected.saturating_add_signed(by).min(last);
-        // Keep a few rows of context above the selection.
-        let y = (self.selected as f32 - 3.0).max(0.0) * ROW_H;
-        widget::operation::scroll_to(
-            Id::new(LIST),
-            scrollable::AbsoluteOffset {
-                x: None,
-                y: Some(y),
-            },
-        )
     }
 
     /// Applies `msg`; returns what to do if an entry was activated.
@@ -205,184 +191,6 @@ impl Launcher {
             },
         };
     }
-
-    pub fn view<'a, M: Clone + 'a>(
-        &'a self,
-        config: &'a Config,
-        wrap: fn(Msg) -> M,
-    ) -> Element<'a, M> {
-        let fg: Color = config.colors.foreground.into();
-        let muted: Color = config.colors.muted.into();
-        let accent: Color = config.colors.accent.into();
-        let placeholder = match self.kind {
-            Kind::Apps => "Search apps and games  ·  :emoji  ·  2+2",
-            Kind::Keybinds => "Search keybinds",
-            Kind::Clipboard => "Search clipboard history",
-        };
-        let search = text_input(placeholder, &self.query)
-            .id(Id::new(SEARCH))
-            .on_input(move |q| wrap(Msg::Query(q)))
-            .on_submit(wrap(Msg::Submit))
-            .padding([10, 14])
-            .size(16)
-            .style(move |theme: &iced::Theme, status| text_input::Style {
-                background: Color { a: 0.06, ..fg }.into(),
-                border: border::rounded(12).color(Color { a: 0.12, ..fg }).width(1),
-                ..text_input::default(theme, status)
-            });
-
-        let now = chrono::Local::now().timestamp();
-        let rows = self.results.iter().enumerate().map(|(i, hit)| {
-            let mut trail: Option<Element<'a, M>> = None;
-            let (lead, title, sub): (Element<'a, M>, String, String) = match hit {
-                Hit::App(a) => {
-                    let app = &self.apps[*a];
-                    (
-                        app_icon(config, app, &self.sniffed),
-                        app.name.clone(),
-                        app.comment.clone(),
-                    )
-                }
-                Hit::Calc(r) => (
-                    icon(config, "calculate", 28.0),
-                    format!("= {r}"),
-                    "Enter copies the result".into(),
-                ),
-                Hit::Emoji(e) => (
-                    text(e.as_str())
-                        .size(26)
-                        .shaping(text::Shaping::Advanced)
-                        .into(),
-                    e.name().to_owned(),
-                    e.shortcode().map(|s| format!(":{s}:")).unwrap_or_default(),
-                ),
-                Hit::Clip(c) => {
-                    let clip = &self.clips[*c];
-                    let star = if clip.is_favorite() { accent } else { muted };
-                    trail = Some(
-                        button(icon(config, "star", 20.0))
-                            .padding(6)
-                            .on_press(wrap(Msg::Favorite(i)))
-                            .style(move |_, status| button::Style {
-                                background: matches!(status, button::Status::Hovered)
-                                    .then(|| Color { a: 0.1, ..fg }.into()),
-                                text_color: star,
-                                border: border::rounded(8),
-                                ..Default::default()
-                            })
-                            .into(),
-                    );
-                    let lead: Element<'a, M> = match &clip.image {
-                        // shortcut: decodes the full image for a 40px tile; fine for a few
-                        // screenshots, add real thumbnails if scrolling gets slow.
-                        // `Contain`: `Cover` spills out of the box (tiny-skia ignores clips on images).
-                        Some(path) => container(
-                            image(image::Handle::from_path(path))
-                                .content_fit(ContentFit::Contain)
-                                .border_radius(4),
-                        )
-                        .center(40)
-                        .into(),
-                        None => container(icon(config, "content_paste", 24.0))
-                            .center(40)
-                            .into(),
-                    };
-                    (lead, clip.title.clone(), ago(clip.time, now))
-                }
-                Hit::Bind(b) => {
-                    let bind = &self.binds[*b];
-                    let sub = if bind.submap.is_empty() {
-                        String::new()
-                    } else {
-                        format!("submap: {}", bind.submap)
-                    };
-                    (keys(config, &bind.keys), bind.description.clone(), sub)
-                }
-            };
-            let selected = i == self.selected;
-            let label = column![
-                text(title)
-                    .size(15)
-                    .wrapping(text::Wrapping::None)
-                    .shaping(text::Shaping::Advanced),
-                text(sub)
-                    .size(12)
-                    .color(muted)
-                    .wrapping(text::Wrapping::None),
-            ]
-            .spacing(2);
-            // Clipped: long one-line titles would otherwise run under the star button.
-            let label = container(label).width(Length::Fill).clip(true);
-            let content = row![lead, label].push(trail);
-            button(content.spacing(14).align_y(Alignment::Center))
-                .width(Length::Fill)
-                .height(ROW_H)
-                .padding([6, 12])
-                .on_press(wrap(Msg::Activate(i)))
-                .style(move |_, status| button::Style {
-                    background: Some(
-                        if selected {
-                            Color { a: 0.18, ..accent }
-                        } else if matches!(status, button::Status::Hovered) {
-                            Color { a: 0.07, ..fg }
-                        } else {
-                            Color::TRANSPARENT
-                        }
-                        .into(),
-                    ),
-                    text_color: fg,
-                    border: border::rounded(10),
-                    ..Default::default()
-                })
-                .into()
-        });
-        let empty = self.results.is_empty();
-        let list: Element<'a, M> = if empty {
-            container(text("No matches").color(muted))
-                .center(Length::Fill)
-                .into()
-        } else {
-            container(
-                scrollable(column(rows).spacing(2))
-                    .id(Id::new(LIST))
-                    .height(Length::Fill),
-            )
-            .max_height(LIST_MAX_H)
-            .into()
-        };
-        let hint = match self.kind {
-            Kind::Apps => "↑↓ select   Enter open   Esc close",
-            Kind::Keybinds => "↑↓ scroll   Esc close",
-            Kind::Clipboard => "↑↓ select   Enter copy   ★ keep   Esc close",
-        };
-        let mut footer = row![text(hint).size(11).color(muted)].align_y(Alignment::Center);
-        if self.kind == Kind::Clipboard && self.clips.iter().any(|c| !c.is_favorite()) {
-            let clear = button(text("Clear history").size(11))
-                .padding([3, 10])
-                .on_press(wrap(Msg::ClearClips))
-                .style(move |_, status| button::Style {
-                    background: Some(
-                        Color {
-                            a: if matches!(status, button::Status::Hovered) {
-                                0.16
-                            } else {
-                                0.08
-                            },
-                            ..fg
-                        }
-                        .into(),
-                    ),
-                    text_color: fg,
-                    border: border::rounded(8),
-                    ..Default::default()
-                });
-            footer = footer.push(Space::new().width(Length::Fill)).push(clear);
-        }
-        column![search, list, footer]
-            .spacing(10)
-            .width(PANEL_W)
-            .into()
-    }
 }
 
 /// Indices of `items` matching `query`, best first. An empty query keeps the original order.
@@ -442,62 +250,10 @@ fn emoji(query: &str) -> Vec<&'static emojis::Emoji> {
         .collect()
 }
 
-/// Extensions iced decodes by name. iced picks the decoder from the extension and
-/// panics on the next redraw if decoding failed, so anything else goes via bytes.
+/// Common image formats decoded by GPUI from a file path.
 fn known_ext(ext: &str) -> bool {
     ["svg", "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico"]
         .contains(&ext.to_ascii_lowercase().as_str())
-}
-
-fn app_icon<'a, M: 'a>(
-    config: &Config,
-    app: &App,
-    sniffed: &HashMap<PathBuf, image::Handle>,
-) -> Element<'a, M> {
-    const SIZE: f32 = 32.0;
-    let ext = |p: &PathBuf| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-    };
-    match &app.icon {
-        Some(path) if sniffed.contains_key(path) => {
-            image(sniffed[path].clone()).width(SIZE).height(SIZE).into()
-        }
-        Some(path) if !ext(path).as_deref().is_some_and(known_ext) => {
-            container(icon(config, "apps", 26.0)).center(SIZE).into()
-        }
-        Some(path) if ext(path).as_deref() == Some("svg") => svg(svg::Handle::from_path(path))
-            .width(SIZE)
-            .height(SIZE)
-            .into(),
-        Some(path) => image(image::Handle::from_path(path))
-            .width(SIZE)
-            .height(SIZE)
-            .into(),
-        None => {
-            let glyph = if app.steam { "sports_esports" } else { "apps" };
-            container(icon(config, glyph, 26.0)).center(SIZE).into()
-        }
-    }
-}
-
-/// `SUPER + SHIFT + Q` as key caps.
-fn keys<'a, M: 'a>(config: &Config, combo: &str) -> Element<'a, M> {
-    let fg: Color = config.colors.foreground.into();
-    row(combo.split(" + ").map(|k| {
-        container(text(k.to_owned()).size(12))
-            .padding([2, 7])
-            .style(move |_| container::Style {
-                background: Some(Color { a: 0.1, ..fg }.into()),
-                border: border::rounded(6).color(Color { a: 0.2, ..fg }).width(1),
-                ..Default::default()
-            })
-            .into()
-    }))
-    .spacing(4)
-    .width(190)
-    .into()
 }
 
 #[cfg(test)]

@@ -160,7 +160,7 @@ impl Default for BarConfig {
             radius: 14.0,
             padding: 6.0,
             spacing: 10.0,
-            font: "JetBrainsMono Nerd Font".into(),
+            font: "Noto Sans".into(),
             font_size: 13.0,
             icon_font: "Material Symbols Rounded".into(),
             blur: false,
@@ -440,8 +440,8 @@ impl AnimationsConfig {
     }
 }
 
-/// `[colors]`, as `#rrggbb` or `#rrggbbaa`. Defaults are Catppuccin Mocha.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// `[colors]`, as `#rrggbb` or `#rrggbbaa`. Defaults use the graphite palette.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
     pub background: Rgba,
@@ -458,12 +458,12 @@ pub struct Colors {
 impl Default for Colors {
     fn default() -> Self {
         Self {
-            background: Rgba([0x11, 0x11, 0x1b, 0xff]), // crust: reads as a notch
-            foreground: Rgba([0xcd, 0xd6, 0xf4, 0xff]), // text
-            accent: Rgba([0xcb, 0xa6, 0xf7, 0xff]),     // mauve
-            on_accent: Rgba([0x1e, 0x1e, 0x2e, 0xff]),  // base
-            muted: Rgba([0x6c, 0x70, 0x86, 0xff]),      // overlay0
-            urgent: Rgba([0xf3, 0x8b, 0xa8, 0xff]),     // red
+            background: Rgba([0x20, 0x22, 0x27, 0xff]),
+            foreground: Rgba([0xf5, 0xf5, 0xf7, 0xff]),
+            accent: Rgba([0x66, 0xb1, 0xff, 0xff]),
+            on_accent: Rgba([0x10, 0x1a, 0x28, 0xff]),
+            muted: Rgba([0xa6, 0xaa, 0xb5, 0xff]),
+            urgent: Rgba([0xff, 0x7b, 0x81, 0xff]),
         }
     }
 }
@@ -502,13 +502,6 @@ impl Rgba {
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
         let alpha = if hex.len() == 8 { byte(6)? } else { 0xff };
         Some(Self([byte(0)?, byte(2)?, byte(4)?, alpha]))
-    }
-}
-
-impl From<Rgba> for iced::Color {
-    fn from(c: Rgba) -> Self {
-        let [r, g, b, a] = c.0;
-        iced::Color::from_rgba8(r, g, b, f32::from(a) / 255.0)
     }
 }
 

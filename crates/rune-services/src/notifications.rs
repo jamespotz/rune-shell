@@ -85,10 +85,12 @@ pub enum Command {
     SetDnd(bool),
     /// Pointer over the popups: expiry timers pause, like Sonner.
     Hover(bool),
+    /// New popup timing and history size (the config changed).
+    SetOptions(Options),
 }
 
 /// Popup timing and history size.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     /// Used when the sender asks for the default (-1).
     pub timeout: Duration,
@@ -366,6 +368,10 @@ pub async fn spawn(
                         Command::ClearHistory => i.state.history.clear(),
                         Command::SetDnd(on) => i.state.dnd = on,
                         Command::Hover(on) => i.hover(on, Instant::now()),
+                        Command::SetOptions(options) => {
+                            i.options = options;
+                            i.state.history.truncate(options.history);
+                        }
                     }
                     tx.send_replace(i.state.clone());
                 }
@@ -443,10 +449,20 @@ fn rgba_from_raw(
             out.extend_from_slice(&[px[0], px[1], px[2], if alpha { px[3] } else { 255 }]);
         }
     }
+    // Notification pictures are displayed as 40px tiles. Bound retained history
+    // pixels here as well as the renderer cache, while allowing HiDPI detail.
+    let pixels = image::RgbaImage::from_raw(w as u32, h as u32, out)?;
+    let pixels = if w > 128 || h > 128 {
+        image::DynamicImage::ImageRgba8(pixels)
+            .thumbnail(128, 128)
+            .into_rgba8()
+    } else {
+        pixels
+    };
     Some(Image::Rgba {
-        width: w as u32,
-        height: h as u32,
-        data: out.into(),
+        width: pixels.width(),
+        height: pixels.height(),
+        data: pixels.into_raw().into(),
     })
 }
 
@@ -594,6 +610,26 @@ mod tests {
         assert!(
             rgba_from_raw(2, 2, 8, false, 3, &[0; 8]).is_none(),
             "short data is rejected"
+        );
+    }
+    #[test]
+    fn notification_history_keeps_thumbnail_pixels_not_full_images() {
+        let pixels = vec![180u8; 1024 * 512 * 4];
+        let Image::Rgba {
+            width,
+            height,
+            data,
+        } = rgba_from_raw(1024, 512, 1024 * 4, true, 4, &pixels).unwrap()
+        else {
+            panic!("RGBA expected")
+        };
+        assert_eq!((width, height), (128, 64));
+        assert_eq!(data.len(), 128 * 64 * 4);
+        assert!(
+            data.as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [180, 180, 180, 180])
         );
     }
 }

@@ -15,6 +15,22 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+/// Requests for Hyprland.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Switch the focused monitor to this workspace.
+    Focus(i32),
+    GameMode(bool),
+    /// Fetch the keybinds.
+    Binds,
+}
+
+/// What [`Hyprland::handle`] reports back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    Binds(Vec<Bind>),
+}
+
 /// Errors from talking to Hyprland.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -122,6 +138,21 @@ impl Hyprland {
             return Err(Error::Rejected(reply));
         }
         Ok(())
+    }
+
+    pub async fn handle(
+        &self,
+        command: Command,
+        reply: impl Fn(Reply) + Send + Sync,
+    ) -> Result<(), Error> {
+        match command {
+            Command::Focus(id) => self.focus_workspace(id).await,
+            Command::GameMode(on) => self.game_mode(on).await,
+            Command::Binds => {
+                reply(Reply::Binds(self.binds().await?));
+                Ok(())
+            }
+        }
     }
 
     /// Switches the focused monitor to workspace `id`.

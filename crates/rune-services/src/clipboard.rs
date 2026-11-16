@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    process::Command as Process,
     sync::Mutex,
 };
 use tracing::{info, warn};
@@ -90,6 +90,24 @@ impl Favorite {
     }
 }
 
+/// Requests for the clipboard history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Fetch the entries.
+    Load,
+    /// Put an entry back on the clipboard.
+    Copy(Id),
+    ToggleFavorite(Id),
+    /// Wipe history (not favorites).
+    Clear,
+}
+
+/// What [`Clipboard::handle`] reports back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    Entries(Vec<Entry>),
+}
+
 /// Clipboard history with times and favorites.
 pub struct Clipboard<T> {
     tools: T,
@@ -109,6 +127,23 @@ impl<T: Tools> Clipboard<T> {
             cache,
             lock: Mutex::new(()),
         }
+    }
+
+    /// Carries out `command`; everything but `Copy` answers with the new entries.
+    pub async fn handle(
+        &self,
+        command: Command,
+        reply: impl Fn(Reply) + Send + Sync,
+    ) -> Result<(), String> {
+        let changed = match command {
+            Command::Load => Ok(()),
+            Command::Copy(id) => return self.copy(id).await,
+            Command::ToggleFavorite(id) => self.toggle_favorite(id).await,
+            Command::Clear => self.clear().await,
+        };
+        // Answer even after a failure, so the list shows what really happened.
+        reply(Reply::Entries(self.list().await?));
+        changed
     }
 
     /// Notes the time of new history entries and forgets vanished ones.
@@ -337,7 +372,7 @@ pub struct Cliphist;
 
 impl Tools for Cliphist {
     async fn list(&self) -> Result<Vec<(u64, String)>, String> {
-        let out = Command::new("cliphist")
+        let out = Process::new("cliphist")
             .arg("list")
             .output()
             .await
@@ -346,7 +381,7 @@ impl Tools for Cliphist {
     }
 
     async fn decode(&self, id: u64) -> Result<Vec<u8>, String> {
-        let mut child = Command::new("cliphist")
+        let mut child = Process::new("cliphist")
             .arg("decode")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -366,7 +401,7 @@ impl Tools for Cliphist {
     }
 
     async fn wipe(&self) -> Result<(), String> {
-        let status = Command::new("cliphist")
+        let status = Process::new("cliphist")
             .arg("wipe")
             .status()
             .await
@@ -379,7 +414,7 @@ impl Tools for Cliphist {
     }
 
     async fn set(&self, data: Vec<u8>) -> Result<(), String> {
-        let mut wl = Command::new("wl-copy")
+        let mut wl = Process::new("wl-copy")
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run wl-copy: {e}"))?;
@@ -416,7 +451,7 @@ impl Clipboard<Cliphist> {
 
 /// Starts history recording unless something already does it.
 pub async fn ensure_watcher() {
-    let running = Command::new("pgrep")
+    let running = Process::new("pgrep")
         .args(["-f", "wl-paste .*--watch cliphist"])
         .stdout(Stdio::null())
         .status()
@@ -426,7 +461,7 @@ pub async fn ensure_watcher() {
         return;
     }
     for kind in ["text", "image"] {
-        let spawned = Command::new("wl-paste")
+        let spawned = Process::new("wl-paste")
             .args(["--type", kind, "--watch", "cliphist", "store"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -448,8 +483,8 @@ const MARKER: &str = "rune-clip-stamp";
 /// Notes the time of every new copy. Runs for the life of the shell.
 pub async fn track(clipboard: std::sync::Arc<Clipboard<Cliphist>>) {
     // A crashed shell leaves its watcher behind; don't stack them up.
-    let _ = Command::new("pkill").args(["-f", MARKER]).status().await;
-    let spawned = Command::new("wl-paste")
+    let _ = Process::new("pkill").args(["-f", MARKER]).status().await;
+    let spawned = Process::new("wl-paste")
         .args(["--watch", "sh", "-c", "cat >/dev/null; echo", MARKER])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

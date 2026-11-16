@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Rune — macOS direction</title>
+<style>
+:root{--sys:"Inter","SF Pro Text","Noto Sans",system-ui,sans-serif}
+*{box-sizing:border-box;margin:0}
+body{font-family:var(--sys);background:#111;color:#eee;padding:24px 32px 80px;-webkit-font-smoothing:antialiased}
+h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin:8px 0 4px}
+h2{font-size:17px;font-weight:600;margin:40px 0 4px}
+.sub{color:#999;font-size:13px;margin-bottom:14px;max-width:900px;line-height:1.5}
+.ms{font-family:"Material Symbols Rounded";font-weight:400;font-size:17px;line-height:1;font-variation-settings:"FILL" 1;vertical-align:middle}
+.desk{position:relative;border-radius:14px;overflow:hidden;background:
+ radial-gradient(1200px 500px at 20% 10%,#3b5fc4 0,transparent 60%),
+ radial-gradient(900px 600px at 85% 30%,#c2477a 0,transparent 55%),
+ radial-gradient(800px 500px at 50% 110%,#e3a04a 0,transparent 60%),#1c2340}
+.pick{cursor:pointer;border:2px solid transparent;border-radius:16px;padding:6px;margin-bottom:14px}
+.pick.sel{border-color:#0a84ff}
+.tag{font-size:12px;font-weight:600;color:#0a84ff;margin:0 0 6px 6px}
+/* --- bar A: Sonoma --- */
+.barA{height:30px;display:flex;align-items:center;padding:0 12px;gap:4px;font-size:13px;font-weight:500;color:#fff;
+ background:rgba(30,30,40,.38);backdrop-filter:blur(30px) saturate(180%);text-shadow:0 0 1px rgba(0,0,0,.2)}
+.barA .it{padding:3px 9px;border-radius:5px;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.barA .it:hover,.barA .it.on{background:rgba(255,255,255,.2)}
+.ws{display:flex;gap:2px}
+.ws span{width:22px;height:20px;display:grid;place-items:center;border-radius:5px;font-size:12px;color:rgba(255,255,255,.55)}
+.ws span.a{color:#fff;background:rgba(255,255,255,.22)}
+.grow{flex:1}
+/* --- bar B: Tahoe --- */
+.barB{height:34px;display:flex;align-items:center;padding:0 10px;gap:6px;font-size:13px;font-weight:500;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.35)}
+.cap{display:flex;align-items:center;gap:2px;padding:3px 4px;border-radius:999px;background:rgba(255,255,255,.12);
+ backdrop-filter:blur(14px) saturate(160%);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),inset 0 -1px 0 rgba(0,0,0,.1),0 2px 10px rgba(0,0,0,.18)}
+.cap .it{padding:2px 9px;border-radius:999px;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.cap .it:hover{background:rgba(255,255,255,.18)}
+.barB .ws span{border-radius:999px}
+/* --- popovers --- */
+.grid{display:flex;flex-wrap:wrap;gap:22px;padding:22px;align-items:flex-start}
+.pop{width:320px;border-radius:14px;padding:10px;color:#fff;font-size:13px;
+ background:rgba(40,40,48,.62);backdrop-filter:blur(40px) saturate(180%);
+ box-shadow:inset 0 0 0 .5px rgba(255,255,255,.22),0 0 0 .5px rgba(0,0,0,.6),0 12px 40px rgba(0,0,0,.35)}
+.lbl{font-size:11px;color:rgba(255,255,255,.55);font-weight:600;margin:2px 6px 6px}
+.ptitle{font-size:13px;font-weight:600;margin:2px 6px 8px;display:flex;justify-content:space-between;align-items:center}
+.row{display:flex;align-items:center;gap:10px;padding:6px 6px;border-radius:7px}
+.row:hover{background:rgba(255,255,255,.1)}
+.row .r{margin-left:auto;color:rgba(255,255,255,.5);font-size:12px}
+.dot{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.14);flex:none}
+.dot.on{background:#0a84ff}
+.sep{height:1px;background:rgba(255,255,255,.12);margin:6px 6px}
+.sw{width:32px;height:19px;border-radius:999px;background:rgba(255,255,255,.2);position:relative;flex:none;margin-left:auto}
+.sw::after{content:"";position:absolute;width:17px;height:17px;border-radius:50%;background:#fff;top:1px;left:1px;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.sw.on{background:#0a84ff}.sw.on::after{left:14px}
+.mod{background:rgba(255,255,255,.09);border-radius:12px;padding:8px;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.12)}
+.cc{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.slider{height:24px;border-radius:999px;background:rgba(255,255,255,.14);position:relative;overflow:hidden;margin:4px 0 2px}
+.slider i{position:absolute;inset:0 auto 0 0;background:rgba(255,255,255,.9);border-radius:999px}
+.slider .ms{position:absolute;left:7px;top:4px;color:#333;z-index:1;font-size:16px}
+.small{font-size:11px;color:rgba(255,255,255,.55)}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:12px;gap:2px}
+.cal b{font-size:10px;color:rgba(255,255,255,.45);font-weight:600;padding:3px 0}
+.cal span{padding:5px 0;border-radius:50%}
+.cal span.t{background:#ff453a;font-weight:700}
+.cal span.m{color:rgba(255,255,255,.3)}
+.ncard{border-radius:14px;padding:10px 12px;background:rgba(60,60,70,.55);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.18);margin-bottom:8px;display:flex;gap:10px}
+.appic{width:30px;height:30px;border-radius:7px;flex:none}
+.art{width:56px;height:56px;border-radius:8px;background:linear-gradient(135deg,#7a2bd6,#e2457a);flex:none}
+.prog{height:4px;border-radius:2px;background:rgba(255,255,255,.2);margin:8px 0 3px}.prog i{display:block;height:100%;width:38%;background:#fff;border-radius:2px}
+/* --- settings --- */
+.win{width:900px;height:620px;border-radius:12px;overflow:hidden;display:flex;margin:22px auto;color:#e8e8ea;font-size:13px;
+ box-shadow:0 0 0 .5px rgba(0,0,0,.8),inset 0 0 0 .5px rgba(255,255,255,.15),0 25px 70px rgba(0,0,0,.5);background:#1e1e20}
+.side{width:230px;padding:10px 10px;background:rgba(40,40,46,.72);backdrop-filter:blur(40px);border-right:.5px solid rgba(0,0,0,.5);overflow:hidden}
+.lights{display:flex;gap:8px;padding:4px 6px 14px}.lights i{width:12px;height:12px;border-radius:50%}
+.search{background:rgba(255,255,255,.08);border-radius:7px;padding:5px 8px;color:rgba(255,255,255,.4);display:flex;gap:6px;align-items:center;margin-bottom:10px}
+.nav{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;margin:1px 0}
+.nav.sel{background:#0a64d6}
+.sq{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;color:#fff;flex:none}
+.sq .ms{font-size:15px}
+.navgap{height:12px}
+.main{flex:1;overflow:hidden;background:#1e1e20}
+.tbar{height:52px;display:flex;align-items:center;padding:0 22px;font-size:15px;font-weight:700;gap:12px}
+.tbar .ms{color:rgba(255,255,255,.4)}
+.content{padding:4px 22px 22px;max-width:620px;margin:0 auto}
+.group{background:#2a2a2d;border-radius:10px;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.07);margin-bottom:18px}
+.grow2{display:flex;align-items:center;gap:12px;padding:10px 12px;min-height:40px}
+.grow2+.grow2{border-top:.5px solid rgba(255,255,255,.08)}
+.grow2 .v{margin-left:auto;color:rgba(255,255,255,.55);display:flex;align-items:center;gap:4px}
+.ghead{font-size:12px;font-weight:600;color:rgba(255,255,255,.5);margin:0 4px 6px}
+.seg{display:flex;gap:18px;justify-content:center;padding:14px 0 8px}
+.seg div{text-align:center;font-size:12px}
+.thumb{width:92px;height:60px;border-radius:7px;margin-bottom:6px;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.2)}
+.seg .s .thumb{box-shadow:0 0 0 3px #0a84ff}
+.swatch{display:flex;gap:7px}.swatch i{width:16px;height:16px;border-radius:50%}
+.swatch i.s{box-shadow:0 0 0 2px #1e1e20,0 0 0 4px rgba(255,255,255,.7)}
+.popup{background:rgba(255,255,255,.1);border-radius:6px;padding:3px 8px;color:#fff}
+.chip{width:28px;height:28px}
+</style></head><body>
+
+<h1>Rune, macOS direction</h1>
+<p class="sub">Mockups only. Fonts fall back to Inter/Noto here, because SF Pro isn't on Linux. Icons use your Material Symbols Rounded font. <b>Click a bar to pick it.</b> Then tell me in the terminal what's right and what's off, widget by widget if you like.</p>
+
+<h2>1 · The bar, two macOS eras</h2>
+<p class="sub">A is Sonoma/Sequoia: one frosted full-width strip with monochrome glyphs and text, where a highlight appears when something is open. B is Tahoe (macOS 26): the bar itself is clear and items sit in floating glass capsules.</p>
+
+<div class="pick" data-choice="bar-sonoma" onclick="toggleSelect(this)">
+<div class="tag">A · Sonoma frosted strip</div>
+<div class="desk" style="height:140px">
+ <div class="barA">
+  <div class="it"><span class="ms">token</span></div>
+  <div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span><span>5</span></div>
+  <div class="it" style="font-weight:700">Firefox</div>
+  <div class="grow"></div>
+  <div class="it"><span class="ms" style="font-size:15px">music_note</span> Excalibur — Umbra's Sentience</div>
+  <div class="grow"></div>
+  <div class="it"><span class="ms">bluetooth</span></div>
+  <div class="it"><span class="ms">wifi</span></div>
+  <div class="it"><span class="ms">volume_up</span></div>
+  <div class="it"><span class="ms">battery_5_bar</span></div>
+  <div class="it"><span class="ms">cloud</span> 25°</div>
+  <div class="it on"><span class="ms">toggle_on</span></div>
+  <div class="it">Tue 17 Nov  2:55 AM</div>
+ </div>
+</div></div>
+
+<div class="pick" data-choice="bar-tahoe" onclick="toggleSelect(this)">
+<div class="tag">B · Tahoe glass capsules</div>
+<div class="desk" style="height:140px">
+ <div class="barB">
+  <div class="cap"><div class="it"><span class="ms">token</span></div><div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span><span>5</span></div></div>
+  <div class="cap"><div class="it" style="font-weight:700">Firefox</div></div>
+  <div class="grow"></div>
+  <div class="cap"><div class="it"><span class="ms" style="font-size:15px">music_note</span> Excalibur — Umbra's Sentience</div></div>
+  <div class="grow"></div>
+  <div class="cap"><div class="it"><span class="ms">bluetooth</span></div><div class="it"><span class="ms">wifi</span></div><div class="it"><span class="ms">volume_up</span></div><div class="it"><span class="ms">battery_5_bar</span></div><div class="it"><span class="ms">cloud</span> 25°</div><div class="it"><span class="ms">toggle_on</span></div></div>
+  <div class="cap"><div class="it">Tue 17 Nov  2:55 AM</div></div>
+ </div>
+</div></div>
+
+<h2>2 · Every widget's dropdown</h2>
+<p class="sub">Each one drops from its bar item as a frosted rounded popover. Hover gives a soft row highlight, and the blue accent appears only on things that are on.</p>
+<div class="desk"><div class="grid">
+
+ <div><div class="small" style="margin:0 0 6px 4px">Quick settings (Control Center)</div>
+ <div class="pop" style="width:330px">
+  <div class="cc">
+   <div class="mod" style="grid-row:span 2">
+    <div class="row"><div class="dot on"><span class="ms">wifi</span></div><div>Wi-Fi<div class="small">Home-5G</div></div></div>
+    <div class="row"><div class="dot on"><span class="ms">bluetooth</span></div><div>Bluetooth<div class="small">On</div></div></div>
+    <div class="row"><div class="dot"><span class="ms">airplanemode_active</span></div><div>Airplane<div class="small">Off</div></div></div>
+   </div>
+   <div class="mod"><div class="row"><div class="dot"><span class="ms">do_not_disturb_on</span></div><div>Focus</div></div></div>
+   <div class="mod" style="display:flex;gap:6px;justify-content:space-around;align-items:center">
+     <div class="dot"><span class="ms">screenshot_region</span></div><div class="dot"><span class="ms">radio_button_checked</span></div><div class="dot"><span class="ms">dark_mode</span></div></div>
+   <div class="mod" style="grid-column:span 2"><div style="font-weight:600;margin:0 2px">Display</div><div class="slider"><i style="width:70%"></i><span class="ms">light_mode</span></div></div>
+   <div class="mod" style="grid-column:span 2"><div style="font-weight:600;margin:0 2px">Sound</div><div class="slider"><i style="width:44%"></i><span class="ms">volume_up</span></div></div>
+   <div class="mod" style="grid-column:span 2;display:flex;gap:10px;align-items:center"><div class="art" style="width:38px;height:38px"></div><div><div style="font-weight:600">Umbra's Sentience</div><div class="small">Excalibur</div></div><span class="ms" style="margin-left:auto;font-size:22px">pause</span><span class="ms" style="font-size:22px">skip_next</span></div>
+  </div></div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Wi-Fi</div>
+ <div class="pop" style="width:280px">
+  <div class="ptitle">Wi-Fi <div class="sw on"></div></div>
+  <div class="lbl">Known Network</div>
+  <div class="row"><div class="dot on"><span class="ms">wifi</span></div>Home-5G<span class="ms r">lock</span></div>
+  <div class="lbl" style="margin-top:6px">Other Networks</div>
+  <div class="row"><div class="dot"><span class="ms">wifi_2_bar</span></div>Neighbour<span class="ms r">lock</span></div>
+  <div class="row"><div class="dot"><span class="ms">wifi_1_bar</span></div>CafeGuest</div>
+  <div class="sep"></div><div class="row">Wi-Fi Settings…</div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Bluetooth</div>
+ <div class="pop" style="width:280px">
+  <div class="ptitle">Bluetooth <div class="sw on"></div></div>
+  <div class="lbl">Devices</div>
+  <div class="row"><div class="dot on"><span class="ms">headphones</span></div>WH-1000XM5<span class="r">80%</span></div>
+  <div class="row"><div class="dot"><span class="ms">mouse</span></div>MX Master 3</div>
+  <div class="row"><div class="dot"><span class="ms">keyboard</span></div>Keychron K2</div>
+  <div class="sep"></div><div class="row">Bluetooth Settings…</div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Sound</div>
+ <div class="pop" style="width:280px">
+  <div class="ptitle">Sound</div>
+  <div class="slider"><i style="width:44%"></i><span class="ms">volume_up</span></div>
+  <div class="lbl" style="margin-top:10px">Output</div>
+  <div class="row"><div class="dot on"><span class="ms">headphones</span></div>WH-1000XM5</div>
+  <div class="row"><div class="dot"><span class="ms">speaker</span></div>Speakers</div>
+  <div class="sep"></div><div class="row">Sound Settings…</div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Battery</div>
+ <div class="pop" style="width:260px">
+  <div class="ptitle">Battery <span class="small">82%</span></div>
+  <div class="small" style="margin:0 6px 6px">Power Source: Battery · 3:40 left</div>
+  <div class="sep"></div>
+  <div class="row">Power Mode<span class="r">Balanced ›</span></div>
+  <div class="sep"></div><div class="row">Battery Settings…</div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Weather</div>
+ <div class="pop" style="width:280px">
+  <div style="display:flex;justify-content:space-between;padding:4px 6px"><div><div style="font-weight:600">Asingan</div><div style="font-size:40px;font-weight:300;letter-spacing:-.02em">25°</div></div><div style="text-align:right"><span class="ms" style="font-size:34px">cloud</span><div class="small">Cloudy<br>H:31° L:23°</div></div></div>
+  <div class="mod" style="display:flex;justify-content:space-between;text-align:center;font-size:12px;margin-top:6px">
+   <div>Now<br><span class="ms">cloud</span><br>25°</div><div>4AM<br><span class="ms">rainy</span><br>24°</div><div>5AM<br><span class="ms">rainy</span><br>24°</div><div>6AM<br><span class="ms">partly_cloudy_day</span><br>25°</div><div>7AM<br><span class="ms">sunny</span><br>27°</div></div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Clock → Calendar</div>
+ <div class="pop" style="width:270px">
+  <div class="ptitle">November 2026 <span class="small"><span class="ms">chevron_left</span><span class="ms">chevron_right</span></span></div>
+  <div class="cal"><b>S</b><b>M</b><b>T</b><b>W</b><b>T</b><b>F</b><b>S</b>
+  <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span>16</span><span class="t">17</span><span>18</span><span>19</span><span>20</span><span>21</span><span>22</span><span>23</span><span>24</span><span>25</span><span>26</span><span>27</span><span>28</span><span>29</span><span>30</span><span class="m">1</span><span class="m">2</span><span class="m">3</span><span class="m">4</span><span class="m">5</span></div>
+  <div class="sep"></div>
+  <div class="row" style="align-items:flex-start"><i style="width:3px;height:30px;background:#ff9f0a;border-radius:2px"></i><div>Standup<div class="small">10:00 – 10:15</div></div></div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Notifications (Notification Center)</div>
+ <div style="width:340px">
+  <div class="ptitle" style="color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.4)">Notifications <span class="small" style="color:#fff">Clear</span></div>
+  <div class="ncard pop" style="width:auto;padding:10px 12px"><div class="appic" style="background:#5865f2"></div><div style="flex:1"><div style="display:flex;justify-content:space-between"><b>Discord</b><span class="small">now</span></div><div>mara: are you on tonight?</div></div></div>
+  <div class="ncard pop" style="width:auto;padding:10px 12px"><div class="appic" style="background:#2ea44f"></div><div style="flex:1"><div style="display:flex;justify-content:space-between"><b>Screenshot</b><span class="small">2m</span></div><div>Saved to Pictures/Screenshots</div></div></div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Now playing (media)</div>
+ <div class="pop" style="width:300px">
+  <div style="display:flex;gap:12px;padding:4px"><div class="art"></div><div style="min-width:0"><div style="font-weight:600">Umbra's Sentience</div><div class="small">Excalibur · Operator Solo Void</div><div class="small" style="margin-top:4px"><span class="ms" style="font-size:13px">headphones</span> Spotify</div></div></div>
+  <div style="padding:0 4px"><div class="prog"><i></i></div><div class="small" style="display:flex;justify-content:space-between"><span>1:24</span><span>-2:31</span></div></div>
+  <div style="display:flex;justify-content:center;gap:26px;padding:6px"><span class="ms" style="font-size:26px">fast_rewind</span><span class="ms" style="font-size:30px">pause</span><span class="ms" style="font-size:26px">fast_forward</span></div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Tray icon menu</div>
+ <div class="pop" style="width:200px;padding:5px">
+  <div class="row">Open Steam</div><div class="row">Library</div><div class="row">Friends</div><div class="sep"></div><div class="row">Exit Steam</div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Launcher (Spotlight)</div>
+ <div class="pop" style="width:520px;border-radius:22px;padding:0">
+  <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;font-size:20px;font-weight:300"><span class="ms" style="font-size:22px;opacity:.6">search</span>fire<span style="opacity:.35">fox</span></div>
+  <div class="sep" style="margin:0"></div>
+  <div style="padding:6px">
+  <div class="row" style="background:#0a64d6"><div class="appic" style="background:linear-gradient(135deg,#ff9500,#e0245e);width:26px;height:26px"></div>Firefox<span class="r" style="color:#ddd">Application</span></div>
+  <div class="row"><div class="appic" style="background:#555;width:26px;height:26px"></div>Firewall<span class="r">Application</span></div></div>
+ </div></div>
+
+ <div><div class="small" style="margin:0 0 6px 4px">Volume / brightness OSD</div>
+ <div class="pop" style="width:200px;border-radius:18px;padding:12px">
+  <div class="slider" style="margin:0"><i style="width:44%"></i><span class="ms">volume_up</span></div>
+ </div></div>
+
+</div></div>
+
+<h2>3 · Settings, System Settings style</h2>
+<p class="sub">This is a frosted sidebar with a search field, coloured square icons grouped like macOS, and grouped rounded lists on the right. The page shown is Appearance.</p>
+<div class="desk" style="padding:10px 0"><div class="win">
+ <div class="side">
+  <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+  <div class="search"><span class="ms" style="font-size:15px">search</span>Search</div>
+  <div class="nav"><div class="sq" style="background:#0a84ff"><span class="ms">wifi</span></div>Wi-Fi</div>
+  <div class="nav"><div class="sq" style="background:#0a84ff"><span class="ms">bluetooth</span></div>Bluetooth</div>
+  <div class="nav"><div class="sq" style="background:#ff375f"><span class="ms">volume_up</span></div>Sound</div>
+  <div class="navgap"></div>
+  <div class="nav sel"><div class="sq" style="background:#3a3a3c"><span class="ms">contrast</span></div>Appearance</div>
+  <div class="nav"><div class="sq" style="background:#bf5af2"><span class="ms">palette</span></div>Theme</div>
+  <div class="nav"><div class="sq" style="background:#32ade6"><span class="ms">wallpaper</span></div>Wallpaper</div>
+  <div class="nav"><div class="sq" style="background:#636366"><span class="ms">toolbar</span></div>Menu Bar</div>
+  <div class="nav"><div class="sq" style="background:#30d158"><span class="ms">animation</span></div>Animations</div>
+  <div class="navgap"></div>
+  <div class="nav"><div class="sq" style="background:#8e8e93"><span class="ms">search</span></div>Launcher</div>
+  <div class="nav"><div class="sq" style="background:#ff453a"><span class="ms">calendar_month</span></div>Calendar</div>
+  <div class="nav"><div class="sq" style="background:#64d2ff"><span class="ms">partly_cloudy_day</span></div>Weather</div>
+  <div class="nav"><div class="sq" style="background:#ff9f0a"><span class="ms">screenshot_region</span></div>Capture</div>
+ </div>
+ <div class="main">
+  <div class="tbar"><span class="ms">chevron_left</span><span class="ms">chevron_right</span>Appearance</div>
+  <div class="content">
+   <div class="group">
+    <div class="grow2" style="display:block"><div>Appearance</div>
+     <div class="seg"><div><div class="thumb" style="background:linear-gradient(#eee,#ccc)"></div>Light</div><div class="s"><div class="thumb" style="background:linear-gradient(#333,#111)"></div>Dark</div><div><div class="thumb" style="background:linear-gradient(90deg,#ddd 50%,#222 50%)"></div>Auto</div></div></div>
+   </div>
+   <div class="group">
+    <div class="grow2">Accent colour<div class="v swatch"><i style="background:#0a84ff" class="s"></i><i style="background:#bf5af2"></i><i style="background:#ff375f"></i><i style="background:#ff453a"></i><i style="background:#ff9f0a"></i><i style="background:#ffd60a"></i><i style="background:#30d158"></i><i style="background:#8e8e93"></i></div></div>
+    <div class="grow2">Highlight colour<div class="v"><span class="popup">Accent Colour ⌄</span></div></div>
+   </div>
+   <div class="ghead">Text</div>
+   <div class="group">
+    <div class="grow2">Font<div class="v"><span class="popup">System (Inter) ⌄</span></div></div>
+    <div class="grow2">Text size<div class="v"><span class="popup">13 pt ⌄</span></div></div>
+   </div>
+   <div class="ghead">Menu bar</div>
+   <div class="group">
+    <div class="grow2">Translucent menu bar<div class="sw on"></div></div>
+    <div class="grow2">Reduce transparency<div class="sw"></div></div>
+    <div class="grow2">Show weather in menu bar<div class="sw on"></div></div>
+   </div>
+  </div>
+ </div>
+</div></div>
+
+</body></html>

@@ -2,9 +2,6 @@
 resolver = "3"
 members = ["crates/*"]
 
-[patch.crates-io]
-# softbuffer 0.4.8 hands Wayland its buffers as Xrgb8888 (alpha ignored), so the
-# software renderer drew every transparent pixel black. vendor/softbuffer is the
-# same release with the two Wayland formats changed to Argb8888; tiny-skia already
-# writes premultiplied alpha. Drop this once softbuffer ships alpha support.
-softbuffer = { path = "vendor/softbuffer" }
+[patch."https://github.com/zed-industries/zed"]
+# Keep layer-shell stretch dimensions out of wp_viewport destinations during startup.
+gpui_linux = { path = "vendor/gpui_linux" }

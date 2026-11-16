@@ -9,7 +9,7 @@ height = 32               # logical px
 radius = 14.0             # bottom corners and the concave top shoulders
 padding = 6.0             # notch side -> outermost widget
 spacing = 10.0            # between widgets (sections get twice this)
-font = "JetBrainsMono Nerd Font"
+font = "Noto Sans"
 font_size = 13.0
 blur = false              # blur behind the notch (needs a transparent background color)
 icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
@@ -76,10 +76,10 @@ enabled = true
 duration_ms = 250
 reduce_motion = false     # overrides everything above
 
-[colors]                  # Catppuccin Mocha; "#rrggbb" or "#rrggbbaa"
-background = "#11111b"
-foreground = "#cdd6f4"
-accent = "#cba6f7"
-on_accent = "#1e1e2e"
-muted = "#6c7086"
-urgent = "#f38ba8"
+[colors]                  # Graphite; "#rrggbb" or "#rrggbbaa"
+background = "#202227"
+foreground = "#f5f5f7"
+accent = "#66b1ff"
+on_accent = "#101a28"
+muted = "#a6aab5"
+urgent = "#ff7b81"

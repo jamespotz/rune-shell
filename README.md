@@ -1,8 +1,7 @@
 # Rune Shell
 
-A desktop shell for Hyprland, written in Rust from end to end: no GTK and no C libraries.
-The bar is a MacBook-style notch: a solid island at the top centre of each monitor,
-flush with the screen edge, with concave shoulders and a width that follows its content.
+A desktop shell for Hyprland, written in Rust with GPUI and native Wayland layer-shell windows. It does not use GTK.
+The bar spans the top of each monitor with macOS-style left, center and right widget groups.
 Inside it: clickable workspaces (animated), the focused window's title, a clock and a
 settings button. The settings window covers Appearance, Bar, Launcher and Animations.
 
@@ -99,18 +98,22 @@ web album art is fetched with `curl`; both are optional.
 
 ## Build
 
-Fedora needs only the Rust toolchain. There are no `-devel` packages, because nothing links
-against C libraries except libc:
+Use a recent stable Rust toolchain. The pinned GPUI revision uses Rust 1.98.1 upstream;
+this workspace was built with Rust 1.100.0. GPUI renders through wgpu and needs a
+working Vulkan driver on Linux. It links native font, keyboard, and Wayland libraries.
+On Fedora, install their build dependencies:
 
 ```sh
-sudo dnf install rust cargo   # or rustup, latest stable
+sudo dnf install rust cargo gcc-c++ pkgconf-pkg-config fontconfig-devel freetype-devel libxkbcommon-devel wayland-devel
+# Or install the Rust toolchain with rustup.
 cargo build --release
 install -Dm755 target/release/rune-shell ~/.local/bin/rune-shell
 ```
 
 Fonts: the defaults are `JetBrainsMono Nerd Font` for text and `Material Symbols Rounded`
 for icons (icons are written by name, e.g. `schedule`). Any installed font works. Run tests with
-`cargo test`.
+`cargo test --workspace`. Native window tests are opt-in and require a running Wayland
+compositor; run individual ignored tests with `--ignored --exact --test-threads=1`.
 
 ## Hyprland setup
 
@@ -151,8 +154,12 @@ Check the layer-rule syntax against your Hyprland version. The layer namespace i
 | `rune-shell toggle settings` | open or close the settings window (Esc also closes it) |
 
 Commands exit with status 1 on error. Logs go to stderr; set the level with `RUST_LOG=debug`.
-Rendering is software (tiny-skia), which keeps memory low. Transparency works through a
-patched copy of softbuffer in `vendor/softbuffer` (Wayland buffers with an alpha channel).
+Rendering uses GPUI's wgpu backend. Transparent layer-shell windows use the compositor's
+alpha support directly. GPUI is pinned to an immutable upstream revision because the
+published 0.2.2 package lacks the required layer-shell implementation. A small
+[local GPUI Linux patch](vendor/gpui_linux/README.rune.md) prevents invalid zero-size
+viewport destinations during fractional-scale startup. The historical
+Iced software-renderer memory measurements do not apply to this backend.
 
 ## Configuration
 
@@ -168,7 +175,7 @@ comments.
 ```
 crates/
   rune-services/  Hyprland IPC client and clock. tokio tasks publishing via watch channels
-  rune-ui/        config schema, notch and settings window (iced + iced_layershell)
+  rune-ui/        config schema, GPUI views, state transitions and layer-shell windows
   rune-shell/     binary: CLI client, control socket, config loading and hot reload
 ```
 

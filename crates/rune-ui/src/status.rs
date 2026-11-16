@@ -1,13 +1,4 @@
-//! Volume, network and battery widgets, and the volume/brightness OSD.
-
-use crate::{
-    App, Message,
-    notch::{font, icon},
-};
-use iced::{
-    Alignment, Color, Element, Length, border, mouse,
-    widget::{Space, button, container, mouse_area, progress_bar, row, text},
-};
+//! Status icons and OSD data.
 use rune_services::{
     audio::Volume,
     system::{Battery, NetKind, Network},
@@ -20,8 +11,8 @@ pub enum Osd {
     Brightness(u8),
 }
 
-pub const OSD_W: u32 = 320;
-pub const OSD_H: u32 = 64;
+pub const OSD_W: u32 = 240;
+pub const OSD_H: u32 = 48;
 
 pub fn volume_icon(v: Volume) -> &'static str {
     match (v.muted, v.percent) {
@@ -32,7 +23,7 @@ pub fn volume_icon(v: Volume) -> &'static str {
     }
 }
 
-fn network_icon(n: &Network) -> &'static str {
+pub(crate) fn network_icon(n: &Network) -> &'static str {
     match (n.connected, n.kind, n.strength) {
         (false, _, _) => "signal_wifi_off",
         (true, NetKind::Wired, _) => "lan",
@@ -58,7 +49,7 @@ pub fn wifi_icon(strength: u8) -> &'static str {
     }
 }
 
-fn battery_icon(b: &Battery) -> &'static str {
+pub(crate) fn battery_icon(b: &Battery) -> &'static str {
     if b.charging || b.full {
         return "battery_charging_full";
     }
@@ -73,150 +64,6 @@ fn battery_icon(b: &Battery) -> &'static str {
         "battery_full",
     ];
     LEVELS[((b.percent / 100.0 * 7.0).round() as usize).min(7)]
-}
-
-fn plain<'a>(
-    app: &'a App,
-    glyph: &str,
-    label: Option<String>,
-    msg: Option<Message>,
-) -> Element<'a, Message> {
-    let c = &app.config;
-    let fg: Color = c.colors.foreground.into();
-    let mut content = row![icon(c, glyph, c.bar.font_size * 1.3)]
-        .spacing(4)
-        .align_y(Alignment::Center);
-    if let Some(l) = label {
-        content = content.push(text(l).size(c.bar.font_size).font(font(&c.bar.font)));
-    }
-    let b = button(content)
-        .padding([2, 4])
-        .style(move |_, s| button::Style {
-            background: matches!(s, button::Status::Hovered)
-                .then(|| Color { a: 0.12, ..fg }.into()),
-            text_color: fg,
-            border: border::rounded(8),
-            ..Default::default()
-        });
-    match msg {
-        Some(m) => b.on_press(m).into(),
-        None => b.into(),
-    }
-}
-
-/// Click to mute, scroll to change.
-pub fn volume(app: &App) -> Element<'_, Message> {
-    let Some(v) = app.volume else {
-        return Space::new().into();
-    };
-    let label = if v.muted {
-        None
-    } else {
-        Some(format!("{}%", v.percent))
-    };
-    mouse_area(plain(app, volume_icon(v), label, Some(Message::VolumeMute)))
-        .on_scroll(|delta| {
-            let y = match delta {
-                mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y,
-            };
-            Message::VolumeStep(if y > 0.0 { 5 } else { -5 })
-        })
-        .into()
-}
-
-pub fn network(app: &App) -> Element<'_, Message> {
-    let Some(n) = &app.network else {
-        return Space::new().into();
-    };
-    plain(app, network_icon(n), None, Some(Message::OpenWifi))
-}
-
-/// CPU, memory and temperature, e.g. `12%  40%  54°`.
-pub fn stats(app: &App) -> Element<'_, Message> {
-    let Some(s) = app.stats else {
-        return Space::new().into();
-    };
-    let c = &app.config;
-    let fg: Color = c.colors.foreground.into();
-    let item = |glyph: &str, value: String| {
-        row![
-            icon(c, glyph, c.bar.font_size * 1.2),
-            text(value)
-                .size(c.bar.font_size)
-                .font(font(&c.bar.font))
-                .color(fg)
-        ]
-        .spacing(3)
-        .align_y(Alignment::Center)
-    };
-    let mut r = row![
-        item("memory", format!("{}%", s.cpu)),
-        item("memory_alt", format!("{}%", s.ram))
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    if let Some(t) = s.temp {
-        r = r.push(item("thermostat", format!("{t}°")));
-    }
-    container(r).padding([2, 4]).into()
-}
-
-pub fn battery(app: &App) -> Element<'_, Message> {
-    let Some(b) = &app.battery else {
-        return Space::new().into();
-    };
-    plain(
-        app,
-        battery_icon(b),
-        Some(format!("{:.0}%", b.percent)),
-        None,
-    )
-}
-
-pub fn osd(app: &App) -> Element<'_, Message> {
-    let c = &app.config;
-    let fg: Color = c.colors.foreground.into();
-    let accent: Color = c.colors.accent.into();
-    let bg: Color = c.colors.background.into();
-    let (glyph, value, dim) = match app.osd {
-        Some(Osd::Volume(v)) => (volume_icon(v), v.percent.min(100) as f32, v.muted),
-        Some(Osd::Brightness(b)) => ("brightness_medium", f32::from(b), false),
-        None => return Space::new().into(),
-    };
-    let bar_color = if dim { Color { a: 0.4, ..fg } } else { accent };
-    container(
-        row![
-            icon(c, glyph, 26.0),
-            progress_bar(0.0..=100.0, value)
-                .girth(8)
-                .length(Length::Fill)
-                .style(move |_| progress_bar::Style {
-                    background: Color { a: 0.15, ..fg }.into(),
-                    bar: bar_color.into(),
-                    border: border::rounded(4),
-                }),
-            text(format!("{value:.0}"))
-                .size(15)
-                .width(34)
-                .align_x(Alignment::End)
-                .font(font(&c.bar.font)),
-        ]
-        .spacing(14)
-        .align_y(Alignment::Center),
-    )
-    .padding([0, 18])
-    .center_y(Length::Fill)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(move |_| container::Style {
-        background: Some(Color { a: 1.0, ..bg }.into()),
-        border: border::rounded(OSD_H as f32 / 2.0)
-            .color(Color { a: 0.12, ..fg })
-            .width(1),
-        text_color: Some(fg),
-        ..Default::default()
-    })
-    .into()
 }
 
 #[cfg(test)]

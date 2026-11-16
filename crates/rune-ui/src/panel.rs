@@ -1,7 +1,7 @@
 //! Panels: at most one open at a time, each in its own layer surface under the
 //! bar. This module decides what is open, where, and how big; it knows nothing
-//! about iced. Callers feed it pointer, bar and size facts and get back plain
-//! [`Command`]s, which `lib.rs` turns into layer-shell tasks.
+//! about the rendering toolkit. Callers feed it pointer, bar and size facts and get back plain
+//! [`Command`]s, which `lib.rs` turns into window operations.
 
 use crate::launcher::Kind;
 use std::collections::HashMap;
@@ -17,10 +17,14 @@ pub enum Panel {
     Calendar,
     Quick,
     Power,
+    Wifi,
+    Bluetooth,
+    Sound,
+    Battery,
 }
 
 /// Panels reachable from the CLI (`rune-shell toggle <name>`).
-const NAMED: [(&str, Panel); 9] = [
+const NAMED: [(&str, Panel); 13] = [
     ("launcher", Panel::Launcher(Kind::Apps)),
     ("keybinds", Panel::Launcher(Kind::Keybinds)),
     ("clipboard", Panel::Launcher(Kind::Clipboard)),
@@ -30,6 +34,10 @@ const NAMED: [(&str, Panel); 9] = [
     ("calendar", Panel::Calendar),
     ("quick-settings", Panel::Quick),
     ("power", Panel::Power),
+    ("wifi", Panel::Wifi),
+    ("bluetooth", Panel::Bluetooth),
+    ("sound", Panel::Sound),
+    ("battery", Panel::Battery),
 ];
 
 impl Panel {
@@ -312,6 +320,8 @@ mod tests {
             assert!(Panel::from_name(name).is_some(), "{name}");
         }
         assert_eq!(Panel::from_name("quick-settings"), Some(Panel::Quick));
+        assert_eq!(Panel::from_name("sound"), Some(Panel::Sound));
+        assert_eq!(Panel::from_name("wifi"), Some(Panel::Wifi));
         assert_eq!(Panel::from_name("traymenu"), None);
     }
 }
