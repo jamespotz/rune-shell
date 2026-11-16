@@ -13,7 +13,9 @@ use iced::{
     },
 };
 use rune_services::{
+    audio::{DeviceCommand, Devices},
     bluetooth::{Command as BtCommand, State as BtState},
+    system::{Network, WifiNetwork},
     theme::{self, Palette, Variant, export::App as ThemeApp},
     wallpaper::Wallpaper,
     weather::Location,
@@ -28,7 +30,9 @@ pub enum Page {
     Wallpaper,
     Bar,
     Weather,
+    Wifi,
     Bluetooth,
+    Sound,
     Calendar,
     Capture,
     Launcher,
@@ -36,13 +40,15 @@ pub enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 10] = [
+    const ALL: [Page; 12] = [
         Page::Appearance,
         Page::Theme,
         Page::Wallpaper,
         Page::Bar,
         Page::Weather,
+        Page::Wifi,
         Page::Bluetooth,
+        Page::Sound,
         Page::Calendar,
         Page::Capture,
         Page::Launcher,
@@ -55,7 +61,9 @@ impl Page {
             Page::Theme => ("format_paint", "Theme"),
             Page::Wallpaper => ("wallpaper", "Wallpaper"),
             Page::Weather => ("partly_cloudy_day", "Weather"),
+            Page::Wifi => ("wifi", "Wi-Fi"),
             Page::Bluetooth => ("bluetooth", "Bluetooth"),
+            Page::Sound => ("volume_up", "Sound"),
             Page::Capture => ("screenshot_monitor", "Capture"),
             Page::Calendar => ("calendar_month", "Calendar"),
             Page::Bar => ("toolbar", "Bar"),
@@ -121,6 +129,13 @@ pub enum Request {
     Geocode(String),
     Bluetooth(BtCommand),
     Blur(bool),
+    Audio(DeviceCommand),
+    WifiScan,
+    WifiPower(bool),
+    /// Join a network, with a password for a new secured one.
+    WifiConnect(WifiNetwork, Option<String>),
+    /// Delete a saved profile.
+    WifiForget(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +168,14 @@ pub enum Msg {
     ClearWeather,
     Imperial(bool),
     Bt(BtCommand),
+    Audio(DeviceCommand),
+    WifiPower(bool),
+    WifiPick(usize),
+    WifiPassword(String),
+    WifiJoin,
+    WifiCancel,
+    WifiForget(usize),
+    WifiRescan,
     NewLink(String),
     AddLink,
     RemoveLink(usize),
@@ -170,6 +193,14 @@ pub struct State {
     pub places: Vec<Location>,
     pub search_status: String,
     pub bt: BtState,
+    pub network: Option<Network>,
+    pub audio: Devices,
+    pub wifi: Vec<WifiNetwork>,
+    /// "Connecting…" or the last Wi-Fi failure.
+    pub wifi_status: String,
+    /// The secured network asking for a password, and what's typed.
+    wifi_pick: Option<String>,
+    wifi_password: String,
     /// Calendar link being typed, and fetch problems to show.
     new_link: String,
     pub cal_errors: Vec<String>,
@@ -214,6 +245,42 @@ impl State {
             Msg::ClearWeather => config.weather.location.clear(),
             Msg::Imperial(on) => config.weather.imperial = on,
             Msg::Bt(cmd) => return Some(Request::Bluetooth(cmd)),
+            Msg::Audio(cmd) => return Some(Request::Audio(cmd)),
+            Msg::WifiPower(on) => return Some(Request::WifiPower(on)),
+            Msg::WifiRescan => return Some(Request::WifiScan),
+            Msg::WifiPick(i) => {
+                let net = self.wifi.get(i).filter(|n| !n.active)?;
+                if net.secured && net.saved.is_none() {
+                    self.wifi_pick = Some(net.ssid.clone());
+                    self.wifi_password.clear();
+                } else {
+                    self.wifi_status = format!("Connecting to {}…", net.ssid);
+                    return Some(Request::WifiConnect(net.clone(), None));
+                }
+            }
+            Msg::WifiPassword(p) => self.wifi_password = p,
+            Msg::WifiCancel => {
+                self.wifi_pick = None;
+                self.wifi_password.clear();
+            }
+            Msg::WifiJoin => {
+                let pick = self.wifi_pick.as_ref()?;
+                let net = self.wifi.iter().find(|n| &n.ssid == pick)?.clone();
+                if self.wifi_password.len() < 8 {
+                    self.wifi_status = "Wi-Fi passwords are at least 8 characters.".into();
+                    return None;
+                }
+                self.wifi_pick = None;
+                self.wifi_status = format!("Connecting to {}…", net.ssid);
+                return Some(Request::WifiConnect(
+                    net,
+                    Some(std::mem::take(&mut self.wifi_password)),
+                ));
+            }
+            Msg::WifiForget(i) => {
+                let saved = self.wifi.get(i)?.saved.clone()?;
+                return Some(Request::WifiForget(saved));
+            }
             Msg::NewLink(l) => self.new_link = l,
             Msg::AddLink => {
                 let link = self.new_link.trim().to_owned();
@@ -375,7 +442,9 @@ impl State {
             Page::Theme => self.theme(config, surface),
             Page::Wallpaper => self.wallpaper(config, surface),
             Page::Weather => self.weather(config, surface),
+            Page::Wifi => self.wifi(config, surface),
             Page::Bluetooth => self.bluetooth(config, surface),
+            Page::Sound => self.sound(config, surface),
             Page::Capture => self.capture(config, surface),
             Page::Calendar => self.calendar(config, surface),
             Page::Animations => animations(config, surface),
@@ -889,6 +958,187 @@ impl State {
         column![group("Location", surface, rows), units, note]
             .spacing(16)
             .into()
+    }
+
+    fn wifi<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
+        let fg: Color = config.colors.foreground.into();
+        let muted: Color = config.colors.muted.into();
+        let Some(n) = &self.network else {
+            return text("NetworkManager isn't running.")
+                .size(13)
+                .color(muted)
+                .into();
+        };
+        let small = move |label: &'a str, msg: Msg| {
+            button(text(label).size(12))
+                .padding([5, 10])
+                .on_press(msg)
+                .style(move |_, s| button::Style {
+                    background: Some(
+                        Color {
+                            a: if matches!(s, button::Status::Hovered) {
+                                0.16
+                            } else {
+                                0.08
+                            },
+                            ..fg
+                        }
+                        .into(),
+                    ),
+                    text_color: fg,
+                    border: border::rounded(8),
+                    ..Default::default()
+                })
+        };
+        let status = match () {
+            _ if !n.wifi_enabled => "Off".to_owned(),
+            _ if n.connected && !n.name.is_empty() => format!("Connected to {}", n.name),
+            _ => "On".to_owned(),
+        };
+        let mut top: Vec<Element<'a, Msg>> = vec![
+            setting(
+                config,
+                "Wi-Fi",
+                "",
+                toggler(n.wifi_enabled).on_toggle(Msg::WifiPower).into(),
+            ),
+            text(status).size(12).color(muted).into(),
+        ];
+        if !self.wifi_status.is_empty() {
+            top.push(text(self.wifi_status.clone()).size(12).color(muted).into());
+        }
+        if !n.wifi_enabled {
+            return column![group("Adapter", surface, top)].into();
+        }
+        let mut rows: Vec<Element<'a, Msg>> = Vec::new();
+        for (i, w) in self.wifi.iter().enumerate() {
+            let mut info = Vec::new();
+            if w.active {
+                info.push("Connected");
+            } else if w.saved.is_some() {
+                info.push("Saved");
+            }
+            if w.secured {
+                info.push("Secured");
+            }
+            let mut controls = row![].spacing(6).align_y(Alignment::Center);
+            if w.saved.is_some() {
+                controls = controls.push(small("Forget", Msg::WifiForget(i)));
+            }
+            if !w.active {
+                controls = controls.push(small("Join", Msg::WifiPick(i)));
+            }
+            rows.push(
+                row![
+                    icon(config, crate::status::wifi_icon(w.strength), 22.0),
+                    column![
+                        text(w.ssid.clone()).size(14),
+                        text(info.join(" · ")).size(11).color(muted)
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    controls,
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .into(),
+            );
+            if self.wifi_pick.as_ref() == Some(&w.ssid) {
+                rows.push(
+                    row![
+                        text_input("Password", &self.wifi_password)
+                            .secure(true)
+                            .on_input(Msg::WifiPassword)
+                            .on_submit(Msg::WifiJoin)
+                            .padding([6, 10])
+                            .size(13),
+                        small("Connect", Msg::WifiJoin),
+                        small("Cancel", Msg::WifiCancel),
+                    ]
+                    .spacing(8)
+                    .into(),
+                );
+            }
+        }
+        if rows.is_empty() {
+            rows.push(text("Looking for networks…").size(13).color(muted).into());
+        }
+        rows.push(small("Scan again", Msg::WifiRescan).into());
+        column![
+            group("Adapter", surface, top),
+            group("Networks", surface, rows)
+        ]
+        .spacing(16)
+        .into()
+    }
+
+    fn sound<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {
+        let fg: Color = config.colors.foreground.into();
+        let accent: Color = config.colors.accent.into();
+        let muted: Color = config.colors.muted.into();
+        let list = |devices: &'a [rune_services::audio::Device], output: bool, empty: &'a str| {
+            let mut rows: Vec<Element<'a, Msg>> = devices
+                .iter()
+                .map(|d| {
+                    let glyph = if d.default {
+                        "radio_button_checked"
+                    } else {
+                        "radio_button_unchecked"
+                    };
+                    button(
+                        row![
+                            icon(config, glyph, 18.0),
+                            text(d.description.clone()).size(13).width(Length::Fill),
+                        ]
+                        .spacing(10)
+                        .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 8])
+                    .on_press(Msg::Audio(DeviceCommand::SetDefault(
+                        output,
+                        d.name.clone(),
+                    )))
+                    .style(move |_, s| button::Style {
+                        background: matches!(s, button::Status::Hovered)
+                            .then(|| Color { a: 0.08, ..fg }.into()),
+                        text_color: if d.default { accent } else { fg },
+                        border: border::rounded(8),
+                        ..Default::default()
+                    })
+                    .into()
+                })
+                .collect();
+            if rows.is_empty() {
+                rows.push(text(empty).size(13).color(muted).into());
+            }
+            rows
+        };
+        let mut inputs = list(&self.audio.inputs, false, "No microphones found.");
+        if let Some(mic) = self.audio.mic() {
+            inputs.push(setting(
+                config,
+                "Mute microphone",
+                "",
+                toggler(mic.muted)
+                    .on_toggle(|_| Msg::Audio(DeviceCommand::ToggleMicMute))
+                    .into(),
+            ));
+        }
+        column![
+            group(
+                "Output",
+                surface,
+                list(
+                    &self.audio.outputs,
+                    true,
+                    "No speakers or headphones found."
+                )
+            ),
+            group("Input", surface, inputs),
+        ]
+        .spacing(16)
+        .into()
     }
 
     fn bluetooth<'a>(&'a self, config: &'a Config, surface: Color) -> Element<'a, Msg> {

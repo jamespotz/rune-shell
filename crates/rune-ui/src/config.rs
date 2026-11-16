@@ -79,6 +79,8 @@ pub enum Widget {
     Network,
     /// Battery level (hidden on machines without one).
     Battery,
+    /// CPU use, memory use and CPU temperature.
+    Stats,
     /// Opens quick settings (Wi-Fi, Bluetooth, DND, volume...).
     QuickSettings,
     /// Opens the power menu.
@@ -86,7 +88,7 @@ pub enum Widget {
 }
 
 impl Widget {
-    pub const ALL: [Widget; 14] = [
+    pub const ALL: [Widget; 15] = [
         Widget::Workspaces,
         Widget::WindowTitle,
         Widget::Clock,
@@ -98,6 +100,7 @@ impl Widget {
         Widget::Volume,
         Widget::Network,
         Widget::Battery,
+        Widget::Stats,
         Widget::QuickSettings,
         Widget::Power,
         Widget::Settings,
@@ -119,6 +122,7 @@ impl std::fmt::Display for Widget {
             Widget::Volume => "Volume",
             Widget::Network => "Network",
             Widget::Battery => "Battery",
+            Widget::Stats => "System stats",
             Widget::QuickSettings => "Quick settings",
             Widget::Power => "Power menu",
         })

@@ -44,6 +44,13 @@ PIN 0000. Connected headsets get **Audio** / **Call** buttons to switch between
 high-quality playback and the microphone profile (via `pactl`). Scanning runs only while the
 page is open.
 
+**Wi-Fi**: Settings → Wi-Fi (or click the `network` widget) lists networks in range. Join one
+(a password box opens for new secured networks), or forget a saved one. A wrong password is
+reported and not saved. Uses NetworkManager over D-Bus.
+
+**Sound**: Settings → Sound picks the default output (speakers, HDMI, headset) and microphone,
+and mutes the mic.
+
 **Screenshots, recording, text**: `rune-shell screenshot screen|all|window|selection` (grim/slurp;
 saved and copied), `rune-shell record screen|window|selection` (gpu-screen-recorder; run it
 again, `record stop`, or click the red timer in the bar to stop), and `rune-shell ocr` (select an
@@ -60,16 +67,19 @@ for a month view and the day's events, with a **Join** button for Meet, Zoom, Te
 Whereby and Jitsi links. Recurring events, exceptions and time zones are handled. Read-only.
 
 **Volume, network, battery and OSD**: the `volume` widget (click to mute, scroll to change),
-`network` (Wi-Fi signal or wired) and `battery` (hidden without one). `rune-shell volume
+`network` (Wi-Fi signal or wired; click for networks), `battery` (hidden without one) and
+`stats` (CPU %, memory %, CPU temperature). `rune-shell volume
 up|down|mute|set N` and `rune-shell brightness up|down|set N` show an on-screen popup; bind your
 media keys to them.
 
 **Quick settings, power, clipboard**: the `quick_settings` widget (or `rune-shell toggle
-quick-settings`) has Wi-Fi, Bluetooth, Do not disturb and Game mode tiles, a volume (and
+quick-settings`) has Wi-Fi, Bluetooth, Do not disturb, Game mode, Microphone, Night light (needs
+`hyprsunset`), Keep awake (holds off hypridle's screen-off, lock and suspend) and Power mode
+(power-profiles-daemon) tiles, a volume (and
 brightness) slider, and shortcuts. The power menu (`rune-shell toggle power`) locks, suspends,
 logs out, restarts or shuts down; the last three ask for a second click. `rune-shell lock` runs
 `[power] lock_command` (default `loginctl lock-session`, which uses hypridle's locker).
-`rune-shell toggle clipboard` searches `cliphist` history; Enter copies an entry back.
+`rune-shell toggle clipboard` searches `cliphist` history (text and image previews, with copy times); Enter copies an entry back, ★ keeps it as a favorite, and **Clear history** wipes everything except favorites. Favorites and times live in `~/.local/share/rune-shell/clipboard/`.
 
 **Browsers** (Settings → Theme → Apply to apps):
 - **Firefox**: Rune writes `chrome/rune.css` in your default profile, adds `@import "rune.css";` to
@@ -141,8 +151,8 @@ Check the layer-rule syntax against your Hyprland version. The layer namespace i
 | `rune-shell toggle settings` | open or close the settings window (Esc also closes it) |
 
 Commands exit with status 1 on error. Logs go to stderr; set the level with `RUST_LOG=debug`.
-Rendering is software (tiny-skia) by default; `ICED_BACKEND=wgpu` switches to the GPU at the
-cost of roughly 190 MB of memory.
+Rendering is software (tiny-skia), which keeps memory low. Transparency works through a
+patched copy of softbuffer in `vendor/softbuffer` (Wayland buffers with an alpha channel).
 
 ## Configuration
 

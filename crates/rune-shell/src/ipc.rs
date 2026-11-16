@@ -164,7 +164,7 @@ fn command(
         ["game-mode", "off"] => sent(UiEvent::GameMode(Some(false))),
         ["toggle", panel] => {
             format!(
-                "error: unknown panel {panel:?} (try: launcher, keybinds, media, notifications, weather, calendar, settings)"
+                "error: unknown panel {panel:?} (try: launcher, keybinds, clipboard, media, notifications, weather, calendar, quick-settings, power, settings)"
             )
         }
         _ => format!("error: unknown command {cmd:?}, see rune-shell --help"),

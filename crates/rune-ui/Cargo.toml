@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# Software rendering only (tiny-skia): a fraction of the GPU path's memory. Transparency
+# relies on the patched softbuffer in vendor/ (see the workspace Cargo.toml).
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "canvas", "thread-pool", "crisp", "wayland", "image", "svg"] }
 iced_layershell = { version = "0.19", default-features = false }
 # shortcut: iced_layershell 0.19.1 fails to compile against winit-core beta.4 (non-exhaustive

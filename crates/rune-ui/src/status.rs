@@ -43,11 +43,18 @@ fn network_icon(n: &Network) -> &'static str {
                 "signal_wifi_off"
             }
         }
-        (true, NetKind::Wifi, Some(0..=24)) => "network_wifi_1_bar",
-        (true, NetKind::Wifi, Some(25..=49)) => "network_wifi_2_bar",
-        (true, NetKind::Wifi, Some(50..=74)) => "network_wifi_3_bar",
-        (true, NetKind::Wifi, _) => "signal_wifi_4_bar",
+        (true, NetKind::Wifi, s) => wifi_icon(s.unwrap_or(100)),
         (true, NetKind::Other, _) => "lan",
+    }
+}
+
+/// Wi-Fi bars for a signal strength, 0-100.
+pub fn wifi_icon(strength: u8) -> &'static str {
+    match strength {
+        0..=24 => "network_wifi_1_bar",
+        25..=49 => "network_wifi_2_bar",
+        50..=74 => "network_wifi_3_bar",
+        _ => "signal_wifi_4_bar",
     }
 }
 
@@ -121,7 +128,37 @@ pub fn network(app: &App) -> Element<'_, Message> {
     let Some(n) = &app.network else {
         return Space::new().into();
     };
-    plain(app, network_icon(n), None, None)
+    plain(app, network_icon(n), None, Some(Message::OpenWifi))
+}
+
+/// CPU, memory and temperature, e.g. `12%  40%  54°`.
+pub fn stats(app: &App) -> Element<'_, Message> {
+    let Some(s) = app.stats else {
+        return Space::new().into();
+    };
+    let c = &app.config;
+    let fg: Color = c.colors.foreground.into();
+    let item = |glyph: &str, value: String| {
+        row![
+            icon(c, glyph, c.bar.font_size * 1.2),
+            text(value)
+                .size(c.bar.font_size)
+                .font(font(&c.bar.font))
+                .color(fg)
+        ]
+        .spacing(3)
+        .align_y(Alignment::Center)
+    };
+    let mut r = row![
+        item("memory", format!("{}%", s.cpu)),
+        item("memory_alt", format!("{}%", s.ram))
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if let Some(t) = s.temp {
+        r = r.push(item("thermostat", format!("{t}°")));
+    }
+    container(r).padding([2, 4]).into()
 }
 
 pub fn battery(app: &App) -> Element<'_, Message> {

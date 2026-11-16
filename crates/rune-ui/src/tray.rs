@@ -21,7 +21,6 @@ pub enum Click {
 }
 
 pub const MENU_W: f32 = 300.0;
-pub const MENU_H: f32 = 360.0;
 
 pub fn widget(app: &App) -> Element<'_, Message> {
     let size = (app.config.bar.font_size * 1.35).round();
@@ -55,7 +54,8 @@ pub fn menu(app: &App) -> Element<'_, Message> {
     let muted: Color = app.config.colors.muted.into();
     let Some((key, entries)) = &app.tray_menu else {
         return container(text("Loading…").color(muted))
-            .center(Length::Fill)
+            .center_x(MENU_W)
+            .padding(16)
             .into();
     };
     let title = app.tray.iter().find(|i| &i.key == key).map(|i| {
@@ -77,6 +77,7 @@ pub fn menu(app: &App) -> Element<'_, Message> {
         );
     }
     scrollable(column(rows).spacing(2))
+        .width(MENU_W)
         .height(Length::Fill)
         .into()
 }

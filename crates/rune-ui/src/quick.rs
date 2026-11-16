@@ -7,10 +7,8 @@ use iced::{
 };
 use rune_services::system::PowerAction;
 
-pub const QUICK_W: f32 = 460.0;
-pub const QUICK_H: f32 = 300.0;
+pub const QUICK_W: f32 = 440.0;
 pub const POWER_W: f32 = 520.0;
-pub const POWER_H: f32 = 150.0;
 
 pub fn panel(app: &App) -> Element<'_, Message> {
     let c = &app.config;
@@ -70,45 +68,98 @@ pub fn panel(app: &App) -> Element<'_, Message> {
         0 => "On".into(),
         n => format!("{n} connected"),
     };
-    let tiles = column![
-        row![
-            tile(
-                "wifi",
-                "Wi-Fi",
-                wifi_detail,
-                wifi_on,
-                app.network.as_ref().map(|_| Message::WifiToggle(!wifi_on))
-            ),
-            tile(
-                "bluetooth",
-                "Bluetooth",
-                bt_detail,
-                app.bt.powered,
-                app.bt
-                    .available
-                    .then_some(Message::BtPower(!app.bt.powered))
-            ),
-        ]
-        .spacing(10),
-        row![
-            tile(
-                "do_not_disturb_on",
-                "Do not disturb",
-                if app.notif.dnd { "On" } else { "Off" }.into(),
-                app.notif.dnd,
-                Some(Message::NotifDnd(!app.notif.dnd))
-            ),
-            tile(
-                "sports_esports",
-                "Game mode",
-                if app.game_mode { "On" } else { "Off" }.into(),
-                app.game_mode,
-                Some(Message::GameModeToggle)
-            ),
-        ]
-        .spacing(10),
-    ]
-    .spacing(10);
+    let on_off = |on: bool| if on { "On" } else { "Off" }.to_owned();
+    // On, off, or why it couldn't start.
+    let held = |r: &Result<bool, String>| match r {
+        Ok(on) => (on_off(*on), *on),
+        Err(e) => (e.clone(), false),
+    };
+    let (night_detail, night_on) = held(&app.night_light);
+    let (awake_detail, awake_on) = held(&app.keep_awake);
+    let mic = app.audio.mic();
+    let profile = app.power_profile.as_ref();
+    let tiles = [
+        tile(
+            "wifi",
+            "Wi-Fi",
+            wifi_detail,
+            wifi_on,
+            app.network.as_ref().map(|_| Message::WifiToggle(!wifi_on)),
+        ),
+        tile(
+            "bluetooth",
+            "Bluetooth",
+            bt_detail,
+            app.bt.powered,
+            app.bt
+                .available
+                .then_some(Message::BtPower(!app.bt.powered)),
+        ),
+        tile(
+            "sports_esports",
+            "Game mode",
+            on_off(app.game_mode),
+            app.game_mode,
+            Some(Message::GameModeToggle),
+        ),
+        tile(
+            if mic.is_some_and(|m| m.muted) {
+                "mic_off"
+            } else {
+                "mic"
+            },
+            "Microphone",
+            match mic {
+                Some(m) if m.muted => "Muted".into(),
+                Some(_) => "On".into(),
+                None => "None found".into(),
+            },
+            mic.is_some_and(|m| !m.muted),
+            mic.map(|_| Message::MicMuteToggle),
+        ),
+        tile(
+            "coffee",
+            "Keep awake",
+            awake_detail,
+            awake_on,
+            Some(Message::KeepAwakeToggle),
+        ),
+        tile(
+            "speed",
+            "Power mode",
+            profile.map_or("Unavailable".into(), |p| profile_label(&p.active).into()),
+            profile.is_some_and(|p| p.active != "balanced"),
+            profile.map(|_| Message::PowerProfileNext),
+        ),
+        tile(
+            "do_not_disturb_on",
+            "Do not disturb",
+            on_off(app.notif.dnd),
+            app.notif.dnd,
+            Some(Message::NotifDnd(!app.notif.dnd)),
+        ),
+        tile(
+            "nightlight",
+            "Night light",
+            night_detail,
+            night_on,
+            Some(Message::NightLightToggle),
+        ),
+    ];
+    let mut grid = column![].spacing(10);
+    let mut tiles = tiles.into_iter().map(Element::from).peekable();
+    while tiles.peek().is_some() {
+        let mut r = row![].spacing(10);
+        for _ in 0..2 {
+            r = r.push(
+                tiles
+                    .next()
+                    .unwrap_or_else(|| Space::new().width(Length::Fill).into()),
+            );
+        }
+        grid = grid.push(r);
+    }
+    let tiles = grid;
 
     let level = |glyph: &'static str,
                  value: f32,
@@ -187,7 +238,19 @@ pub fn panel(app: &App) -> Element<'_, Message> {
         action("power_settings_new", "Power", Message::TogglePower),
     ])
     .spacing(8);
-    column![tiles, levels, actions].spacing(14).into()
+    column![tiles, levels, actions]
+        .spacing(14)
+        .width(QUICK_W)
+        .into()
+}
+
+fn profile_label(id: &str) -> &str {
+    match id {
+        "power-saver" => "Power saver",
+        "balanced" => "Balanced",
+        "performance" => "Performance",
+        other => other,
+    }
 }
 
 pub fn power(app: &App) -> Element<'_, Message> {
@@ -251,6 +314,7 @@ pub fn power(app: &App) -> Element<'_, Message> {
         container(hint).center_x(Length::Fill),
     ]
     .spacing(10)
+    .width(POWER_W)
     .into()
 }
 

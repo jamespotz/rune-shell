@@ -4,11 +4,11 @@
 use crate::{
     App, Message, Panel, bt, calendar,
     config::{Config, Widget},
-    media, notify, quick, status, tray, weather,
+    launcher, media, notify, quick, status, tray, weather,
 };
 use iced::{
     Alignment, Color, Element, Font, Length, Point, Rectangle, Renderer, Theme, border, mouse,
-    widget::{Space, button, canvas, column, container, mouse_area, row, scrollable, sensor, text},
+    widget::{Space, button, canvas, container, mouse_area, row, scrollable, sensor, text},
 };
 use rune_services::hyprland::HyprState;
 use std::sync::Mutex;
@@ -96,51 +96,83 @@ pub fn view<'a>(app: &'a App, monitor: &str) -> Element<'a, Message> {
         None => measured.into(),
     };
 
-    // 0 = plain bar, 1 = fully expanded into the launcher panel.
-    let t = app.expansion(monitor);
-    let mut content = column![bar_row];
-    if t > 0.0 {
-        // The width spacer grows the notch sideways; the panel grows it downward.
-        // Content appears near the end so it never reflows while squeezed.
-        let (pw, ph) = app.panel_size();
-        let inner: Element<'a, Message> = match app.panel_kind {
-            _ if t <= 0.85 => Space::new().into(),
-            Panel::Launcher(_) => app.launcher.view(&app.config, Message::Launcher),
-            Panel::Media => media::panel(app),
-            Panel::Notifications => notify::center(app),
-            Panel::TrayMenu => tray::menu(app),
-            Panel::Weather => weather::panel(app),
-            Panel::Calendar => calendar::panel(app),
-            Panel::Quick => quick::panel(app),
-            Panel::Power => quick::power(app),
-        };
-        content = content.push(Space::new().width(pw * t).height(0)).push(
-            container(inner)
-                .width(pw * t)
-                .height(ph * t)
-                .padding(iced::Padding::ZERO.top(8).bottom(12))
-                .clip(true),
-        );
-    }
-    let radius = r + (22.0 - r).max(0.0) * t;
-    let body = container(content)
-        .padding([0.0, bar.padding + radius / 2.0])
+    let body = container(bar_row)
+        .padding([0.0, bar.padding + r / 2.0])
         .style(move |_| container::Style {
             background: Some(bg.into()),
-            border: border::rounded(border::bottom(radius)),
+            border: border::rounded(border::bottom(r)),
             ..Default::default()
         });
     let shoulder = |left| canvas(Shoulder { left, color: bg }).width(r).height(r);
-    // Clicks on the notch itself are swallowed so only clicks outside close the panel.
-    let notch = mouse_area(row![shoulder(true), body, shoulder(false)]).on_press(Message::Noop);
+    let notch = row![shoulder(true), body, shoulder(false)];
     let page = container(notch)
         .center_x(Length::Fill)
         .align_top(Length::Fill);
-    if app.panel_open && t > 0.0 {
-        mouse_area(page).on_press(Message::CloseLauncher).into()
-    } else {
-        page.into()
-    }
+    // Where the pointer is on the bar, so a panel can open under the widget clicked.
+    // The page spans the monitor, so its width is the monitor's width.
+    let (moved, sized) = (monitor.to_owned(), monitor.to_owned());
+    sensor(
+        mouse_area(page)
+            .on_move(move |p| Message::BarCursor(Some((moved.clone(), p.x))))
+            .on_exit(Message::BarCursor(None)),
+    )
+    .on_resize(move |s| Message::BarWidth(sized.clone(), s.width))
+    .into()
+}
+
+/// The open panel, in its own layer surface; sized to its content.
+pub fn panel(app: &App) -> Element<'_, Message> {
+    let inner: Element<'_, Message> = match app.panel_kind {
+        Panel::Launcher(_) => app.launcher.view(&app.config, Message::Launcher),
+        Panel::Media => media::panel(app),
+        Panel::Notifications => notify::center(app),
+        Panel::TrayMenu => tray::menu(app),
+        Panel::Weather => weather::panel(app),
+        Panel::Calendar => calendar::panel(app),
+        Panel::Quick => quick::panel(app),
+        Panel::Power => quick::power(app),
+    };
+    let bg: Color = app.config.colors.background.into();
+    let fg: Color = app.config.colors.foreground.into();
+    // Each panel sets its own width and is as tall as its content (capped); the
+    // sensor reports that and the surface is resized to match. Inside a scrollable
+    // the content is never squeezed by the (possibly still too small) surface.
+    let measured = sensor(
+        // Explicit Shrink: a Fill child would otherwise make the container Fill,
+        // and Fill inside the row below collapses to 0.
+        container(inner)
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            .padding(16)
+            .max_height(launcher::PANEL_H)
+            .style(move |_| container::Style {
+                background: Some(bg.into()),
+                border: border::rounded(20).color(Color { a: 0.08, ..fg }).width(1),
+                ..Default::default()
+            }),
+    )
+    .on_resize(Message::PanelSize);
+    let hidden = scrollable::Scrollbar::new().width(0).scroller_width(0);
+    // Clicks on the panel itself must not reach anything that would close it.
+    mouse_area(
+        scrollable(row![measured])
+            .direction(scrollable::Direction::Both {
+                vertical: hidden,
+                horizontal: hidden,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Message::Noop)
+    .into()
+}
+
+/// Transparent full-screen layer under the panel: a click anywhere else closes it.
+pub fn catcher(_: &App) -> Element<'_, Message> {
+    mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+        .on_press(Message::CloseLauncher)
+        .on_right_press(Message::CloseLauncher)
+        .into()
 }
 
 fn widget<'a>(app: &'a App, monitor: &str, w: Widget) -> Element<'a, Message> {
@@ -197,6 +229,7 @@ fn widget<'a>(app: &'a App, monitor: &str, w: Widget) -> Element<'a, Message> {
         Widget::Volume => status::volume(app),
         Widget::Network => status::network(app),
         Widget::Battery => status::battery(app),
+        Widget::Stats => status::stats(app),
         Widget::QuickSettings => quick::widget(app, "tune", Message::ToggleQuick),
         Widget::Power => quick::widget(app, "power_settings_new", Message::TogglePower),
         Widget::Media => media::widget(app, (c.bar.height as f32 - 10.0).max(12.0)),

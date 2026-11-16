@@ -8,7 +8,7 @@ use rune_services::{
     apps, audio, bluetooth, calendar, capture, clipboard, clock,
     hyprland::Hyprland,
     icons::IconIndex,
-    media, notifications, system,
+    media, notifications, stats, system,
     theme::{self, Variant, backup::Backup, export},
     tray, visualizer, wallpaper, weather,
 };
@@ -77,11 +77,6 @@ fn main() -> Result<()> {
 }
 
 fn daemon() -> Result<()> {
-    if std::env::var_os("ICED_BACKEND").is_none() {
-        // Software rendering: ~15 MB and no idle CPU, against ~190 MB for the GPU path.
-        // SAFETY: nothing else runs yet (no threads), so no one reads the environment concurrently.
-        unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
-    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -110,6 +105,7 @@ fn daemon() -> Result<()> {
         forward(h.clone().watch(), ui.clone(), UiEvent::Hypr);
     }
     forward(clock::spawn(), ui.clone(), UiEvent::Clock);
+    forward(stats::spawn(), ui.clone(), UiEvent::Stats);
     let media = rt.block_on(media::spawn()).map(|(state, handle)| {
         // The visualizer (cava) only runs while something is playing.
         let (playing_tx, playing) = watch::channel(false);
@@ -182,8 +178,9 @@ fn daemon() -> Result<()> {
         UiEvent::Calendar,
     );
     let capture_conn = rt.block_on(zbus::Connection::session()).ok();
-    let volume = audio::spawn_volume();
+    let (volume, audio_devices) = audio::spawn_volume();
     forward(volume.clone(), ui.clone(), UiEvent::Volume);
+    forward(audio_devices, ui.clone(), UiEvent::AudioDevices);
     let system_conn = rt.block_on(zbus::Connection::system()).ok();
     if let Some(system) = &system_conn {
         forward(
@@ -196,6 +193,11 @@ fn daemon() -> Result<()> {
             ui.clone(),
             UiEvent::Battery,
         );
+        forward(
+            system::spawn_power_profile(system.clone()),
+            ui.clone(),
+            UiEvent::PowerProfile,
+        );
     }
     {
         let ui = ui.clone();
@@ -204,12 +206,18 @@ fn daemon() -> Result<()> {
         });
     }
     tokio::spawn(clipboard::ensure_watcher());
+    tokio::spawn(clipboard::track());
     let lock_command = config.power.lock_command.clone();
     let (recording, record_cmds) = capture::spawn_recorder(hypr.clone(), capture_conn.clone());
     forward(recording, ui.clone(), UiEvent::Recording);
     let actions_ui = ui.clone();
     let media_handle = media;
     tokio::spawn(async move {
+        // Held while on; dropping them turns the feature off.
+        let mut night_light: Option<tokio::process::Child> = None;
+        // Shared with the task that takes the inhibitor; the lock keeps toggles in order.
+        let keep_awake: std::sync::Arc<tokio::sync::Mutex<Option<zbus::zvariant::OwnedFd>>> =
+            Default::default();
         while let Some(action) = action_rx.recv().await {
             // Each action runs on its own task so a slow app scan never delays a click.
             let (hypr, icons, ui, media) = (
@@ -277,23 +285,131 @@ fn daemon() -> Result<()> {
                         }
                     });
                 }
+                Action::NightLight(on) => {
+                    drop(night_light.take()); // kill_on_drop stops hyprsunset, which restores the colors
+                    let state = if on {
+                        tokio::process::Command::new("hyprsunset")
+                            .args(["-t", "4500"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .kill_on_drop(true)
+                            .spawn()
+                            .map(|child| night_light = Some(child))
+                            .map(|()| true)
+                            .map_err(|_| "Install hyprsunset".to_owned())
+                    } else {
+                        Ok(false)
+                    };
+                    let _ = ui.send(UiEvent::NightLight(state));
+                }
+                Action::KeepAwake(on) => {
+                    // On its own task: awaiting logind here would hold up every later action.
+                    let (held, sys) = (keep_awake.clone(), system_conn.clone());
+                    tokio::spawn(async move {
+                        let mut held = held.lock().await;
+                        drop(held.take()); // closing the fd ends the inhibitor
+                        let state = match (sys, on) {
+                            (_, false) => Ok(false),
+                            (Some(sys), true) => system::inhibit_idle(&sys)
+                                .await
+                                .map(|fd| *held = Some(fd))
+                                .map(|()| true)
+                                .map_err(|e| {
+                                    warn!("keep awake: {e}");
+                                    "Unavailable".to_owned()
+                                }),
+                            (None, true) => Err("Unavailable".to_owned()),
+                        };
+                        let _ = ui.send(UiEvent::KeepAwake(state));
+                    });
+                }
+                Action::PowerProfile(name) => {
+                    let Some(sys) = system_conn.clone() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        if let Err(e) = system::set_power_profile(&sys, &name).await {
+                            warn!("power profile: {e}");
+                        }
+                    });
+                }
+                Action::WifiScan => {
+                    let Some(sys) = system_conn.clone() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let list =
+                            async |ui: &UnboundedSender<UiEvent>| match system::wifi_networks(&sys)
+                                .await
+                            {
+                                Ok(nets) => drop(ui.send(UiEvent::WifiNetworks(nets))),
+                                Err(e) => warn!("wi-fi list: {e}"),
+                            };
+                        list(&ui).await;
+                        if system::wifi_scan(&sys).await.is_ok() {
+                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                            list(&ui).await;
+                        }
+                    });
+                }
+                Action::WifiConnect(net, password) => {
+                    let Some(sys) = system_conn.clone() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let status = system::wifi_connect(&sys, &net, password.as_deref()).await;
+                        let _ = ui.send(UiEvent::WifiStatus(status.err().unwrap_or_default()));
+                        if let Ok(nets) = system::wifi_networks(&sys).await {
+                            let _ = ui.send(UiEvent::WifiNetworks(nets));
+                        }
+                    });
+                }
+                Action::WifiForget(profile) => {
+                    let Some(sys) = system_conn.clone() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        if let Err(e) = system::wifi_forget(&sys, &profile).await {
+                            warn!("wi-fi forget: {e}");
+                        }
+                        if let Ok(nets) = system::wifi_networks(&sys).await {
+                            let _ = ui.send(UiEvent::WifiNetworks(nets));
+                        }
+                    });
+                }
                 Action::Power(action) => {
                     tokio::spawn(power(action, hypr, lock_command.clone()));
                 }
                 Action::LoadClipboard => {
+                    tokio::spawn(send_clips(ui));
+                }
+                Action::ClipboardFavorite(entry) => {
                     tokio::spawn(async move {
-                        match clipboard::list().await {
-                            Ok(entries) => {
-                                let _ = ui.send(UiEvent::Clipboard(entries));
-                            }
-                            Err(e) => warn!("clipboard: {e}"),
+                        if let Err(e) = clipboard::toggle_favorite(&entry).await {
+                            warn!("clipboard: {e}");
                         }
+                        send_clips(ui).await;
+                    });
+                }
+                Action::ClipboardClear => {
+                    tokio::spawn(async move {
+                        if let Err(e) = clipboard::clear().await {
+                            warn!("clipboard: {e}");
+                        }
+                        send_clips(ui).await;
                     });
                 }
                 Action::ClipboardCopy(id) => {
                     tokio::spawn(async move {
                         if let Err(e) = clipboard::copy(&id).await {
                             warn!("clipboard: {e}");
+                        }
+                    });
+                }
+                Action::Audio(cmd) => {
+                    tokio::spawn(async move {
+                        if let Err(e) = audio::device_command(cmd).await {
+                            warn!("audio: {e}");
                         }
                     });
                 }
@@ -652,6 +768,15 @@ fn restore_themes() -> String {
 }
 
 /// Sends the folder listing right away, then again as thumbnails get made.
+async fn send_clips(ui: UnboundedSender<UiEvent>) {
+    match clipboard::list().await {
+        Ok(entries) => {
+            let _ = ui.send(UiEvent::Clipboard(entries));
+        }
+        Err(e) => warn!("clipboard: {e}"),
+    }
+}
+
 async fn load_wallpapers(dir: PathBuf, ui: UnboundedSender<UiEvent>) {
     let Ok(mut list) = tokio::task::spawn_blocking(move || wallpaper::list(&dir)).await else {
         return;

@@ -2,7 +2,8 @@
 //! (`brightnessctl`). Volume updates come from `pactl subscribe` events, so
 //! there is no polling.
 
-use std::{process::Stdio, time::Duration};
+use serde::Deserialize;
+use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -16,6 +17,36 @@ pub struct Volume {
     /// Percent; can exceed 100 if something boosted it.
     pub percent: u16,
     pub muted: bool,
+}
+
+/// A speaker/headset (output) or microphone (input).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// PipeWire node name, what `pactl` takes.
+    pub name: String,
+    pub description: String,
+    pub muted: bool,
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Devices {
+    pub outputs: Vec<Device>,
+    pub inputs: Vec<Device>,
+}
+
+impl Devices {
+    /// The default microphone, if there is a real one.
+    pub fn mic(&self) -> Option<&Device> {
+        self.inputs.iter().find(|d| d.default)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceCommand {
+    /// Make this output (`true`) or input the default.
+    SetDefault(bool, String),
+    ToggleMicMute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +75,10 @@ impl Change {
     }
 }
 
-/// Watches the default sink. `None` when pactl isn't available.
-pub fn spawn_volume() -> watch::Receiver<Option<Volume>> {
+/// Watches the default sink, and the device lists. `None` when pactl isn't available.
+pub fn spawn_volume() -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devices>) {
     let (tx, rx) = watch::channel(None);
+    let (dev_tx, dev_rx) = watch::channel(Devices::default());
     tokio::spawn(async move {
         loop {
             let child = Command::new("pactl")
@@ -61,18 +93,30 @@ pub fn spawn_volume() -> watch::Receiver<Option<Volume>> {
             };
             let v = read_volume().await;
             tx.send_if_modified(|cur| replace(cur, v));
+            let d = read_devices().await;
+            dev_tx.send_if_modified(|cur| replace(cur, d));
             let Some(stdout) = child.stdout.take() else {
                 return;
             };
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 // Sink changes and default-sink switches ("server") both matter.
-                if !(line.contains("sink") || line.contains("server")) {
+                if !["sink", "server", "source", "card"]
+                    .iter()
+                    .any(|w| line.contains(w))
+                {
                     continue;
                 }
-                while let Ok(Ok(Some(_))) =
+                // Plain volume changes are most events; device lists only change otherwise.
+                let mut lists = changes_devices(&line);
+                while let Ok(Ok(Some(more))) =
                     tokio::time::timeout(Duration::from_millis(30), lines.next_line()).await
                 {
+                    lists |= changes_devices(&more);
+                }
+                if lists {
+                    let d = read_devices().await;
+                    dev_tx.send_if_modified(|cur| replace(cur, d));
                 }
                 let v = read_volume().await;
                 if tx.send_if_modified(|cur| replace(cur, v)) {
@@ -86,7 +130,7 @@ pub fn spawn_volume() -> watch::Receiver<Option<Volume>> {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
-    rx
+    (rx, dev_rx)
 }
 
 fn replace<T: PartialEq>(slot: &mut T, new: T) -> bool {
@@ -123,6 +167,82 @@ fn parse_volume(vol: &str, mute: &str) -> Option<Volume> {
         percent,
         muted: mute.trim().ends_with("yes"),
     })
+}
+
+/// A `pactl subscribe` line that can change the device lists, defaults or mic mute.
+fn changes_devices(line: &str) -> bool {
+    [
+        "on server",
+        "on source #",
+        "on card #",
+        "'new' on sink #",
+        "'remove' on sink #",
+    ]
+    .iter()
+    .any(|p| line.contains(p))
+}
+
+async fn read_devices() -> Devices {
+    let run = async |args: &[&str]| {
+        Command::new("pactl")
+            .args(args)
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    Devices {
+        outputs: parse_devices(
+            &run(&["-f", "json", "list", "sinks"]).await,
+            &run(&["get-default-sink"]).await,
+        ),
+        inputs: parse_devices(
+            &run(&["-f", "json", "list", "sources"]).await,
+            &run(&["get-default-source"]).await,
+        ),
+    }
+}
+
+/// `pactl -f json list sinks|sources`, without the "Monitor of …" sources.
+fn parse_devices(json: &str, default: &str) -> Vec<Device> {
+    #[derive(Deserialize)]
+    struct Node {
+        name: String,
+        description: String,
+        mute: bool,
+        #[serde(default)]
+        properties: HashMap<String, serde_json::Value>,
+    }
+    let nodes: Vec<Node> = serde_json::from_str(json).unwrap_or_default();
+    nodes
+        .into_iter()
+        .filter(|n| n.properties.get("device.class").and_then(|v| v.as_str()) != Some("monitor"))
+        .map(|n| Device {
+            default: n.name == default,
+            name: n.name,
+            description: n.description,
+            muted: n.mute,
+        })
+        .collect()
+}
+
+pub async fn device_command(cmd: DeviceCommand) -> Result<(), String> {
+    let args = match &cmd {
+        DeviceCommand::SetDefault(true, name) => vec!["set-default-sink", name.as_str()],
+        DeviceCommand::SetDefault(false, name) => vec!["set-default-source", name.as_str()],
+        DeviceCommand::ToggleMicMute => vec!["set-source-mute", "@DEFAULT_SOURCE@", "toggle"],
+    };
+    let ok = Command::new("pactl")
+        .args(&args)
+        .status()
+        .await
+        .map_err(|e| format!("cannot run pactl: {e}"))?
+        .success();
+    if ok {
+        Ok(())
+    } else {
+        Err("pactl failed".into())
+    }
 }
 
 /// Changes the default sink's volume (capped at 100%).
@@ -241,6 +361,28 @@ mod tests {
             Some(42)
         );
         assert_eq!(parse_brightness(""), None);
+    }
+
+    #[test]
+    fn parses_devices_without_monitors() {
+        let json = r#"[
+            {"name":"hdmi","description":"HDMI","mute":false,"properties":{"device.class":"sound"}},
+            {"name":"hdmi.monitor","description":"Monitor of HDMI","mute":false,"properties":{"device.class":"monitor"}},
+            {"name":"mic","description":"Mic","mute":true}
+        ]"#;
+        let d = parse_devices(json, "mic");
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            (d[1].name.as_str(), d[1].muted, d[1].default),
+            ("mic", true, true)
+        );
+        assert!(!d[0].default);
+        assert!(parse_devices("not json", "").is_empty());
+        assert!(changes_devices("Event 'change' on server #-1"));
+        assert!(changes_devices("Event 'new' on sink #60"));
+        assert!(!changes_devices("Event 'change' on sink #54"));
+        assert!(!changes_devices("Event 'new' on sink-input #91"));
+        assert!(!changes_devices("Event 'change' on source-output #3"));
     }
 
     #[test]

@@ -3,26 +3,31 @@
 
 use crate::{config::Config, notch::icon};
 use iced::{
-    Alignment, Color, Element, Length, Task, border,
-    widget::{self, Id, button, column, container, image, row, scrollable, svg, text, text_input},
+    Alignment, Color, ContentFit, Element, Length, Task, border,
+    widget::{
+        self, Id, Space, button, column, container, image, row, scrollable, svg, text, text_input,
+    },
 };
 use nucleo_matcher::{
     Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
 };
 use rune_services::{apps::App, calc, clipboard::Entry as ClipEntry, hyprland::Bind};
+use std::{collections::HashMap, path::PathBuf};
 
 /// Height of one result row; used to keep the selection scrolled into view.
 pub const ROW_H: f32 = 52.0;
-/// Panel size below the bar row while expanded.
 pub const PANEL_W: f32 = 640.0;
+/// The tallest any notch panel gets (the surface is sized for it).
 pub const PANEL_H: f32 = 440.0;
+/// Room for the result list so search and footer still fit under [`PANEL_H`].
+const LIST_MAX_H: f32 = 330.0;
 
 const SEARCH: &str = "launcher-search";
 const LIST: &str = "launcher-list";
 const MAX_RESULTS: usize = 60;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Kind {
     #[default]
     Apps,
@@ -44,6 +49,9 @@ pub enum Msg {
     Query(String),
     Submit,
     Activate(usize),
+    /// Star or unstar a clipboard result.
+    Favorite(usize),
+    ClearClips,
 }
 
 /// What the launcher wants done after a message.
@@ -52,6 +60,9 @@ pub enum Outcome {
     Copy(String),
     /// Restore a clipboard history entry (cliphist id).
     Clip(String),
+    Favorite(ClipEntry),
+    /// Wipe clipboard history (favorites stay).
+    ClearClips,
 }
 
 #[derive(Default)]
@@ -61,6 +72,8 @@ pub struct Launcher {
     selected: usize,
     results: Vec<Hit>,
     apps: Vec<App>,
+    /// Icons without a usable extension, loaded from their bytes (see [`app_icon`]).
+    sniffed: HashMap<PathBuf, image::Handle>,
     binds: Vec<Bind>,
     clips: Vec<ClipEntry>,
 }
@@ -75,6 +88,22 @@ impl Launcher {
     }
 
     pub fn set_apps(&mut self, apps: Vec<App>) {
+        self.sniffed = apps
+            .iter()
+            .filter_map(|a| a.icon.as_ref())
+            .filter(|p| {
+                !p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(known_ext)
+            })
+            .filter_map(|p| {
+                let bytes = std::fs::read(p).ok()?;
+                // Only data we're sure iced can decode; anything else gets a glyph.
+                let png = bytes.starts_with(b"\x89PNG");
+                let jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
+                (png || jpeg).then(|| (p.clone(), image::Handle::from_bytes(bytes)))
+            })
+            .collect();
         self.apps = apps;
         self.refilter();
     }
@@ -117,6 +146,11 @@ impl Launcher {
             }
             Msg::Submit => self.selected,
             Msg::Activate(i) => i,
+            Msg::Favorite(i) => match self.results.get(i)? {
+                Hit::Clip(c) => return Some(Outcome::Favorite(self.clips.get(*c)?.clone())),
+                _ => return None,
+            },
+            Msg::ClearClips => return Some(Outcome::ClearClips),
         };
         match self.results.get(index)? {
             Hit::App(i) => {
@@ -194,11 +228,17 @@ impl Launcher {
                 ..text_input::default(theme, status)
             });
 
+        let now = chrono::Local::now().timestamp();
         let rows = self.results.iter().enumerate().map(|(i, hit)| {
+            let mut trail: Option<Element<'a, M>> = None;
             let (lead, title, sub): (Element<'a, M>, String, String) = match hit {
                 Hit::App(a) => {
                     let app = &self.apps[*a];
-                    (app_icon(config, app), app.name.clone(), app.comment.clone())
+                    (
+                        app_icon(config, app, &self.sniffed),
+                        app.name.clone(),
+                        app.comment.clone(),
+                    )
                 }
                 Hit::Calc(r) => (
                     icon(config, "calculate", 28.0),
@@ -213,15 +253,42 @@ impl Launcher {
                     e.name().to_owned(),
                     e.shortcode().map(|s| format!(":{s}:")).unwrap_or_default(),
                 ),
-                Hit::Clip(i) => {
-                    let clip = &self.clips[*i];
-                    let image = clip.preview.starts_with("[[ binary");
-                    let glyph = if image { "image" } else { "content_paste" };
-                    (
-                        icon(config, glyph, 24.0),
-                        clip.preview.chars().take(90).collect(),
-                        String::new(),
-                    )
+                Hit::Clip(c) => {
+                    let clip = &self.clips[*c];
+                    let star = if clip.favorite { accent } else { muted };
+                    trail = Some(
+                        button(icon(config, "star", 20.0))
+                            .padding(6)
+                            .on_press(wrap(Msg::Favorite(i)))
+                            .style(move |_, status| button::Style {
+                                background: matches!(status, button::Status::Hovered)
+                                    .then(|| Color { a: 0.1, ..fg }.into()),
+                                text_color: star,
+                                border: border::rounded(8),
+                                ..Default::default()
+                            })
+                            .into(),
+                    );
+                    let lead: Element<'a, M> = match &clip.image {
+                        // shortcut: decodes the full image for a 40px tile; fine for a few
+                        // screenshots, add real thumbnails if scrolling gets slow.
+                        // `Contain`: `Cover` spills out of the box (tiny-skia ignores clips on images).
+                        Some(path) => container(
+                            image(image::Handle::from_path(path))
+                                .content_fit(ContentFit::Contain)
+                                .border_radius(4),
+                        )
+                        .center(40)
+                        .into(),
+                        None => container(icon(config, "content_paste", 24.0))
+                            .center(40)
+                            .into(),
+                    };
+                    let title = match clip.preview.strip_prefix("[[ binary data ") {
+                        Some(rest) => rest.trim_end_matches(" ]]").to_owned(),
+                        None => clip.preview.chars().take(90).collect(),
+                    };
+                    (lead, title, ago(clip.time, now))
                 }
                 Hit::Bind(b) => {
                     let bind = &self.binds[*b];
@@ -244,8 +311,10 @@ impl Launcher {
                     .color(muted)
                     .wrapping(text::Wrapping::None),
             ]
-            .spacing(2);
-            button(row![lead, label].spacing(14).align_y(Alignment::Center))
+            .spacing(2)
+            .width(Length::Fill);
+            let content = row![lead, label].push(trail);
+            button(content.spacing(14).align_y(Alignment::Center))
                 .width(Length::Fill)
                 .height(ROW_H)
                 .padding([6, 12])
@@ -273,18 +342,45 @@ impl Launcher {
                 .center(Length::Fill)
                 .into()
         } else {
-            scrollable(column(rows).spacing(2))
-                .id(Id::new(LIST))
-                .height(Length::Fill)
-                .into()
+            container(
+                scrollable(column(rows).spacing(2))
+                    .id(Id::new(LIST))
+                    .height(Length::Fill),
+            )
+            .max_height(LIST_MAX_H)
+            .into()
         };
         let hint = match self.kind {
             Kind::Apps => "↑↓ select   Enter open   Esc close",
             Kind::Keybinds => "↑↓ scroll   Esc close",
-            Kind::Clipboard => "↑↓ select   Enter copy   Esc close",
+            Kind::Clipboard => "↑↓ select   Enter copy   ★ keep   Esc close",
         };
-        column![search, list, text(hint).size(11).color(muted)]
+        let mut footer = row![text(hint).size(11).color(muted)].align_y(Alignment::Center);
+        if self.kind == Kind::Clipboard && self.clips.iter().any(|c| !c.favorite) {
+            let clear = button(text("Clear history").size(11))
+                .padding([3, 10])
+                .on_press(wrap(Msg::ClearClips))
+                .style(move |_, status| button::Style {
+                    background: Some(
+                        Color {
+                            a: if matches!(status, button::Status::Hovered) {
+                                0.16
+                            } else {
+                                0.08
+                            },
+                            ..fg
+                        }
+                        .into(),
+                    ),
+                    text_color: fg,
+                    border: border::rounded(8),
+                    ..Default::default()
+                });
+            footer = footer.push(Space::new().width(Length::Fill)).push(clear);
+        }
+        column![search, list, footer]
             .spacing(10)
+            .width(PANEL_W)
             .into()
     }
 }
@@ -311,6 +407,25 @@ fn ranked<T>(query: &str, items: &[T], hay: impl Fn(&T) -> String) -> Vec<usize>
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
+/// "5 min ago" for recent copies, the date for older ones.
+fn ago(time: Option<i64>, now: i64) -> String {
+    let Some(time) = time else {
+        return String::new();
+    };
+    match (now - time).max(0) {
+        0..60 => "Just now".into(),
+        s @ 60..3600 => format!("{} min ago", s / 60),
+        s @ 3600..86400 => format!("{} h ago", s / 3600),
+        _ => chrono::DateTime::from_timestamp(time, 0)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%b %-d, %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default(),
+    }
+}
+
 /// Emoji whose name or shortcode contains every word of `query`.
 fn emoji(query: &str) -> Vec<&'static emojis::Emoji> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
@@ -327,15 +442,35 @@ fn emoji(query: &str) -> Vec<&'static emojis::Emoji> {
         .collect()
 }
 
-fn app_icon<'a, M: 'a>(config: &Config, app: &App) -> Element<'a, M> {
+/// Extensions iced decodes by name. iced picks the decoder from the extension and
+/// panics on the next redraw if decoding failed, so anything else goes via bytes.
+fn known_ext(ext: &str) -> bool {
+    ["svg", "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico"]
+        .contains(&ext.to_ascii_lowercase().as_str())
+}
+
+fn app_icon<'a, M: 'a>(
+    config: &Config,
+    app: &App,
+    sniffed: &HashMap<PathBuf, image::Handle>,
+) -> Element<'a, M> {
     const SIZE: f32 = 32.0;
+    let ext = |p: &PathBuf| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+    };
     match &app.icon {
-        Some(path) if path.extension().is_some_and(|e| e == "svg") => {
-            svg(svg::Handle::from_path(path))
-                .width(SIZE)
-                .height(SIZE)
-                .into()
+        Some(path) if sniffed.contains_key(path) => {
+            image(sniffed[path].clone()).width(SIZE).height(SIZE).into()
         }
+        Some(path) if !ext(path).as_deref().is_some_and(known_ext) => {
+            container(icon(config, "apps", 26.0)).center(SIZE).into()
+        }
+        Some(path) if ext(path).as_deref() == Some("svg") => svg(svg::Handle::from_path(path))
+            .width(SIZE)
+            .height(SIZE)
+            .into(),
         Some(path) => image(image::Handle::from_path(path))
             .width(SIZE)
             .height(SIZE)
@@ -417,6 +552,15 @@ mod tests {
             _ => String::new(),
         };
         assert_eq!(cmd, format!("{} -e btop", config.launcher.terminal));
+    }
+
+    #[test]
+    fn clip_times_read_naturally() {
+        assert_eq!(ago(None, 100), "");
+        assert_eq!(ago(Some(100), 130), "Just now");
+        assert_eq!(ago(Some(0), 300), "5 min ago");
+        assert_eq!(ago(Some(0), 7300), "2 h ago");
+        assert!(!ago(Some(0), 200_000).is_empty());
     }
 
     #[test]

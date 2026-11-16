@@ -11,7 +11,6 @@ use iced::{
 use rune_services::weather::{self, Weather};
 
 pub const PANEL_W: f32 = 580.0;
-pub const PANEL_H: f32 = 440.0;
 
 fn temp(t: f64) -> String {
     format!("{:.0}°", t.round())
@@ -61,7 +60,8 @@ pub fn panel(app: &App) -> Element<'_, Message> {
             "Loading the forecast…"
         };
         return container(text(hint).color(muted))
-            .center(Length::Fill)
+            .center_x(PANEL_W)
+            .padding(24)
             .into();
     };
     let wind = if w.imperial { "mph" } else { "km/h" };
@@ -182,6 +182,7 @@ pub fn panel(app: &App) -> Element<'_, Message> {
             .spacing(14)
             .padding(Padding::ZERO.right(12)),
     )
+    .width(PANEL_W)
     .height(Length::Fill)
     .into()
 }

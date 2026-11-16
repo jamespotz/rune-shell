@@ -14,6 +14,7 @@ pub mod hyprland;
 pub mod icons;
 pub mod media;
 pub mod notifications;
+pub mod stats;
 pub mod system;
 pub mod theme;
 pub mod tray;

@@ -14,7 +14,6 @@ use std::time::Duration;
 
 /// Expanded player size below the bar row.
 pub const PANEL_W: f32 = 540.0;
-pub const PANEL_H: f32 = 210.0;
 
 /// Compact widget: album art and a few visualizer bars. Hidden with no player.
 pub fn widget<'a>(app: &'a App, pill_h: f32) -> Element<'a, Message> {
@@ -128,7 +127,11 @@ pub fn panel<'a>(app: &'a App) -> Element<'a, Message> {
     })
     .width(Length::Fill)
     .height(34);
-    column![top, viz].spacing(12).padding([4, 6]).into()
+    column![top, viz]
+        .spacing(12)
+        .padding([4, 6])
+        .width(PANEL_W)
+        .into()
 }
 
 fn control<'a>(c: &Config, glyph: &str, control: Control, primary: bool) -> Element<'a, Message> {

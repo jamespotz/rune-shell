@@ -2,10 +2,13 @@
 //! Their property-change signals trigger a re-read; nothing polls.
 
 use futures_util::StreamExt;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 use tokio::sync::watch;
 use tracing::info;
-use zbus::{Connection, MessageStream, Proxy, zvariant::OwnedObjectPath};
+use zbus::{
+    Connection, MessageStream, Proxy,
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetKind {
@@ -35,6 +38,233 @@ pub async fn set_wifi(conn: &Connection, on: bool) -> zbus::Result<()> {
         .set_property("WirelessEnabled", on)
         .await
         .map_err(Into::into)
+}
+
+/// A Wi-Fi network in range (the strongest access point for its name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    /// 0-100.
+    pub strength: u8,
+    pub secured: bool,
+    pub active: bool,
+    /// Saved NetworkManager profile, so no password is needed.
+    pub saved: Option<String>,
+    pub device: String,
+    pub ap: String,
+}
+
+const WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
+const NM_SETTINGS: &str = "/org/freedesktop/NetworkManager/Settings";
+
+/// Networks in range, strongest first. Uses NetworkManager's last scan.
+pub async fn wifi_networks(conn: &Connection) -> zbus::Result<Vec<WifiNetwork>> {
+    let saved = saved_wifi(conn).await.unwrap_or_default();
+    let mut nets: Vec<WifiNetwork> = Vec::new();
+    for dev in wifi_devices(conn).await? {
+        let w = Proxy::new(conn, NM, dev.as_str(), WIRELESS).await?;
+        let active: OwnedObjectPath = w.get_property("ActiveAccessPoint").await?;
+        let aps: Vec<OwnedObjectPath> = w.call("GetAllAccessPoints", &()).await?;
+        for ap in aps {
+            let p = Proxy::new(
+                conn,
+                NM,
+                ap.as_str(),
+                "org.freedesktop.NetworkManager.AccessPoint",
+            )
+            .await?;
+            let ssid: Vec<u8> = p.get_property("Ssid").await.unwrap_or_default();
+            if ssid.is_empty() {
+                continue; // hidden network
+            }
+            let flags = |name: &'static str| {
+                let p = p.clone();
+                async move { p.get_property::<u32>(name).await.unwrap_or(0) }
+            };
+            let net = WifiNetwork {
+                saved: saved.get(&ssid).cloned(),
+                ssid: String::from_utf8_lossy(&ssid).into_owned(),
+                strength: p.get_property("Strength").await.unwrap_or(0),
+                secured: flags("WpaFlags").await | flags("RsnFlags").await | flags("Flags").await
+                    != 0,
+                active: ap == active,
+                device: dev.to_string(),
+                ap: ap.to_string(),
+            };
+            merge_network(&mut nets, net);
+        }
+    }
+    nets.sort_by(|a, b| b.active.cmp(&a.active).then(b.strength.cmp(&a.strength)));
+    Ok(nets)
+}
+
+/// Keeps one entry per name: the strongest access point, active if any of them is.
+fn merge_network(nets: &mut Vec<WifiNetwork>, net: WifiNetwork) {
+    match nets.iter_mut().find(|n| n.ssid == net.ssid) {
+        Some(old) => {
+            let active = old.active || net.active;
+            if net.strength > old.strength || net.active {
+                *old = net;
+            }
+            old.active = active;
+        }
+        None => nets.push(net),
+    }
+}
+
+/// Asks the Wi-Fi devices to scan; results show up a few seconds later.
+pub async fn wifi_scan(conn: &Connection) -> zbus::Result<()> {
+    for dev in wifi_devices(conn).await? {
+        let w = Proxy::new(conn, NM, dev.as_str(), WIRELESS).await?;
+        // Fails when a scan ran moments ago; the cached list is fine then.
+        let _ = w
+            .call_method("RequestScan", &(HashMap::<&str, Value>::new(),))
+            .await;
+    }
+    Ok(())
+}
+
+async fn wifi_devices(conn: &Connection) -> zbus::Result<Vec<OwnedObjectPath>> {
+    let nm = Proxy::new(conn, NM, "/org/freedesktop/NetworkManager", NM).await?;
+    let mut out = Vec::new();
+    for dev in nm
+        .call::<_, _, Vec<OwnedObjectPath>>("GetDevices", &())
+        .await?
+    {
+        let d = Proxy::new(
+            conn,
+            NM,
+            dev.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .await?;
+        if d.get_property::<u32>("DeviceType").await.unwrap_or(0) == 2 {
+            out.push(dev);
+        }
+    }
+    Ok(out)
+}
+
+/// Saved Wi-Fi profiles by SSID.
+async fn saved_wifi(conn: &Connection) -> zbus::Result<HashMap<Vec<u8>, String>> {
+    let settings = Proxy::new(
+        conn,
+        NM,
+        NM_SETTINGS,
+        "org.freedesktop.NetworkManager.Settings",
+    )
+    .await?;
+    let mut out = HashMap::new();
+    for path in settings
+        .call::<_, _, Vec<OwnedObjectPath>>("ListConnections", &())
+        .await?
+    {
+        let c = Proxy::new(
+            conn,
+            NM,
+            path.as_str(),
+            "org.freedesktop.NetworkManager.Settings.Connection",
+        )
+        .await?;
+        let s: HashMap<String, HashMap<String, OwnedValue>> = c.call("GetSettings", &()).await?;
+        if let Some(ssid) = s
+            .get("802-11-wireless")
+            .and_then(|w| w.get("ssid"))
+            .and_then(|v| v.try_clone().ok())
+            .and_then(|v| Vec::<u8>::try_from(v).ok())
+        {
+            out.insert(ssid, path.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Joins a network: a saved one by its profile, a new one with `password`.
+/// Waits for the result; a new profile that fails to connect is deleted again.
+pub async fn wifi_connect(
+    conn: &Connection,
+    net: &WifiNetwork,
+    password: Option<&str>,
+) -> Result<(), String> {
+    let e = |e: zbus::Error| e.to_string();
+    let nm = Proxy::new(conn, NM, "/org/freedesktop/NetworkManager", NM)
+        .await
+        .map_err(e)?;
+    let dev = ObjectPath::try_from(net.device.as_str()).map_err(|x| x.to_string())?;
+    let ap = ObjectPath::try_from(net.ap.as_str()).map_err(|x| x.to_string())?;
+    let (active, created) = match (&net.saved, password) {
+        (Some(saved), None) => {
+            let saved = ObjectPath::try_from(saved.as_str()).map_err(|x| x.to_string())?;
+            let a: OwnedObjectPath = nm
+                .call("ActivateConnection", &(saved, dev, ap))
+                .await
+                .map_err(e)?;
+            (a, None)
+        }
+        (saved, password) => {
+            if let Some(old) = saved {
+                wifi_forget(conn, old).await.map_err(e)?; // replacing a wrong password
+            }
+            // NetworkManager fills in the rest (WPA2/WPA3 key type) from the access point.
+            // shortcut: no enterprise (802.1X) or hidden networks; add when someone needs them.
+            let mut settings: HashMap<&str, HashMap<&str, Value>> = HashMap::new();
+            if let Some(pw) = password.filter(|_| net.secured) {
+                settings.insert(
+                    "802-11-wireless-security",
+                    HashMap::from([("psk", Value::from(pw))]),
+                );
+            }
+            let (profile, a): (OwnedObjectPath, OwnedObjectPath) = nm
+                .call("AddAndActivateConnection", &(settings, dev, ap))
+                .await
+                .map_err(e)?;
+            (a, Some(profile))
+        }
+    };
+    // Active connection states: 1 activating, 2 activated, 3-4 going away.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let ok = loop {
+        let state = match Proxy::new(
+            conn,
+            NM,
+            active.as_str(),
+            "org.freedesktop.NetworkManager.Connection.Active",
+        )
+        .await
+        {
+            Ok(p) => p.get_property::<u32>("State").await.unwrap_or(4),
+            Err(_) => 4,
+        };
+        if state == 2 || state >= 3 || tokio::time::Instant::now() > deadline {
+            break state == 2;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    if ok {
+        return Ok(());
+    }
+    if let Some(profile) = created {
+        let _ = wifi_forget(conn, profile.as_str()).await;
+    }
+    Err(if net.secured {
+        format!("Couldn't join {}. Check the password.", net.ssid)
+    } else {
+        format!("Couldn't join {}.", net.ssid)
+    })
+}
+
+/// Deletes a saved profile.
+pub async fn wifi_forget(conn: &Connection, profile: &str) -> zbus::Result<()> {
+    Proxy::new(
+        conn,
+        NM,
+        profile,
+        "org.freedesktop.NetworkManager.Settings.Connection",
+    )
+    .await?
+    .call_method("Delete", &())
+    .await
+    .map(drop)
 }
 
 /// Things the power menu can do.
@@ -158,6 +388,90 @@ async fn read_network(conn: &Connection) -> zbus::Result<Option<Network>> {
     Ok(Some(net))
 }
 
+const PROFILES: &str = "org.freedesktop.UPower.PowerProfiles";
+const PROFILES_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
+
+/// power-profiles-daemon state, e.g. `balanced` out of `power-saver`, `balanced`, `performance`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerProfile {
+    pub active: String,
+    pub available: Vec<String>,
+}
+
+impl PowerProfile {
+    /// The profile after the active one, wrapping around.
+    pub fn next(&self) -> Option<&str> {
+        let i = self.available.iter().position(|p| *p == self.active)?;
+        self.available
+            .get((i + 1) % self.available.len())
+            .map(String::as_str)
+    }
+}
+
+/// Watches power-profiles-daemon. `None` when it isn't running.
+pub fn spawn_power_profile(conn: Connection) -> watch::Receiver<Option<PowerProfile>> {
+    let (tx, rx) = watch::channel(None);
+    tokio::spawn(async move {
+        let rule = format!(
+            "type='signal',path='{PROFILES_PATH}',interface='org.freedesktop.DBus.Properties'"
+        );
+        let Ok(mut events) = MessageStream::for_match_rule(rule.as_str(), &conn, Some(16)).await
+        else {
+            return;
+        };
+        loop {
+            let p = read_power_profile(&conn).await.ok();
+            tx.send_if_modified(|cur| {
+                let changed = *cur != p;
+                if changed {
+                    *cur = p;
+                }
+                changed
+            });
+            if events.next().await.is_none() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+async fn read_power_profile(conn: &Connection) -> zbus::Result<PowerProfile> {
+    let p = Proxy::new(conn, PROFILES, PROFILES_PATH, PROFILES).await?;
+    let profiles: Vec<HashMap<String, OwnedValue>> = p.get_property("Profiles").await?;
+    Ok(PowerProfile {
+        active: p.get_property("ActiveProfile").await?,
+        available: profiles
+            .into_iter()
+            .filter_map(|mut m| String::try_from(m.remove("Profile")?).ok())
+            .collect(),
+    })
+}
+
+pub async fn set_power_profile(conn: &Connection, name: &str) -> zbus::Result<()> {
+    Proxy::new(conn, PROFILES, PROFILES_PATH, PROFILES)
+        .await?
+        .set_property("ActiveProfile", name)
+        .await
+        .map_err(Into::into)
+}
+
+/// Blocks idle actions (hypridle's screen-off, lock, suspend) until the returned fd is dropped.
+pub async fn inhibit_idle(conn: &Connection) -> zbus::Result<zbus::zvariant::OwnedFd> {
+    Proxy::new(
+        conn,
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+    )
+    .await?
+    .call(
+        "Inhibit",
+        &("idle", "Rune Shell", "Keep awake is on", "block"),
+    )
+    .await
+}
+
 const UPOWER: &str = "org.freedesktop.UPower";
 const DISPLAY: &str = "/org/freedesktop/UPower/devices/DisplayDevice";
 
@@ -211,4 +525,48 @@ async fn read_battery(conn: &Connection) -> zbus::Result<Option<Battery>> {
         full,
         time_left: u64::try_from(secs).ok().filter(|s| *s > 0),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn net(ssid: &str, strength: u8, active: bool) -> WifiNetwork {
+        WifiNetwork {
+            ssid: ssid.into(),
+            strength,
+            secured: true,
+            active,
+            saved: None,
+            device: "/d".into(),
+            ap: format!("/ap/{strength}"),
+        }
+    }
+
+    #[test]
+    fn cycles_power_profiles() {
+        let mut p = PowerProfile {
+            active: "balanced".into(),
+            available: vec![
+                "power-saver".into(),
+                "balanced".into(),
+                "performance".into(),
+            ],
+        };
+        assert_eq!(p.next(), Some("performance"));
+        p.active = "performance".into();
+        assert_eq!(p.next(), Some("power-saver"));
+        p.active = "unknown".into();
+        assert_eq!(p.next(), None);
+    }
+
+    #[test]
+    fn merges_access_points_by_name() {
+        let mut nets = Vec::new();
+        merge_network(&mut nets, net("home", 40, true));
+        merge_network(&mut nets, net("home", 80, false));
+        merge_network(&mut nets, net("cafe", 50, false));
+        assert_eq!(nets.len(), 2);
+        assert_eq!((nets[0].strength, nets[0].active), (80, true));
+    }
 }

@@ -15,7 +15,7 @@ blur = false              # blur behind the notch (needs a transparent backgroun
 icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
 outputs = []              # e.g. ["DP-1"]; empty = every monitor
 # Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
-# "weather", "bluetooth", "volume", "network", "battery", "quick_settings", "power",
+# "weather", "bluetooth", "volume", "network", "battery", "stats", "quick_settings", "power",
 # "settings". Reorder freely;
 # the three lists are laid out left to right inside the notch.
 left = ["workspaces"]

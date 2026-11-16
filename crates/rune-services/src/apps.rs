@@ -241,7 +241,14 @@ fn steam_game(acf: &str, root: &Path, launcher: &str) -> Option<App> {
         .and_then(|dir| {
             dir.flatten()
                 .map(|e| e.path())
-                .find(|p| p.extension().is_some_and(|x| x == "jpg"))
+                // Only the hash-named icon: art like `library_600x900.jpg` is often PNG
+                // data, which iced fails to decode as JPEG (and then panics on redraw).
+                .find(|p| {
+                    p.extension().is_some_and(|x| x == "jpg")
+                        && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                            s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+                        })
+                })
         });
     Some(App {
         command: format!("{launcher} steam://rungameid/{id}"),

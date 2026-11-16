@@ -10,7 +10,6 @@ use iced::{
 use rune_services::calendar::Event;
 
 pub const PANEL_W: f32 = 640.0;
-pub const PANEL_H: f32 = 400.0;
 
 /// Events overlapping `day`.
 pub fn on_day(events: &[Event], day: NaiveDate) -> impl Iterator<Item = &Event> {
@@ -165,7 +164,7 @@ pub fn panel(app: &App) -> Element<'_, Message> {
     let list = column![text(title).size(15), body]
         .spacing(10)
         .width(Length::Fill);
-    row![grid, list].spacing(24).into()
+    row![grid, list].spacing(24).width(PANEL_W).into()
 }
 
 fn event_card<'a>(app: &'a App, e: &'a Event) -> Element<'a, Message> {

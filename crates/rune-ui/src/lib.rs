@@ -41,7 +41,7 @@ use rune_services::{
     hyprland::{Bind, HyprState},
     media::{Control, Media},
     notifications::{self, Image},
-    system::{Battery, Network, PowerAction},
+    system::{Battery, Network, PowerAction, PowerProfile, WifiNetwork},
     tray::{MenuEntry, TrayItem},
     weather::{Location, Query as WeatherQuery, Weather},
 };
@@ -87,13 +87,28 @@ pub enum Action {
     Record(capture::RecordCommand),
     GameMode(bool),
     Volume(audio::Change),
+    /// Default output/input and microphone mute.
+    Audio(audio::DeviceCommand),
     Brightness(audio::Change),
     Wifi(bool),
+    /// Warm screen colors (hyprsunset).
+    NightLight(bool),
+    /// Hold off idle screen-off, lock and suspend.
+    KeepAwake(bool),
+    PowerProfile(String),
+    /// List Wi-Fi networks and ask for a fresh scan; answered with [`UiEvent::WifiNetworks`].
+    WifiScan,
+    WifiConnect(WifiNetwork, Option<String>),
+    WifiForget(String),
     Power(PowerAction),
     /// Fetch clipboard history; answered with [`UiEvent::Clipboard`].
     LoadClipboard,
     /// Put a history entry (cliphist id) back on the clipboard.
     ClipboardCopy(String),
+    /// Favorite or unfavorite an entry; answered with [`UiEvent::Clipboard`].
+    ClipboardFavorite(clipboard::Entry),
+    /// Wipe history (not favorites); answered with [`UiEvent::Clipboard`].
+    ClipboardClear,
     /// Calendar links to follow.
     Calendar(Vec<String>),
     RefreshCalendar,
@@ -125,10 +140,19 @@ pub enum UiEvent {
     Calendar(cal::State),
     ToggleCalendar,
     Volume(Option<audio::Volume>),
+    AudioDevices(audio::Devices),
     /// New backlight level after a brightness change (shows the OSD).
     Brightness(Option<u8>),
     Network(Option<Network>),
+    WifiNetworks(Vec<WifiNetwork>),
+    /// Whether night light / keep awake is now on, or why it couldn't start.
+    NightLight(Result<bool, String>),
+    KeepAwake(Result<bool, String>),
+    PowerProfile(Option<PowerProfile>),
+    /// Result of joining a network (empty on success).
+    WifiStatus(String),
     Battery(Option<Battery>),
+    Stats(Option<rune_services::stats::Stats>),
     Clipboard(Vec<clipboard::Entry>),
     ToggleQuick,
     TogglePower,
@@ -190,8 +214,8 @@ pub fn run(
     Ok(())
 }
 
-/// What the expanded notch shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which panel is open; each gets its own layer surface under the bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Panel {
     Launcher(Kind),
     Media,
@@ -231,12 +255,19 @@ pub(crate) enum Message {
     ToggleWeather,
     /// Open settings on the Bluetooth page.
     OpenBluetooth,
+    OpenWifi,
     StopRecording,
     GameModeOff,
     VolumeMute,
     VolumeStep(i8),
     /// The notch content's natural width on a monitor.
     NotchWidth(String, f32),
+    /// Natural size of the open panel's content.
+    PanelSize(iced::Size),
+    /// Pointer over a monitor's bar (monitor, x), or `None` once it leaves.
+    BarCursor(Option<(String, f32)>),
+    /// A monitor's bar width (= the monitor's logical width).
+    BarWidth(String, f32),
     /// Dragging the player's position slider (seconds), and letting go.
     SeekDrag(f32),
     SeekCommit,
@@ -246,6 +277,10 @@ pub(crate) enum Message {
     Power(PowerAction),
     WifiToggle(bool),
     BtPower(bool),
+    MicMuteToggle,
+    NightLightToggle,
+    KeepAwakeToggle,
+    PowerProfileNext,
     GameModeToggle,
     QuickVolume(f32),
     QuickBrightness(f32),
@@ -306,10 +341,25 @@ pub(crate) struct App {
     pub bt: bluetooth::State,
     pub recording: Option<capture::Recording>,
     pub volume: Option<audio::Volume>,
+    pub audio: audio::Devices,
+    pub night_light: Result<bool, String>,
+    pub keep_awake: Result<bool, String>,
+    pub power_profile: Option<PowerProfile>,
+    pub stats: Option<rune_services::stats::Stats>,
     pub network: Option<Network>,
     pub battery: Option<Battery>,
     /// Per monitor: notch width animating from `.0` to `.1`.
     notch_widths: HashMap<String, (f32, f32, iced::Animation<bool>)>,
+    /// Current size of the panel surface, and the last size of each panel (so
+    /// reopening starts at the right size).
+    panel_size: (u32, u32),
+    panel_sizes: HashMap<Panel, (u32, u32)>,
+    /// Where the open panel is centered on its monitor (`None` = middle).
+    panel_x: Option<f32>,
+    /// The click-outside-to-close surface under the panel.
+    catcher: Option<Id>,
+    bar_cursor: Option<(String, f32)>,
+    bar_widths: HashMap<String, f32>,
     /// Keep frames running until then so the notch can measure its new content.
     measure_until: Instant,
     /// Where the position slider is being dragged to, in seconds.
@@ -332,11 +382,8 @@ pub(crate) struct App {
     /// The tray item whose menu is open, and its entries once loaded.
     tray_menu_for: Option<String>,
     pub tray_menu: Option<(String, Vec<MenuEntry>)>,
-    /// The notch that is expanded (or still shrinking back), and its monitor.
+    /// The open panel's surface and its monitor.
     pub panel: Option<(Id, String)>,
-    /// Whether the panel should be open; `expand` animates towards it.
-    pub panel_open: bool,
-    pub expand: iced::Animation<bool>,
 }
 
 impl App {
@@ -347,7 +394,6 @@ impl App {
         hyprland: bool,
     ) -> (Self, Task<Message>) {
         let mut app = Self {
-            expand: iced::Animation::new(false).duration(config.animations.duration()),
             config,
             hypr: HyprState::default(),
             now: Local::now(),
@@ -360,7 +406,6 @@ impl App {
             pills: HashMap::new(),
             launcher: Launcher::default(),
             panel: None,
-            panel_open: false,
             media: None,
             art: None,
             bars: Vec::new(),
@@ -377,9 +422,20 @@ impl App {
             bt: bluetooth::State::default(),
             recording: None,
             volume: None,
+            audio: audio::Devices::default(),
+            night_light: Ok(false),
+            keep_awake: Ok(false),
+            power_profile: None,
+            stats: None,
             network: None,
             battery: None,
             notch_widths: HashMap::new(),
+            panel_size: (0, 0),
+            panel_sizes: HashMap::new(),
+            panel_x: None,
+            catcher: None,
+            bar_cursor: None,
+            bar_widths: HashMap::new(),
             measure_until: Instant::now(),
             seek: None,
             brightness: None,
@@ -429,6 +485,7 @@ impl App {
                 | UiEvent::Volume(_)
                 | UiEvent::Network(_)
                 | UiEvent::Battery(_)
+                | UiEvent::Stats(_)
                 | UiEvent::Recording(_)
                 | UiEvent::GameMode(_),
             ) => true,
@@ -571,7 +628,7 @@ impl App {
                 self.power_confirm = None;
                 Task::none()
             }
-            Message::Escape if self.panel_open => self.close_panel(),
+            Message::Escape if self.panel.is_some() => self.close_panel(),
             Message::Settings(settings::Msg::Close) | Message::Escape => match self.settings.take()
             {
                 Some(id) => {
@@ -618,6 +675,11 @@ impl App {
                 )));
                 self.close_panel()
             }
+            Message::Ui(UiEvent::AudioDevices(d)) => {
+                self.settings_ui.audio = d.clone();
+                self.audio = d;
+                Task::none()
+            }
             Message::Ui(UiEvent::Volume(v)) => {
                 // The first reading is the starting point, not a change worth an OSD.
                 let changed = self.volume.is_some() && v != self.volume;
@@ -646,28 +708,9 @@ impl App {
             }
             Message::Ui(UiEvent::TogglePower) | Message::TogglePower => {
                 self.power_confirm = None;
-                if self.panel_open && self.panel_kind == Panel::Quick {
-                    self.panel_kind = Panel::Power; // straight from quick settings
-                    return Task::none();
-                }
                 self.toggle_panel(Panel::Power)
             }
             Message::Ui(UiEvent::ToggleClipboard) | Message::ToggleClipboard => {
-                if self.panel_open && self.panel_kind != Panel::Launcher(Kind::Clipboard) {
-                    // Coming from quick settings: switch content in place.
-                    self.panel_kind = Panel::Launcher(Kind::Clipboard);
-                    self.send(Action::LoadClipboard);
-                    let keyboard = self.panel.as_ref().map(|(id, _)| {
-                        Task::done(Message::KeyboardInteractivityChange {
-                            id: *id,
-                            keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                        })
-                    });
-                    return Task::batch([
-                        self.launcher.reset(Kind::Clipboard),
-                        keyboard.unwrap_or_else(Task::none),
-                    ]);
-                }
                 self.toggle_panel(Panel::Launcher(Kind::Clipboard))
             }
             Message::Power(action) => {
@@ -681,6 +724,36 @@ impl App {
             }
             Message::WifiToggle(on) => {
                 self.send(Action::Wifi(on));
+                Task::none()
+            }
+            Message::MicMuteToggle => {
+                self.send(Action::Audio(audio::DeviceCommand::ToggleMicMute));
+                Task::none()
+            }
+            Message::NightLightToggle => {
+                self.send(Action::NightLight(self.night_light != Ok(true)));
+                Task::none()
+            }
+            Message::KeepAwakeToggle => {
+                self.send(Action::KeepAwake(self.keep_awake != Ok(true)));
+                Task::none()
+            }
+            Message::PowerProfileNext => {
+                if let Some(next) = self.power_profile.as_ref().and_then(PowerProfile::next) {
+                    self.send(Action::PowerProfile(next.to_owned()));
+                }
+                Task::none()
+            }
+            Message::Ui(UiEvent::NightLight(r)) => {
+                self.night_light = r;
+                Task::none()
+            }
+            Message::Ui(UiEvent::KeepAwake(r)) => {
+                self.keep_awake = r;
+                Task::none()
+            }
+            Message::Ui(UiEvent::PowerProfile(p)) => {
+                self.power_profile = p;
                 Task::none()
             }
             Message::BtPower(on) => {
@@ -706,7 +779,28 @@ impl App {
                 self.close_panel()
             }
             Message::Ui(UiEvent::Network(n)) => {
+                // Joining or leaving changes the list's "Connected" marks.
+                let key = |n: &Option<Network>| n.as_ref().map(|n| (n.connected, n.name.clone()));
+                if self.settings_ui.page() == settings::Page::Wifi
+                    && self.settings.is_some()
+                    && key(&n) != key(&self.network)
+                {
+                    self.send(Action::WifiScan);
+                }
+                self.settings_ui.network = n.clone();
                 self.network = n;
+                Task::none()
+            }
+            Message::Ui(UiEvent::WifiNetworks(list)) => {
+                self.settings_ui.wifi = list;
+                Task::none()
+            }
+            Message::Ui(UiEvent::WifiStatus(status)) => {
+                self.settings_ui.wifi_status = status;
+                Task::none()
+            }
+            Message::Ui(UiEvent::Stats(s)) => {
+                self.stats = s;
                 Task::none()
             }
             Message::Ui(UiEvent::Battery(b)) => {
@@ -724,6 +818,15 @@ impl App {
                     )));
                 }
                 // Keep showing the dragged spot until the player reports the new position.
+                Task::none()
+            }
+            Message::PanelSize(size) => self.fit_panel(size),
+            Message::BarCursor(at) => {
+                self.bar_cursor = at;
+                Task::none()
+            }
+            Message::BarWidth(monitor, width) => {
+                self.bar_widths.insert(monitor, width);
                 Task::none()
             }
             Message::NotchWidth(monitor, width) => {
@@ -792,25 +895,19 @@ impl App {
                 Task::none()
             }
             Message::Ui(UiEvent::OpenBluetooth) | Message::OpenBluetooth => {
-                let open = if self.settings.is_none() {
-                    self.toggle_settings()
-                } else {
-                    Task::none()
-                };
-                if self.settings_ui.page() != settings::Page::Bluetooth {
-                    let mut config = self.config.clone();
-                    if let Some(settings::Request::Bluetooth(cmd)) = self
-                        .settings_ui
-                        .update(&mut config, settings::Msg::Page(settings::Page::Bluetooth))
-                    {
-                        self.send(Action::Bluetooth(cmd));
-                    }
-                }
-                open
+                self.open_settings_page(settings::Page::Bluetooth)
+            }
+            Message::OpenWifi => {
+                let close = self.close_panel();
+                Task::batch([close, self.open_settings_page(settings::Page::Wifi)])
             }
             Message::Settings(msg) => {
                 let mut config = self.config.clone();
+                let was = self.settings_ui.page();
                 let request = self.settings_ui.update(&mut config, msg);
+                if was != settings::Page::Wifi && self.settings_ui.page() == settings::Page::Wifi {
+                    self.send(Action::WifiScan);
+                }
                 if let Some(request) = request {
                     self.settings_ui.status.clear();
                     match request {
@@ -824,6 +921,13 @@ impl App {
                         settings::Request::Blur(on) => self.send(Action::Blur(on)),
                         settings::Request::Geocode(q) => self.send(Action::Geocode(q)),
                         settings::Request::Bluetooth(cmd) => self.send(Action::Bluetooth(cmd)),
+                        settings::Request::Audio(cmd) => self.send(Action::Audio(cmd)),
+                        settings::Request::WifiScan => self.send(Action::WifiScan),
+                        settings::Request::WifiPower(on) => self.send(Action::Wifi(on)),
+                        settings::Request::WifiConnect(net, pw) => {
+                            self.send(Action::WifiConnect(net, pw))
+                        }
+                        settings::Request::WifiForget(p) => self.send(Action::WifiForget(p)),
                         settings::Request::SetWallpaper(path) => {
                             self.send(Action::SetWallpaper(path));
                             if config.theme.source == config::ThemeSource::Wallpaper {
@@ -858,10 +962,18 @@ impl App {
                     self.send(Action::ClipboardCopy(id));
                     self.close_panel()
                 }
+                Some(Outcome::Favorite(entry)) => {
+                    self.send(Action::ClipboardFavorite(entry));
+                    Task::none()
+                }
+                Some(Outcome::ClearClips) => {
+                    self.send(Action::ClipboardClear);
+                    Task::none()
+                }
                 None => Task::none(),
             },
             Message::Nav(by)
-                if self.panel_open && matches!(self.panel_kind, Panel::Launcher(_)) =>
+                if self.panel.is_some() && matches!(self.panel_kind, Panel::Launcher(_)) =>
             {
                 self.launcher.select(by)
             }
@@ -875,7 +987,7 @@ impl App {
                     }
                     _ => Task::none(),
                 };
-                Task::batch([self.finish_close(), self.sync_popups(), osd])
+                Task::batch([self.sync_popups(), osd])
             }
             _ => Task::none(), // layer-shell control messages are handled by iced_layershell
         }
@@ -887,6 +999,12 @@ impl App {
         }
         if Some(id) == self.popup {
             return notify::popups(self);
+        }
+        if Some(id) == self.panel.as_ref().map(|(id, _)| *id) {
+            return notch::panel(self);
+        }
+        if Some(id) == self.catcher {
+            return notch::catcher(self);
         }
         if Some(id) == self.settings {
             return self.settings_ui.view(&self.config).map(Message::Settings);
@@ -913,12 +1031,10 @@ impl App {
             _ => None,
         });
         let animating = self.pills.values().any(|a| a.is_animating(self.instant))
-            || self.expand.is_animating(self.instant)
             || self.popup_expand.is_animating(self.instant)
             || self.osd_window.is_some() // the frame clock hides the OSD on time
             || self.notch_widths.values().any(|(_, _, a)| a.is_animating(self.instant))
-            || self.instant < self.measure_until
-            || (self.panel.is_some() && !self.panel_open); // a shrink is pending
+            || self.instant < self.measure_until;
         let frames = if animating {
             window::frames().map(Message::Frame)
         } else {
@@ -948,14 +1064,6 @@ impl App {
         Some(anim.interpolate(*from, *to, self.instant))
     }
 
-    /// How far the notch on `monitor` is expanded, 0 to 1.
-    pub fn expansion(&self, monitor: &str) -> f32 {
-        match &self.panel {
-            Some((_, m)) if m == monitor => self.expand.interpolate(0.0, 1.0, self.instant),
-            _ => 0.0,
-        }
-    }
-
     fn set_config(&mut self, config: Config) -> Task<Message> {
         if config.calendar != self.config.calendar {
             self.send(Action::Calendar(config.calendar.urls.clone()));
@@ -968,20 +1076,16 @@ impl App {
         self.config = config;
         self.pills.clear(); // picks up the new animation duration
         self.animate_pills();
-        let open = self.expand.value();
-        self.expand = iced::Animation::new(open).duration(self.config.animations.duration());
         if !rebuild {
             return Task::none();
         }
         // The notch height is baked into the layer surface; reopen them.
-        self.panel = None;
-        self.panel_open = false;
-        self.expand = iced::Animation::new(false).duration(self.config.animations.duration());
-        let close: Vec<_> = self
+        let mut close: Vec<_> = self
             .notches
             .drain()
             .map(|(id, _)| window::close::<Message>(id))
             .collect();
+        close.push(self.close_panel());
         Task::batch(close).chain(self.sync_notches())
     }
 
@@ -1009,10 +1113,9 @@ impl App {
         if self
             .panel
             .as_ref()
-            .is_some_and(|(id, _)| !self.notches.contains_key(id))
+            .is_some_and(|(_, m)| !self.notches.values().any(|n| n == m))
         {
-            self.panel = None; // its monitor was unplugged
-            self.panel_open = false;
+            tasks.push(self.close_panel()); // its monitor was unplugged
         }
         for name in wanted {
             if self.notches.values().any(|n| *n == name) {
@@ -1051,6 +1154,9 @@ impl App {
         if self.settings_ui.page() == settings::Page::Bluetooth {
             self.send(Action::Bluetooth(bluetooth::Command::Scan(true)));
         }
+        if self.settings_ui.page() == settings::Page::Wifi {
+            self.send(Action::WifiScan);
+        }
         let id = Id::unique();
         self.settings = Some(id);
         Task::done(Message::NewLayerShell {
@@ -1068,112 +1174,122 @@ impl App {
         })
     }
 
-    /// Opens the panel on the focused monitor's notch, switches its content, or closes it.
+    /// Opens `panel` in its own surface (replacing any open one), or closes it.
+    /// Opened from the bar, it sits under the pointer; otherwise top-center.
     fn toggle_panel(&mut self, panel: Panel) -> Task<Message> {
-        if self.panel_open && self.panel_kind == panel {
+        if self.panel.is_some() && self.panel_kind == panel {
             return self.close_panel();
         }
-        let mut tasks = Vec::new();
+        // Switching from another panel keeps its spot (the pointer is on the panel, not the bar).
+        let switching = self.panel.clone().map(|(_, m)| (m, self.panel_x));
+        let close = self.close_panel();
+        let focused = self
+            .hypr
+            .monitors
+            .iter()
+            .find(|m| m.focused)
+            .map_or_else(|| self.notches.values().next().cloned().unwrap_or_default(), |m| m.name.clone());
+        let (monitor, x) = match (switching, &self.bar_cursor) {
+            (Some(spot), _) => spot,
+            (None, Some((m, x))) => (m.clone(), Some(*x)),
+            (None, None) => (focused, None),
+        };
+        let mut after = Task::none();
         if let Panel::Launcher(kind) = panel {
             self.send(match kind {
                 Kind::Apps => Action::LoadApps,
                 Kind::Keybinds => Action::LoadBinds,
                 Kind::Clipboard => Action::LoadClipboard,
             });
-            tasks.push(self.launcher.reset(kind));
+            after = self.launcher.reset(kind); // focuses the search box once the surface exists
         }
         self.panel_kind = panel;
+        self.panel_x = x;
         // The launcher needs the keyboard; the player shouldn't steal it.
         let keyboard_interactivity = match panel {
             Panel::Launcher(_) => KeyboardInteractivity::Exclusive,
-            Panel::Media
-            | Panel::Notifications
-            | Panel::TrayMenu
-            | Panel::Weather
-            | Panel::Calendar
-            | Panel::Quick
-            | Panel::Power => KeyboardInteractivity::OnDemand,
+            _ => KeyboardInteractivity::OnDemand,
         };
-        if self.panel_open {
-            if let Some((id, _)) = self.panel {
-                tasks.push(Task::done(Message::KeyboardInteractivityChange {
-                    id,
-                    keyboard_interactivity,
-                }));
-            }
-            return Task::batch(tasks); // already expanded; just switch content
-        }
-        let focused = self
-            .hypr
-            .monitors
-            .iter()
-            .find(|m| m.focused)
-            .map_or("", |m| m.name.as_str());
-        let target = match &self.panel {
-            Some(p) => Some(p.clone()), // reopening while it shrinks
-            None => self
-                .notches
-                .iter()
-                .find(|(_, n)| *n == focused)
-                .or_else(|| self.notches.iter().next())
-                .map(|(id, n)| (*id, n.clone())),
+        // Last time's size so reopening needs no resize; the sensor corrects it.
+        let size = self.panel_sizes.get(&panel).copied().unwrap_or((1, 1));
+        self.panel_size = size;
+        let output_option = if monitor.is_empty() {
+            OutputOption::Active
+        } else {
+            OutputOption::OutputName(monitor.clone())
         };
-        let Some((id, monitor)) = target else {
-            return Task::none();
-        };
+        let (anchor, margin) = self.panel_place(&monitor, size.0);
+        let (catcher, id) = (Id::unique(), Id::unique());
+        self.catcher = Some(catcher);
         self.panel = Some((id, monitor));
-        self.panel_open = true;
-        self.instant = Instant::now();
-        self.expand.go_mut(true, self.instant);
-        // Sized for the tallest panel so switching content never needs a resize.
-        let h = self.config.bar.height + launcher::PANEL_H as u32 + 16;
-        tasks.push(Task::done(Message::SizeChange { id, size: (0, h) }));
-        tasks.push(Task::done(Message::KeyboardInteractivityChange {
-            id,
-            keyboard_interactivity,
-        }));
-        Task::batch(tasks)
+        let open = Task::batch([
+            Task::done(Message::NewLayerShell {
+                settings: NewLayerShellSettings {
+                    size: Some((0, 0)),
+                    layer: Layer::Top,
+                    anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+                    exclusive_zone: None, // stays clear of the bar's zone, so the bar still works
+                    keyboard_interactivity: KeyboardInteractivity::None,
+                    output_option: output_option.clone(),
+                    namespace: Some("rune-catcher".to_owned()),
+                    ..Default::default()
+                },
+                id: catcher,
+            }),
+            Task::done(Message::NewLayerShell {
+                settings: NewLayerShellSettings {
+                    size: Some(size),
+                    layer: Layer::Overlay,
+                    anchor,
+                    exclusive_zone: None,
+                    margin: Some(margin),
+                    keyboard_interactivity,
+                    output_option,
+                    namespace: Some("rune-panel".to_owned()),
+                    ..Default::default()
+                },
+                id,
+            }),
+        ]);
+        close.chain(open).chain(after)
     }
 
-    /// Size of the current panel's area below the bar row.
-    pub fn panel_size(&self) -> (f32, f32) {
-        match self.panel_kind {
-            Panel::Launcher(_) => (launcher::PANEL_W, launcher::PANEL_H),
-            Panel::Media => (media::PANEL_W, media::PANEL_H),
-            Panel::Notifications => (460.0, launcher::PANEL_H),
-            Panel::TrayMenu => (tray::MENU_W, tray::MENU_H),
-            Panel::Weather => (weather::PANEL_W, weather::PANEL_H),
-            Panel::Calendar => (calendar::PANEL_W, calendar::PANEL_H),
-            Panel::Quick => (quick::QUICK_W, quick::QUICK_H),
-            Panel::Power => (quick::POWER_W, quick::POWER_H),
+    /// Anchor and margin (top, right, bottom, left) for a panel `width` wide:
+    /// centered under `panel_x`, kept on screen; or top-center.
+    fn panel_place(&self, monitor: &str, width: u32) -> (Anchor, (i32, i32, i32, i32)) {
+        const GAP: i32 = 8;
+        let screen = self.bar_widths.get(monitor).copied();
+        match (self.panel_x, screen) {
+            (Some(x), Some(screen)) => {
+                let w = width as f32;
+                let left = (x - w / 2.0).clamp(GAP as f32, (screen - w - GAP as f32).max(GAP as f32));
+                (Anchor::Top | Anchor::Left, (GAP, 0, 0, left.round() as i32))
+            }
+            _ => (Anchor::Top, (GAP, 0, 0, 0)),
         }
     }
 
-    /// Starts collapsing; [`Self::finish_close`] shrinks the surface once the animation ends.
-    fn close_panel(&mut self) -> Task<Message> {
-        let Some((id, _)) = self.panel.clone().filter(|_| self.panel_open) else {
+    /// Resizes the panel surface to its content's measured size.
+    fn fit_panel(&mut self, size: iced::Size) -> Task<Message> {
+        let Some((id, monitor)) = self.panel.clone() else {
             return Task::none();
         };
-        self.panel_open = false;
-        self.instant = Instant::now();
-        self.expand.go_mut(false, self.instant);
-        Task::done(Message::KeyboardInteractivityChange {
-            id,
-            keyboard_interactivity: KeyboardInteractivity::None,
-        })
-    }
-
-    fn finish_close(&mut self) -> Task<Message> {
-        if self.panel_open || self.expand.is_animating(self.instant) {
+        let fit = (size.width.ceil() as u32, size.height.ceil() as u32);
+        if fit.0 == 0 || fit.1 == 0 || fit == self.panel_size {
             return Task::none();
         }
-        match self.panel.take() {
-            Some((id, _)) => Task::done(Message::SizeChange {
-                id,
-                size: (0, self.config.bar.height),
-            }),
-            None => Task::none(),
-        }
+        self.panel_size = fit;
+        self.panel_sizes.insert(self.panel_kind, fit);
+        let (_, margin) = self.panel_place(&monitor, fit.0);
+        Task::batch([
+            Task::done(Message::SizeChange { id, size: fit }),
+            Task::done(Message::MarginChange { id, margin }),
+        ])
+    }
+
+    fn close_panel(&mut self) -> Task<Message> {
+        let ids = [self.panel.take().map(|(id, _)| id), self.catcher.take()];
+        Task::batch(ids.into_iter().flatten().map(window::close))
     }
 
     /// Starts a transition for every pill whose active state changed.
@@ -1266,8 +1382,10 @@ impl App {
         self.tray_menu = None;
         self.tray_menu_for = Some(key.clone());
         self.send(Action::Tray(TrayRequest::LoadMenu(key)));
-        if self.panel_open && self.panel_kind == Panel::TrayMenu && !same {
-            return Task::none(); // switch to the other app's menu in place
+        if self.panel.is_some() && self.panel_kind == Panel::TrayMenu && !same {
+            // Another app's menu: reopen under its icon.
+            let close = self.close_panel();
+            return close.chain(self.toggle_panel(Panel::TrayMenu));
         }
         self.toggle_panel(Panel::TrayMenu)
     }
@@ -1320,6 +1438,22 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Opens settings (if closed) on `page`.
+    fn open_settings_page(&mut self, page: settings::Page) -> Task<Message> {
+        let open = if self.settings.is_none() {
+            self.toggle_settings()
+        } else {
+            Task::none()
+        };
+        if self.settings_ui.page() == page {
+            return open;
+        }
+        Task::batch([
+            open,
+            self.update(Message::Settings(settings::Msg::Page(page))),
+        ])
     }
 
     /// Scanning only runs while the Bluetooth settings page is visible.

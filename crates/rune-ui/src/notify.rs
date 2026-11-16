@@ -242,6 +242,8 @@ pub fn toast<'a>(
     .into()
 }
 
+const CENTER_W: f32 = 460.0;
+
 /// The notification center panel (in the expanded notch).
 pub fn center(app: &App) -> Element<'_, Message> {
     let muted: Color = app.config.colors.muted.into();
@@ -295,7 +297,7 @@ pub fn center(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
     };
-    column![header, body].spacing(12).into()
+    column![header, body].spacing(12).width(CENTER_W).into()
 }
 
 /// Bar widget: a bell, struck through in do-not-disturb, with a count.
