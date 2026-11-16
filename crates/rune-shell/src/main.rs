@@ -13,7 +13,7 @@ use rune_services::{
     tray, visualizer, wallpaper, weather,
 };
 use rune_ui::config::{Colors, Rgba, ThemeSource};
-use rune_ui::{Action, Config, UiEvent};
+use rune_ui::{Action, Config, Surface, UiEvent};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -29,19 +29,13 @@ const USAGE: &str = "usage: rune-shell [COMMAND]
 
 Without a command, starts the shell. Commands for the running shell:
   reload           re-read config.toml (also happens automatically on save)
-  toggle launcher  open or close the app launcher
-  toggle keybinds  open or close the keybind cheat sheet
-  toggle media     open or close the music player
-  toggle notifications  open or close the notification center
-  toggle weather   open or close the forecast
-  toggle calendar  open or close the calendar
+  toggle PANEL     open or close a panel: {panels}
   open bluetooth   open settings on the Bluetooth page
   screenshot [screen|all|window|selection]
   record [screen|window|selection]   start, or stop if recording
   record stop
   ocr              copy the text in a selected area
   game-mode [on|off|toggle]
-  toggle quick-settings | toggle power | toggle clipboard
   lock             lock the screen
   volume up|down|mute|set N      (shows the OSD)
   brightness up|down|set N
@@ -62,7 +56,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("-h" | "--help" | "help") => {
-            println!("{USAGE}");
+            let panels: Vec<_> = rune_ui::Panel::names().collect();
+            println!("{}", USAGE.replace("{panels}", &panels.join(", ")));
             Ok(())
         }
         Some(_) => {
@@ -807,7 +802,9 @@ async fn load_wallpapers(dir: PathBuf, ui: UnboundedSender<UiEvent>) {
 /// Hyprland layer rule (named, so re-sending it updates rather than duplicates).
 fn blur_rule(on: bool) -> String {
     format!(
-        "hl.layer_rule({{ name = \"rune-blur\", match = {{ namespace = \"^rune-(bar|settings)$\" }}, blur = {on}, ignore_alpha = 0.3 }})"
+        "hl.layer_rule({{ name = \"rune-blur\", match = {{ namespace = \"^({}|{})$\" }}, blur = {on}, ignore_alpha = 0.3 }})",
+        Surface::Bar(String::new()).namespace(),
+        Surface::Settings.namespace(),
     )
 }
 

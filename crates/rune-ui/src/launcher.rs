@@ -18,9 +18,7 @@ use std::{collections::HashMap, path::PathBuf};
 /// Height of one result row; used to keep the selection scrolled into view.
 pub const ROW_H: f32 = 52.0;
 pub const PANEL_W: f32 = 640.0;
-/// The tallest any notch panel gets (the surface is sized for it).
-pub const PANEL_H: f32 = 440.0;
-/// Room for the result list so search and footer still fit under [`PANEL_H`].
+/// Room for the result list so search and footer still fit under [`crate::panel::MAX_H`].
 const LIST_MAX_H: f32 = 330.0;
 
 const SEARCH: &str = "launcher-search";

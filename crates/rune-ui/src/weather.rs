@@ -37,7 +37,7 @@ pub fn widget(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
     button(content)
         .padding([2, 6])
-        .on_press(Message::ToggleWeather)
+        .on_press(Message::Toggle(crate::Panel::Weather))
         .style(move |_, s| button::Style {
             background: matches!(s, button::Status::Hovered)
                 .then(|| Color { a: 0.12, ..fg }.into()),

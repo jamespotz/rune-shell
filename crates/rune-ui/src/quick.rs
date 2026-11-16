@@ -233,9 +233,17 @@ pub fn panel(app: &App) -> Element<'_, Message> {
     };
     let actions = row([
         action("screenshot_region", "Screenshot", Message::QuickScreenshot),
-        action("content_paste", "Clipboard", Message::ToggleClipboard),
+        action(
+            "content_paste",
+            "Clipboard",
+            Message::Toggle(crate::Panel::Launcher(crate::launcher::Kind::Clipboard)),
+        ),
         action("settings", "Settings", Message::ToggleSettings),
-        action("power_settings_new", "Power", Message::TogglePower),
+        action(
+            "power_settings_new",
+            "Power",
+            Message::Toggle(crate::Panel::Power),
+        ),
     ])
     .spacing(8);
     column![tiles, levels, actions]

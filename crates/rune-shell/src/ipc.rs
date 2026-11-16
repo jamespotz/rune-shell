@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use rune_services::capture::{RecordCommand, Target};
-use rune_ui::{Action, UiEvent};
+use rune_ui::{Action, Panel, UiEvent};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -121,15 +121,6 @@ fn command(
             Err(e) => format!("error: {e:#}"),
         },
         ["toggle", "settings"] => sent(UiEvent::ToggleSettings),
-        ["toggle", "launcher"] => sent(UiEvent::ToggleLauncher),
-        ["toggle", "keybinds"] => sent(UiEvent::ToggleKeybinds),
-        ["toggle", "media"] => sent(UiEvent::ToggleMedia),
-        ["toggle", "notifications"] => sent(UiEvent::ToggleNotifications),
-        ["toggle", "weather"] => sent(UiEvent::ToggleWeather),
-        ["toggle", "calendar"] => sent(UiEvent::ToggleCalendar),
-        ["toggle", "quick-settings"] => sent(UiEvent::ToggleQuick),
-        ["toggle", "power"] => sent(UiEvent::TogglePower),
-        ["toggle", "clipboard"] => sent(UiEvent::ToggleClipboard),
         ["lock"] => send_action(Action::Power(rune_services::system::PowerAction::Lock)),
         ["open", "bluetooth"] => sent(UiEvent::OpenBluetooth),
         ["screenshot"] => act(&|o| Action::Screenshot(Target::Screen, o)),
@@ -162,11 +153,13 @@ fn command(
         ["game-mode"] | ["game-mode", "toggle"] => sent(UiEvent::GameMode(None)),
         ["game-mode", "on"] => sent(UiEvent::GameMode(Some(true))),
         ["game-mode", "off"] => sent(UiEvent::GameMode(Some(false))),
-        ["toggle", panel] => {
-            format!(
-                "error: unknown panel {panel:?} (try: launcher, keybinds, clipboard, media, notifications, weather, calendar, quick-settings, power, settings)"
-            )
-        }
+        ["toggle", name] => match Panel::from_name(name) {
+            Some(panel) => sent(UiEvent::Toggle(panel)),
+            None => {
+                let names: Vec<_> = Panel::names().chain(["settings"]).collect();
+                format!("error: unknown panel {name:?} (try: {})", names.join(", "))
+            }
+        },
         _ => format!("error: unknown command {cmd:?}, see rune-shell --help"),
     }
 }

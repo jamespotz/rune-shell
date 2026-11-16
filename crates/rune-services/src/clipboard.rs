@@ -407,7 +407,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], ("12".into(), "hello world".into()));
         assert_eq!(super::image_ext(&entries[1].1), Some("png"));
-        assert_eq!(super::image_ext("[[ binary data 5 KiB png 128x128 ]]"), Some("png"));
+        assert_eq!(
+            super::image_ext("[[ binary data 5 KiB png 128x128 ]]"),
+            Some("png")
+        );
         assert_eq!(
             super::image_ext("[[ binary data image/x-xpm 1 KiB ]]"),
             None

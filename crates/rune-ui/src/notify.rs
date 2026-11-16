@@ -326,7 +326,7 @@ pub fn widget(app: &App) -> Element<'_, Message> {
     }
     button(content)
         .padding([2, 4])
-        .on_press(Message::ToggleNotifications)
+        .on_press(Message::Toggle(crate::Panel::Notifications))
         .style(move |_, s| button::Style {
             background: matches!(s, button::Status::Hovered)
                 .then(|| Color { a: 0.12, ..fg }.into()),

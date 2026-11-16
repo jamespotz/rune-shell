@@ -4,7 +4,7 @@
 use crate::{
     App, Message, Panel, bt, calendar,
     config::{Config, Widget},
-    launcher, media, notify, quick, status, tray, weather,
+    media, notify, quick, status, tray, weather,
 };
 use iced::{
     Alignment, Color, Element, Font, Length, Point, Rectangle, Renderer, Theme, border, mouse,
@@ -122,15 +122,16 @@ pub fn view<'a>(app: &'a App, monitor: &str) -> Element<'a, Message> {
 
 /// The open panel, in its own layer surface; sized to its content.
 pub fn panel(app: &App) -> Element<'_, Message> {
-    let inner: Element<'_, Message> = match app.panel_kind {
-        Panel::Launcher(_) => app.launcher.view(&app.config, Message::Launcher),
-        Panel::Media => media::panel(app),
-        Panel::Notifications => notify::center(app),
-        Panel::TrayMenu => tray::menu(app),
-        Panel::Weather => weather::panel(app),
-        Panel::Calendar => calendar::panel(app),
-        Panel::Quick => quick::panel(app),
-        Panel::Power => quick::power(app),
+    let inner: Element<'_, Message> = match app.panels.current() {
+        None => return Space::new().into(),
+        Some(Panel::Launcher(_)) => app.launcher.view(&app.config, Message::Launcher),
+        Some(Panel::Media) => media::panel(app),
+        Some(Panel::Notifications) => notify::center(app),
+        Some(Panel::TrayMenu) => tray::menu(app),
+        Some(Panel::Weather) => weather::panel(app),
+        Some(Panel::Calendar) => calendar::panel(app),
+        Some(Panel::Quick) => quick::panel(app),
+        Some(Panel::Power) => quick::power(app),
     };
     let bg: Color = app.config.colors.background.into();
     let fg: Color = app.config.colors.foreground.into();
@@ -144,7 +145,7 @@ pub fn panel(app: &App) -> Element<'_, Message> {
             .width(Length::Shrink)
             .height(Length::Shrink)
             .padding(16)
-            .max_height(launcher::PANEL_H)
+            .max_height(crate::panel::MAX_H)
             .style(move |_| container::Style {
                 background: Some(bg.into()),
                 border: border::rounded(20).color(Color { a: 0.08, ..fg }).width(1),
@@ -170,8 +171,8 @@ pub fn panel(app: &App) -> Element<'_, Message> {
 /// Transparent full-screen layer under the panel: a click anywhere else closes it.
 pub fn catcher(_: &App) -> Element<'_, Message> {
     mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
-        .on_press(Message::CloseLauncher)
-        .on_right_press(Message::CloseLauncher)
+        .on_press(Message::ClosePanel)
+        .on_right_press(Message::ClosePanel)
         .into()
 }
 
@@ -198,7 +199,7 @@ fn widget<'a>(app: &'a App, monitor: &str, w: Widget) -> Element<'a, Message> {
             // The clock opens the calendar.
             button(content)
                 .padding([2, 6])
-                .on_press(Message::ToggleCalendar)
+                .on_press(Message::Toggle(Panel::Calendar))
                 .style(move |_, s| button::Style {
                     background: matches!(s, button::Status::Hovered)
                         .then(|| Color { a: 0.12, ..fg }.into()),
@@ -230,8 +231,8 @@ fn widget<'a>(app: &'a App, monitor: &str, w: Widget) -> Element<'a, Message> {
         Widget::Network => status::network(app),
         Widget::Battery => status::battery(app),
         Widget::Stats => status::stats(app),
-        Widget::QuickSettings => quick::widget(app, "tune", Message::ToggleQuick),
-        Widget::Power => quick::widget(app, "power_settings_new", Message::TogglePower),
+        Widget::QuickSettings => quick::widget(app, "tune", Message::Toggle(Panel::Quick)),
+        Widget::Power => quick::widget(app, "power_settings_new", Message::Toggle(Panel::Power)),
         Widget::Media => media::widget(app, (c.bar.height as f32 - 10.0).max(12.0)),
         Widget::Settings => {
             let fg: Color = colors.foreground.into();

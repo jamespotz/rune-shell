@@ -35,7 +35,7 @@ pub fn widget<'a>(app: &'a App, pill_h: f32) -> Element<'a, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
     mouse_area(content)
-        .on_press(Message::ToggleMedia)
+        .on_press(Message::Toggle(crate::Panel::Media))
         .interaction(mouse::Interaction::Pointer)
         .into()
 }
