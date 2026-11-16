@@ -12,7 +12,12 @@ use nucleo_matcher::{
     Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
 };
-use rune_services::{apps::App, calc, clipboard::Entry as ClipEntry, hyprland::Bind};
+use rune_services::{
+    apps::App,
+    calc,
+    clipboard::{Entry as ClipEntry, Id as ClipId},
+    hyprland::Bind,
+};
 use std::{collections::HashMap, path::PathBuf};
 
 /// Height of one result row; used to keep the selection scrolled into view.
@@ -56,9 +61,9 @@ pub enum Msg {
 pub enum Outcome {
     Launch(String),
     Copy(String),
-    /// Restore a clipboard history entry (cliphist id).
-    Clip(String),
-    Favorite(ClipEntry),
+    /// Put a clipboard entry back on the clipboard.
+    Clip(ClipId),
+    Favorite(ClipId),
     /// Wipe clipboard history (favorites stay).
     ClearClips,
 }
@@ -145,7 +150,7 @@ impl Launcher {
             Msg::Submit => self.selected,
             Msg::Activate(i) => i,
             Msg::Favorite(i) => match self.results.get(i)? {
-                Hit::Clip(c) => return Some(Outcome::Favorite(self.clips.get(*c)?.clone())),
+                Hit::Clip(c) => return Some(Outcome::Favorite(self.clips.get(*c)?.id)),
                 _ => return None,
             },
             Msg::ClearClips => return Some(Outcome::ClearClips),
@@ -163,7 +168,7 @@ impl Launcher {
             Hit::Calc(result) => Some(Outcome::Copy(result.clone())),
             Hit::Emoji(e) => Some(Outcome::Copy(e.as_str().to_owned())),
             Hit::Bind(_) => None,
-            Hit::Clip(i) => Some(Outcome::Clip(self.clips.get(*i)?.id.clone())),
+            Hit::Clip(i) => Some(Outcome::Clip(self.clips.get(*i)?.id)),
         }
     }
 
@@ -171,7 +176,7 @@ impl Launcher {
         self.selected = 0;
         self.results = match self.kind {
             Kind::Clipboard => {
-                let hay = |c: &ClipEntry| c.preview.clone();
+                let hay = |c: &ClipEntry| c.title.clone();
                 ranked(&self.query, &self.clips, hay)
                     .into_iter()
                     .map(Hit::Clip)
@@ -253,7 +258,7 @@ impl Launcher {
                 ),
                 Hit::Clip(c) => {
                     let clip = &self.clips[*c];
-                    let star = if clip.favorite { accent } else { muted };
+                    let star = if clip.is_favorite() { accent } else { muted };
                     trail = Some(
                         button(icon(config, "star", 20.0))
                             .padding(6)
@@ -282,11 +287,7 @@ impl Launcher {
                             .center(40)
                             .into(),
                     };
-                    let title = match clip.preview.strip_prefix("[[ binary data ") {
-                        Some(rest) => rest.trim_end_matches(" ]]").to_owned(),
-                        None => clip.preview.chars().take(90).collect(),
-                    };
-                    (lead, title, ago(clip.time, now))
+                    (lead, clip.title.clone(), ago(clip.time, now))
                 }
                 Hit::Bind(b) => {
                     let bind = &self.binds[*b];
@@ -309,8 +310,9 @@ impl Launcher {
                     .color(muted)
                     .wrapping(text::Wrapping::None),
             ]
-            .spacing(2)
-            .width(Length::Fill);
+            .spacing(2);
+            // Clipped: long one-line titles would otherwise run under the star button.
+            let label = container(label).width(Length::Fill).clip(true);
             let content = row![lead, label].push(trail);
             button(content.spacing(14).align_y(Alignment::Center))
                 .width(Length::Fill)
@@ -354,7 +356,7 @@ impl Launcher {
             Kind::Clipboard => "↑↓ select   Enter copy   ★ keep   Esc close",
         };
         let mut footer = row![text(hint).size(11).color(muted)].align_y(Alignment::Center);
-        if self.kind == Kind::Clipboard && self.clips.iter().any(|c| !c.favorite) {
+        if self.kind == Kind::Clipboard && self.clips.iter().any(|c| !c.is_favorite()) {
             let clear = button(text("Clear history").size(11))
                 .padding([3, 10])
                 .on_press(wrap(Msg::ClearClips))

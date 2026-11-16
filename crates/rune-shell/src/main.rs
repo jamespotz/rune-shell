@@ -201,7 +201,17 @@ fn daemon() -> Result<()> {
         });
     }
     tokio::spawn(clipboard::ensure_watcher());
-    tokio::spawn(clipboard::track());
+    let clips = match clipboard::Clipboard::system() {
+        Ok(c) => {
+            let c = std::sync::Arc::new(c);
+            tokio::spawn(clipboard::track(c.clone()));
+            Some(c)
+        }
+        Err(e) => {
+            warn!("clipboard history is off: {e}");
+            None
+        }
+    };
     let lock_command = config.power.lock_command.clone();
     let (recording, record_cmds) = capture::spawn_recorder(hypr.clone(), capture_conn.clone());
     forward(recording, ui.clone(), UiEvent::Recording);
@@ -376,27 +386,31 @@ fn daemon() -> Result<()> {
                     tokio::spawn(power(action, hypr, lock_command.clone()));
                 }
                 Action::LoadClipboard => {
-                    tokio::spawn(send_clips(ui));
+                    let Some(clips) = clips.clone() else { continue };
+                    tokio::spawn(send_clips(clips, ui));
                 }
-                Action::ClipboardFavorite(entry) => {
+                Action::ClipboardFavorite(id) => {
+                    let Some(clips) = clips.clone() else { continue };
                     tokio::spawn(async move {
-                        if let Err(e) = clipboard::toggle_favorite(&entry).await {
+                        if let Err(e) = clips.toggle_favorite(id).await {
                             warn!("clipboard: {e}");
                         }
-                        send_clips(ui).await;
+                        send_clips(clips, ui).await;
                     });
                 }
                 Action::ClipboardClear => {
+                    let Some(clips) = clips.clone() else { continue };
                     tokio::spawn(async move {
-                        if let Err(e) = clipboard::clear().await {
+                        if let Err(e) = clips.clear().await {
                             warn!("clipboard: {e}");
                         }
-                        send_clips(ui).await;
+                        send_clips(clips, ui).await;
                     });
                 }
                 Action::ClipboardCopy(id) => {
+                    let Some(clips) = clips.clone() else { continue };
                     tokio::spawn(async move {
-                        if let Err(e) = clipboard::copy(&id).await {
+                        if let Err(e) = clips.copy(id).await {
                             warn!("clipboard: {e}");
                         }
                     });
@@ -762,9 +776,11 @@ fn restore_themes() -> String {
     }
 }
 
-/// Sends the folder listing right away, then again as thumbnails get made.
-async fn send_clips(ui: UnboundedSender<UiEvent>) {
-    match clipboard::list().await {
+async fn send_clips(
+    clips: std::sync::Arc<clipboard::Clipboard<clipboard::Cliphist>>,
+    ui: UnboundedSender<UiEvent>,
+) {
+    match clips.list().await {
         Ok(entries) => {
             let _ = ui.send(UiEvent::Clipboard(entries));
         }
@@ -772,6 +788,7 @@ async fn send_clips(ui: UnboundedSender<UiEvent>) {
     }
 }
 
+/// Sends the folder listing right away, then again as thumbnails get made.
 async fn load_wallpapers(dir: PathBuf, ui: UnboundedSender<UiEvent>) {
     let Ok(mut list) = tokio::task::spawn_blocking(move || wallpaper::list(&dir)).await else {
         return;

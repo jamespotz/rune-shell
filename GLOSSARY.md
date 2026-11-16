@@ -28,3 +28,11 @@ CLI (`rune_ui::UiEvent`).
 
 **Service**: a module in `rune-services` that talks to the outside world (D-Bus,
 Hyprland, `cliphist`, files) and publishes state or answers commands.
+
+**Clipboard history**: what was copied, newest first, recorded by `cliphist`,
+plus Rune's own copy times and favorites (`clipboard::Clipboard`). Entries are
+named by `clipboard::Id`, never by cliphist's text.
+
+**Favorite**: a clipboard entry the user starred. Rune keeps its own copy, so
+it survives *Clear history* and cliphist's size limit. While favorited, the
+original history entry is hidden.

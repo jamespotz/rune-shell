@@ -110,9 +110,9 @@ pub enum Action {
     /// Fetch clipboard history; answered with [`UiEvent::Clipboard`].
     LoadClipboard,
     /// Put a history entry (cliphist id) back on the clipboard.
-    ClipboardCopy(String),
+    ClipboardCopy(clipboard::Id),
     /// Favorite or unfavorite an entry; answered with [`UiEvent::Clipboard`].
-    ClipboardFavorite(clipboard::Entry),
+    ClipboardFavorite(clipboard::Id),
     /// Wipe history (not favorites); answered with [`UiEvent::Clipboard`].
     ClipboardClear,
     /// Calendar links to follow.
@@ -883,8 +883,8 @@ impl App {
                     self.send(Action::ClipboardCopy(id));
                     self.close_panel()
                 }
-                Some(Outcome::Favorite(entry)) => {
-                    self.send(Action::ClipboardFavorite(entry));
+                Some(Outcome::Favorite(id)) => {
+                    self.send(Action::ClipboardFavorite(id));
                     Task::none()
                 }
                 Some(Outcome::ClearClips) => {
