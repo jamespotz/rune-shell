@@ -1663,7 +1663,7 @@ impl Render for SettingsView {
                 ));
                 items.push(note(
                     &c,
-                    "Add these to your Hyprland config. Run the record command again, or click the timer, to stop.",
+                    "Add these to your Hyprland config, or add the Capture widget in Menu Bar to use them with the mouse. Run the record command again, or click the timer, to stop.",
                 ));
             }
             Page::Launcher => {

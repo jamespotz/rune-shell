@@ -54,7 +54,9 @@ and mutes the mic.
 saved and copied), `rune-shell record screen|window|selection` (gpu-screen-recorder; run it
 again, `record stop`, or click the red timer in the bar to stop), and `rune-shell ocr` (select an
 area, its text is copied, via tesseract). Folders, audio, frame rate and OCR languages live in
-Settings → Capture, which also lists keybind lines to paste.
+Settings → Capture, which also lists keybind lines to paste. Add the `capture` widget to the bar
+(or run `rune-shell toggle capture`) to do all of this with the mouse; while recording, the widget
+becomes the timer.
 
 **Game mode**: `rune-shell game-mode [on|off|toggle]` turns off Hyprland animations, blur,
 shadows, gaps, rounding and transparency, and silences notifications. Turning it off reloads your
