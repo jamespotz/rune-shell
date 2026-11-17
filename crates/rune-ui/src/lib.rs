@@ -21,6 +21,7 @@ pub use protocol::{Action, TrayRequest, UiEvent};
 
 mod bt;
 mod calendar;
+mod capture_panel;
 pub mod config;
 mod controls;
 mod launcher;

@@ -40,6 +40,16 @@ impl Target {
             _ => return None,
         })
     }
+
+    /// The CLI word for this target, as `rune-shell screenshot <word>` takes it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Target::Screen => "screen",
+            Target::All => "all",
+            Target::Window => "window",
+            Target::Selection => "selection",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,6 +378,13 @@ async fn notify(conn: Option<&zbus::Connection>, summary: &str, body: &str, imag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_words_round_trip() {
+        for t in [Target::Screen, Target::All, Target::Window, Target::Selection] {
+            assert_eq!(Target::from_word(t.word()), Some(t));
+        }
+    }
 
     #[test]
     fn parses_targets_and_regions() {

@@ -1587,16 +1587,14 @@ impl Render for SettingsView {
                 ));
                 items.push(group(
                     "Shortcuts",
-                    [
-                        "hl.bind(\"Print\", hl.dsp.exec_cmd(\"rune-shell screenshot selection\"))",
-                        "hl.bind(\"SHIFT + Print\", hl.dsp.exec_cmd(\"rune-shell screenshot window\"))",
-                        "hl.bind(\"CTRL + Print\", hl.dsp.exec_cmd(\"rune-shell screenshot screen\"))",
-                        "hl.bind(\"SUPER + Print\", hl.dsp.exec_cmd(\"rune-shell record selection\"))",
-                        "hl.bind(\"SUPER + SHIFT + T\", hl.dsp.exec_cmd(\"rune-shell ocr\"))",
-                    ]
-                    .into_iter()
-                    .map(code)
-                    .collect(),
+                    crate::capture_panel::SHORTCUTS
+                        .iter()
+                        .map(|(keys, args)| {
+                            code(&format!(
+                                "hl.bind(\"{keys}\", hl.dsp.exec_cmd(\"rune-shell {args}\"))"
+                            ))
+                        })
+                        .collect(),
                 ));
                 items.push(note(
                     &c,
