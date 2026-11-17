@@ -142,7 +142,7 @@ impl Render for PanelView {
             Panel::Weather => weather(app),
             Panel::Calendar => calendar(app, &self.dispatch),
             Panel::Power => power(app, &self.dispatch),
-            Panel::Capture => div().into_any_element(),
+            Panel::Capture => capture(app, &self.dispatch),
             Panel::Quick => self.quick(app),
             Panel::Notifications => notifications(app, &self.dispatch, &mut self.images),
             Panel::TrayMenu => tray_menu(app, &self.dispatch),
@@ -952,6 +952,174 @@ fn power(app: &Shell, dispatch: &Dispatch) -> AnyElement {
         );
     }
     body.into_any_element()
+}
+
+fn capture(app: &Shell, dispatch: &Dispatch) -> AnyElement {
+    use crate::capture_panel::{CAPTURE_W, CaptureMode, shortcut, targets};
+    use crate::settings::{Flag, Msg};
+    use rune_services::capture::Target;
+    let c = &app.config;
+    let fg = color(c.colors.foreground);
+    let corner = crate::gpui_widgets::corner;
+    let mode = app.capture_mode;
+    let mut modes = row()
+        .gap(px(2.))
+        .p(px(3.))
+        .rounded(corner(11.))
+        .bg(fg.opacity(0.08));
+    for (item_mode, glyph, label) in [
+        (CaptureMode::Screenshot, "screenshot_region", "Screenshot"),
+        (CaptureMode::Record, "videocam", "Record"),
+        (CaptureMode::Text, "document_scanner", "Text"),
+    ] {
+        let mut item = row()
+            .id(format!("capture-mode-{label}"))
+            .flex_1()
+            .justify_center()
+            .gap(px(6.))
+            .h(px(30.))
+            .rounded(corner(8.))
+            .text_color(color(c.colors.muted))
+            .hover(|style| style.bg(fg.opacity(0.08)))
+            .active(|style| style.bg(fg.opacity(0.14)))
+            .cursor_pointer()
+            .child(icon(c, glyph, 16.))
+            .child(label);
+        if item_mode == mode {
+            item = if crate::gpui_widgets::pixel_look() {
+                item.bg(color(c.colors.accent))
+                    .text_color(color(c.colors.on_accent))
+            } else {
+                item.bg(fg.opacity(0.16))
+                    .text_color(fg)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            };
+        }
+        modes = modes.child(clickable(item, Message::CaptureMode(item_mode), dispatch));
+    }
+    let mut tiles = row().gap(px(8.)).items_start();
+    if mode == CaptureMode::Record && app.snapshot.recording.is_some() {
+        tiles = tiles.child(capture_tile(
+            app,
+            "capture-stop".into(),
+            "stop_circle",
+            "Stop recording",
+            None,
+            Message::StopRecording,
+            dispatch,
+        ));
+    } else {
+        for &target in targets(mode) {
+            let (glyph, label) = match target {
+                Target::Selection => ("crop_free", "Area"),
+                Target::Window => ("web_asset", "Window"),
+                Target::Screen => ("desktop_windows", "Screen"),
+                Target::All => ("select_all", "All"),
+            };
+            tiles = tiles.child(capture_tile(
+                app,
+                format!("capture-{mode:?}-{}", target.word()),
+                glyph,
+                label,
+                Some(
+                    shortcut(mode, target)
+                        .map_or_else(|| "—".to_owned(), |keys| keys.replace(" + ", " ")),
+                ),
+                Message::Capture(mode, target),
+                dispatch,
+            ));
+        }
+    }
+    let opts = crate::capture_options(c);
+    let (flag_label, flag, on, dir, dir_label) = match mode {
+        CaptureMode::Record => (
+            "Record audio",
+            Flag::RecordAudio,
+            c.capture.record_audio,
+            opts.record_dir,
+            "Recordings",
+        ),
+        CaptureMode::Screenshot | CaptureMode::Text => (
+            "Copy to clipboard",
+            Flag::CaptureCopy,
+            c.capture.copy,
+            opts.screenshot_dir,
+            "Screenshots",
+        ),
+    };
+    let footer = row()
+        .justify_between()
+        .px(px(4.))
+        .child(
+            row()
+                .gap(px(8.))
+                .child(switch(
+                    format!("capture-flag-{flag:?}"),
+                    &c.colors,
+                    on,
+                    Message::Settings(Msg::Flag(flag, !on)),
+                    dispatch,
+                ))
+                .child(crate::gpui_widgets::muted(c, flag_label)),
+        )
+        .child(clickable(
+            row()
+                .id("capture-folder")
+                .gap(px(4.))
+                .text_size(px(12.))
+                .text_color(color(c.colors.accent))
+                .active(|style| style.opacity(0.7))
+                .cursor_pointer()
+                .child(icon(c, "folder_open", 15.))
+                .child(dir_label),
+            Message::OpenLink(dir.display().to_string()),
+            dispatch,
+        ));
+    column()
+        .w(px(CAPTURE_W))
+        .gap(px(12.))
+        .child(modes)
+        .child(tiles)
+        .child(separator(c))
+        .child(footer)
+        .into_any_element()
+}
+
+fn capture_tile(
+    app: &Shell,
+    id: String,
+    glyph: &str,
+    label: &'static str,
+    keys: Option<String>,
+    message: Message,
+    dispatch: &Dispatch,
+) -> AnyElement {
+    let c = &app.config;
+    let fg = color(c.colors.foreground);
+    clickable(
+        column()
+            .id(id)
+            .flex_1()
+            .items_center()
+            .gap(px(6.))
+            .pt(px(14.))
+            .pb(px(11.))
+            .px(px(4.))
+            .rounded(crate::gpui_widgets::corner(12.))
+            .bg(fg.opacity(0.06))
+            .hover(|style| style.bg(fg.opacity(0.13)))
+            .active(|style| style.bg(fg.opacity(0.20)))
+            .cursor_pointer()
+            .child(icon(c, glyph, 26.))
+            .child(div().text_size(px(12.)).child(label))
+            .children(keys.map(|keys| {
+                crate::gpui_widgets::muted(c, keys)
+                    .text_size(px(10.5))
+                    .text_center()
+            })),
+        message,
+        dispatch,
+    )
 }
 
 fn weather(app: &Shell) -> AnyElement {
@@ -1796,6 +1964,7 @@ pub(crate) mod tests {
                 "bluetooth",
                 "sound",
                 "battery",
+                "capture",
                 "empty-media",
                 "empty-weather",
                 "empty-calendar",
@@ -1867,7 +2036,7 @@ pub(crate) mod tests {
             },
         );
         sender.join().unwrap();
-        assert_eq!(rendered.get(), 20);
+        assert_eq!(rendered.get(), 21);
     }
 }
 

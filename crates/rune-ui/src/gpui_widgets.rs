@@ -378,6 +378,23 @@ pub(crate) fn bar_button(
         })
 }
 
+/// The red elapsed-time chip shown while recording; a click stops it.
+pub(crate) fn recording_chip(app: &Shell, id: String, dispatch: &Dispatch) -> AnyElement {
+    let secs = app
+        .snapshot
+        .recording
+        .as_ref()
+        .map_or(0, |recording| recording.started.elapsed().as_secs());
+    button(
+        id,
+        format!("● {}:{:02}", secs / 60, secs % 60),
+        Message::StopRecording,
+        dispatch,
+    )
+    .text_color(color(app.config.colors.urgent))
+    .into_any_element()
+}
+
 pub(crate) fn bar_widget(
     app: &Shell,
     widget: Widget,
@@ -525,6 +542,7 @@ pub(crate) fn bar_widget(
             dispatch,
         )
         .into_any_element(),
+        Widget::Capture if app.snapshot.recording.is_some() => recording_chip(app, id, dispatch),
         Widget::Capture => bar_button(
             app,
             widget,

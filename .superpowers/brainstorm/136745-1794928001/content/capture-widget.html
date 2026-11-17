@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Rune — Capture widget</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0..1,0&family=Tiny5&family=Inter:wght@400;500;600&display=block">
+<style>
+:root{
+  --bg:32,34,39; --fg:#f5f5f7; --muted:#a6aab5; --accent:#66b1ff; --on-accent:#101a28; --urgent:#ff7b81;
+  --font:"Inter",system-ui,sans-serif; --r-notch:16px; --r-panel:18px; --r-tile:12px; --r-chip:999px;
+  --bar-a:.70; --pop-a:.78;
+}
+body.pixel{ --font:"Tiny5",monospace; --r-notch:0; --r-panel:0; --r-tile:0; --r-chip:0; }
+*{box-sizing:border-box;margin:0}
+body{font-family:"Inter",system-ui,sans-serif;background:#0e0f12;color:#eee;padding:24px 32px 80px;-webkit-font-smoothing:antialiased}
+h1{font-size:22px;font-weight:600;margin:4px 0}
+h2{font-size:16px;font-weight:600;margin:36px 0 4px}
+.sub{color:#999;font-size:13px;line-height:1.5;max-width:860px;margin-bottom:14px}
+.ms{font-family:"Material Symbols Rounded";font-size:18px;line-height:1;font-variation-settings:"FILL" 1;vertical-align:middle}
+body.pixel .ms{font-variation-settings:"FILL" 1,"wght" 600}
+
+/* look switch */
+.switch{position:sticky;top:0;z-index:9;display:inline-flex;gap:4px;padding:4px;margin:14px 0 4px;background:#1c1d22;border-radius:10px;border:1px solid #2a2b31}
+.switch button{font:500 13px Inter,sans-serif;color:#bbb;background:none;border:0;padding:7px 16px;border-radius:7px;cursor:pointer}
+.switch button.on{background:#0a84ff;color:#fff}
+
+/* desktop */
+.desk{position:relative;height:430px;border-radius:14px;overflow:hidden;font-family:var(--font);color:var(--fg);
+  background:radial-gradient(1100px 500px at 15% 0,#3b5fc4 0,transparent 60%),radial-gradient(900px 600px at 90% 30%,#c2477a 0,transparent 55%),radial-gradient(800px 500px at 50% 120%,#e3a04a 0,transparent 60%),#1c2340}
+body.pixel .desk{font-size:15px}
+.desk.short{height:120px}
+
+/* notch */
+.notch{position:absolute;left:50%;top:0;transform:translateX(-50%);height:36px;display:flex;align-items:center;gap:14px;padding:0 16px;
+  background:rgba(var(--bg),var(--bar-a));backdrop-filter:blur(24px) saturate(160%);border-radius:0 0 var(--r-notch) var(--r-notch);
+  box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:13px;white-space:nowrap}
+body.pixel .notch{backdrop-filter:none;background:rgb(var(--bg));box-shadow:0 0 0 2px #000,4px 4px 0 rgba(0,0,0,.35);font-size:14px}
+.ws{display:flex;gap:3px}
+.ws span{min-width:20px;height:20px;display:grid;place-items:center;border-radius:var(--r-chip);color:var(--muted);font-size:12px}
+.ws span.a{background:var(--accent);color:var(--on-accent);padding:0 8px}
+.clock{font-weight:600}
+.sp{width:22px}
+.btn{height:26px;min-width:26px;display:inline-grid;place-items:center;border-radius:8px;color:var(--fg);cursor:pointer;position:relative}
+body.pixel .btn{border-radius:0}
+.btn:hover{background:rgba(255,255,255,.12)}
+.btn.open{background:rgba(255,255,255,.2)}
+body.pixel .btn.open,body.pixel .btn:hover{background:repeating-linear-gradient(90deg,rgba(255,255,255,.22) 0 4px,transparent 4px 6px)}
+.rec{display:inline-flex;align-items:center;gap:6px;padding:0 10px;height:24px;border-radius:var(--r-chip);color:var(--urgent);font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer;background:rgba(255,123,129,.14)}
+.rec i{width:8px;height:8px;border-radius:50%;background:var(--urgent);animation:pulse 1.6s ease-in-out infinite}
+body.pixel .rec i{border-radius:0;animation:blink 1s steps(1) infinite}
+@keyframes pulse{50%{opacity:.35}} @keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.rec i{animation:none}}
+
+/* panel */
+.panel{position:absolute;top:44px;left:50%;transform:translateX(-50%);width:372px;padding:14px;
+  background:rgba(var(--bg),var(--pop-a));backdrop-filter:blur(30px) saturate(170%);border-radius:var(--r-panel);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 18px 50px rgba(0,0,0,.4)}
+body.pixel .panel{backdrop-filter:none;background:rgb(var(--bg));box-shadow:0 0 0 2px #000,inset 0 0 0 2px rgba(255,255,255,.14),6px 6px 0 rgba(0,0,0,.4)}
+.head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin:0 2px 10px;letter-spacing:.02em}
+body.pixel .head{text-transform:uppercase}
+
+/* segmented mode */
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:3px;border-radius:11px;background:rgba(255,255,255,.08);margin-bottom:12px}
+body.pixel .seg{border-radius:0;background:rgba(0,0,0,.3);box-shadow:inset 0 0 0 2px rgba(255,255,255,.1)}
+.seg span{display:flex;gap:6px;align-items:center;justify-content:center;height:30px;border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer}
+body.pixel .seg span{border-radius:0}
+.seg span.on{background:rgba(255,255,255,.16);color:var(--fg);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+body.pixel .seg span.on{background:var(--accent);color:var(--on-accent);box-shadow:none}
+
+/* tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.tiles.three{grid-template-columns:repeat(3,1fr)}
+.tile{display:flex;flex-direction:column;align-items:center;gap:7px;padding:14px 4px 11px;border-radius:var(--r-tile);background:rgba(255,255,255,.06);font-size:12px;cursor:pointer;transition:transform .12s,background .12s}
+.tile .ms{font-size:26px;color:var(--fg)}
+.tile:hover{background:rgba(255,255,255,.13)}
+.tile:active{transform:scale(.95)}
+.tile.focus{box-shadow:0 0 0 2px var(--accent)}
+body.pixel .tile{background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 2px rgba(255,255,255,.1);transition:none}
+body.pixel .tile:hover,body.pixel .tile.focus{background:repeating-linear-gradient(90deg,rgba(102,177,255,.28) 0 4px,transparent 4px 6px);box-shadow:inset 0 0 0 2px var(--accent)}
+body.pixel .tile:active{transform:translate(2px,2px)}
+.key{font-size:10.5px;color:var(--muted)}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.09);font-size:12px;color:var(--muted)}
+body.pixel .foot{border-top:2px dashed rgba(255,255,255,.12)}
+.foot a{color:var(--accent);text-decoration:none;display:flex;gap:4px;align-items:center}
+.tog{display:inline-flex;align-items:center;gap:6px}
+.tog b{width:28px;height:16px;border-radius:999px;background:var(--accent);position:relative}
+.tog b::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff}
+body.pixel .tog b,body.pixel .tog b::after{border-radius:0}
+
+/* rows variant */
+.row{display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:10px}
+body.pixel .row{border-radius:0}
+.row + .row{border-top:1px solid rgba(255,255,255,.07)}
+body.pixel .row + .row{border-top:2px dashed rgba(255,255,255,.1)}
+.row > .ms{font-size:20px;width:26px;color:var(--muted)}
+.row .lbl{width:82px;font-size:13px;font-weight:500}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.chip{height:26px;padding:0 10px;display:inline-flex;align-items:center;gap:5px;border-radius:var(--r-chip);background:rgba(255,255,255,.08);font-size:12px;cursor:pointer}
+.chip .ms{font-size:15px}
+.chip:hover{background:var(--accent);color:var(--on-accent)}
+body.pixel .chip{box-shadow:inset 0 0 0 2px rgba(255,255,255,.12);background:none}
+body.pixel .chip:hover{background:var(--accent);box-shadow:none}
+
+/* pick wrappers */
+.pick{cursor:pointer;border:2px solid transparent;border-radius:18px;padding:6px;margin-bottom:10px}
+.pick.selected,.pick.sel{border-color:#0a84ff}
+.tag{font-size:12px;font-weight:600;color:#0a84ff;margin:0 0 6px 6px}
+.note{font-size:12.5px;color:#9a9a9a;margin:8px 8px 0;line-height:1.5}
+
+/* settings snippet */
+.code{font:12.5px/1.8 ui-monospace,"JetBrains Mono",monospace;background:#17181c;border:1px solid #2a2b31;border-radius:12px;padding:14px 18px;color:#cfd3dc;max-width:760px}
+.code .new{color:#7ee787}
+.code .new::before{content:"+ ";color:#7ee787}
+</style></head>
+<body>
+<h1>Capture widget for the bar</h1>
+<p class="sub">One camera button in the notch opens a capture panel. It works with the mouse, and every option is still on a keybind. Switch the look below; both mockups follow it. Click A or B to pick a panel layout.</p>
+
+<div class="switch"><button id="g" class="on" onclick="look(false)">Glass</button><button id="p" onclick="look(true)">Pixel</button></div>
+
+<h2>1 · In the bar (idle)</h2>
+<p class="sub">Placed like any widget in Settings → Menu Bar (left, center or right). Shown here on the right side of the notch.</p>
+<div class="desk short">
+  <div class="notch">
+    <div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span></div>
+    <div class="sp"></div><span class="clock">Tue 17 Nov 14:32</span><div class="sp"></div>
+    <span class="btn" title="Capture"><span class="ms">photo_camera</span></span>
+    <span class="btn"><span class="ms">wifi</span></span>
+    <span class="btn"><span class="ms">battery_5_bar</span></span>
+  </div>
+</div>
+
+<h2>2 · Panel layout: pick one</h2>
+<div class="pick" data-choice="tiles" onclick="pick(this)">
+  <div class="tag">A · Mode + tiles</div>
+  <div class="desk">
+    <div class="notch">
+      <div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span></div>
+      <div class="sp"></div><span class="clock">Tue 17 Nov 14:32</span><div class="sp"></div>
+      <span class="btn open"><span class="ms">photo_camera</span></span>
+      <span class="btn"><span class="ms">wifi</span></span>
+      <span class="btn"><span class="ms">battery_5_bar</span></span>
+    </div>
+    <div class="panel">
+      <div class="seg"><span class="on"><span class="ms">screenshot_region</span>Screenshot</span><span><span class="ms">videocam</span>Record</span><span><span class="ms">document_scanner</span>Text</span></div>
+      <div class="tiles">
+        <div class="tile focus"><span class="ms">crop_free</span>Area<span class="key">Print</span></div>
+        <div class="tile"><span class="ms">web_asset</span>Window<span class="key">⇧ Print</span></div>
+        <div class="tile"><span class="ms">desktop_windows</span>Screen<span class="key">Ctrl Print</span></div>
+        <div class="tile"><span class="ms">select_all</span>All<span class="key">—</span></div>
+      </div>
+      <div class="foot"><span class="tog"><b></b>Copy to clipboard</span><a><span class="ms" style="font-size:15px">folder_open</span>Screenshots</a></div>
+    </div>
+  </div>
+  <p class="note">Pick a mode, then click where. Record shows Area / Window / Screen (no "All"). Text skips the tiles and starts the area picker right away. Arrow keys move between tiles, Enter captures, Esc closes.</p>
+</div>
+
+<div class="pick" data-choice="rows" onclick="pick(this)">
+  <div class="tag">B · One row per action</div>
+  <div class="desk">
+    <div class="notch">
+      <div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span></div>
+      <div class="sp"></div><span class="clock">Tue 17 Nov 14:32</span><div class="sp"></div>
+      <span class="btn open"><span class="ms">photo_camera</span></span>
+      <span class="btn"><span class="ms">wifi</span></span>
+      <span class="btn"><span class="ms">battery_5_bar</span></span>
+    </div>
+    <div class="panel">
+      <div class="head"><span>Capture</span></div>
+      <div class="row"><span class="ms">screenshot_region</span><span class="lbl">Screenshot</span>
+        <div class="chips"><span class="chip"><span class="ms">crop_free</span>Area</span><span class="chip">Window</span><span class="chip">Screen</span><span class="chip">All</span></div></div>
+      <div class="row"><span class="ms">videocam</span><span class="lbl">Record</span>
+        <div class="chips"><span class="chip"><span class="ms">crop_free</span>Area</span><span class="chip">Window</span><span class="chip">Screen</span></div></div>
+      <div class="row"><span class="ms">document_scanner</span><span class="lbl">Copy text</span>
+        <div class="chips"><span class="chip"><span class="ms">crop_free</span>Area</span></div></div>
+    </div>
+  </div>
+  <p class="note">Every action is one click. Denser, but less room for big touch-friendly targets.</p>
+</div>
+
+<h2>3 · While recording</h2>
+<p class="sub">The camera button turns into the existing red timer. Click it to stop; the "Recording saved" notification appears as it does today.</p>
+<div class="desk short">
+  <div class="notch">
+    <div class="ws"><span class="a">1</span><span>2</span><span>3</span><span>4</span></div>
+    <div class="sp"></div><span class="clock">Tue 17 Nov 14:34</span><div class="sp"></div>
+    <span class="rec"><i></i>1:42</span>
+    <span class="btn"><span class="ms">wifi</span></span>
+    <span class="btn"><span class="ms">battery_5_bar</span></span>
+  </div>
+</div>
+
+<h2>4 · Settings → Capture keybind hints</h2>
+<div class="code">
+hl.bind("Print", hl.dsp.exec_cmd("rune-shell screenshot selection"))<br>
+hl.bind("SHIFT + Print", hl.dsp.exec_cmd("rune-shell screenshot window"))<br>
+hl.bind("CTRL + Print", hl.dsp.exec_cmd("rune-shell screenshot screen"))<br>
+hl.bind("SUPER + Print", hl.dsp.exec_cmd("rune-shell record selection"))<br>
+<span class="new">hl.bind("SUPER + SHIFT + Print", hl.dsp.exec_cmd("rune-shell record window"))</span><br>
+<span class="new">hl.bind("SUPER + CTRL + Print", hl.dsp.exec_cmd("rune-shell record screen"))</span><br>
+<span class="new">hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd("rune-shell toggle capture"))</span><br>
+hl.bind("SUPER + SHIFT + T", hl.dsp.exec_cmd("rune-shell ocr"))
+</div>
+<p class="note">The last new line opens the capture panel from the keyboard.</p>
+
+<script>
+function look(px){document.body.classList.toggle('pixel',px);g.classList.toggle('on',!px);p.classList.toggle('on',px)}
+function pick(el){document.querySelectorAll('.pick').forEach(e=>e.classList.remove('sel'));el.classList.add('sel');if(window.toggleSelect)toggleSelect(el)}
+</script>
+</body></html>

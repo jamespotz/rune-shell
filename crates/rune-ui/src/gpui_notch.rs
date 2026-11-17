@@ -197,17 +197,12 @@ impl Render for Notch {
             }
             content = content.child(section);
         }
-        if let Some(recording) = &app.snapshot.recording {
-            let secs = recording.started.elapsed().as_secs();
-            content = content.child(
-                crate::gpui_widgets::button(
-                    "recording",
-                    format!("● {}:{:02}", secs / 60, secs % 60),
-                    Message::StopRecording,
-                    &self.dispatch,
-                )
-                .text_color(color(config.colors.urgent)),
-            );
+        if app.snapshot.recording.is_some() && !crate::notch::bar_has(bar, Widget::Capture) {
+            content = content.child(crate::gpui_widgets::recording_chip(
+                app,
+                "recording".into(),
+                &self.dispatch,
+            ));
         }
         if app.game_mode {
             content = content.child(crate::gpui_widgets::button(
