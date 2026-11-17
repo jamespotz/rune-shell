@@ -591,6 +591,115 @@ fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
         .child(list)
         .into_any_element()
 }
+impl SettingsView {
+    fn eq_presets(&self, c: &Config) -> AnyElement {
+        use rune_services::equalizer::{PRESETS, preset_of};
+        let current = preset_of(&c.equalizer.bands).map(|p| p.id);
+        let chip = |id: String, label: &'static str, selected: bool| {
+            crate::gpui_widgets::frame(div())
+                .id(id)
+                .px(px(12.))
+                .py(px(4.))
+                .rounded(crate::gpui_widgets::corner(9999.))
+                .text_size(px(12.))
+                .map(|chip| {
+                    if selected {
+                        chip.bg(color(c.colors.accent))
+                            .text_color(color(c.colors.on_accent))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                    } else {
+                        chip.bg(gpui::rgba(0xffffff12))
+                            .hover(|style| style.bg(gpui::rgba(0xffffff24)))
+                    }
+                })
+                .child(label)
+        };
+        let mut chips = row().w_full().flex_wrap().gap(px(6.));
+        for (index, preset) in PRESETS.iter().enumerate() {
+            let dispatch = self.dispatch.clone();
+            chips = chips.child(
+                chip(
+                    format!("eq-preset:{}", preset.id),
+                    preset.label,
+                    current == Some(preset.id),
+                )
+                .cursor_pointer()
+                .active(|style| style.opacity(0.8))
+                .on_click(move |_, window, cx| {
+                    dispatch(crate::Message::Settings(Msg::EqPreset(index)), window, cx)
+                }),
+            );
+        }
+        if current.is_none() {
+            chips = chips.child(chip("eq-preset:custom".into(), "Custom", true));
+        }
+        chips.into_any_element()
+    }
+    fn eq_band(
+        &mut self,
+        c: &Config,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use rune_services::equalizer::{BAND_HZ, MAX_DB};
+        let hz = BAND_HZ.get(index).copied().unwrap_or_default();
+        let gain = c.equalizer.bands.get(index).copied().unwrap_or_default();
+        let range = (-MAX_DB, MAX_DB);
+        let key = format!("eq-band:{hz}");
+        let accent = color(c.colors.accent);
+        let entity = if let Some(entity) = self.sliders.get(&key) {
+            entity.update(cx, |s, _| s.sync(range, gain, accent));
+            entity.clone()
+        } else {
+            let entity = cx.new(|_| {
+                let mut slider = Slider::new(range, gain, accent);
+                slider.set_vertical(0.);
+                slider
+            });
+            let dispatch = self.dispatch.clone();
+            cx.subscribe_in(&entity, window, move |_, _, event, window, cx| {
+                if let SliderEvent::Change(db) = event {
+                    dispatch(
+                        crate::Message::Settings(Msg::EqBand(index, *db)),
+                        window,
+                        cx,
+                    )
+                }
+            })
+            .detach();
+            self.sliders.insert(key.clone(), entity.clone());
+            entity
+        };
+        let label = if hz >= 1000 {
+            format!("{}k", hz / 1000)
+        } else {
+            hz.to_string()
+        };
+        column()
+            .id(key)
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(if gain == 0. {
+                        color(c.colors.muted)
+                    } else {
+                        color(c.colors.foreground)
+                    })
+                    .child(format!("{gain:+.1}")),
+            )
+            .child(div().h(px(160.)).child(entity))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(color(c.colors.muted))
+                    .child(label),
+            )
+            .into_any_element()
+    }
+}
 /// A bar item being dragged: from a section slot, or new from the shelf.
 struct DraggedWidget {
     widget: Widget,
@@ -1752,6 +1861,41 @@ impl Render for SettingsView {
                     }
                 }
             }
+            Page::Equalizer => {
+                let on = c.equalizer.enabled;
+                items.push(hero(
+                    &c,
+                    Page::Equalizer,
+                    "Shape the sound of everything you play.",
+                    Some(self.toggle_switch("eq-enabled", on, Msg::EqEnabled(!on))),
+                ));
+                items.push(group("Presets", vec![self.eq_presets(&c)]));
+                let mut bands = row()
+                    .w_full()
+                    .justify_between()
+                    .when(!on, |r| r.opacity(0.5));
+                for index in 0..c.equalizer.bands.len() {
+                    bands = bands.child(self.eq_band(&c, index, window, cx));
+                }
+                items.push(group("Bands", vec![bands.into_any_element()]));
+                items.push(
+                    row()
+                        .w_full()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.))
+                                .text_color(color(c.colors.muted))
+                                .child(
+                                    "Boosts are balanced automatically so loud parts don't distort. Double-click a band to reset it.",
+                                ),
+                        )
+                        .child(self.action("eq-reset", "Reset", Msg::EqReset))
+                        .into_any_element(),
+                );
+            }
             Page::Sound => {
                 items.push(hero(
                     &c,
@@ -2183,6 +2327,7 @@ mod tests {
                             (860, 580),
                             None,
                             true,
+                            0,
                         ),
                         |window, cx| {
                             cx.new(|cx| SettingsView::new(shell.clone(), dispatch, window, cx))

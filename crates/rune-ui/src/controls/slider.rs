@@ -17,6 +17,10 @@ fn value_at(x: f32, width: f32, range: (f32, f32)) -> Option<f32> {
     Some(range.0 + (x / width).clamp(0., 1.) * (range.1 - range.0))
 }
 
+fn value_at_y(y: f32, height: f32, range: (f32, f32)) -> Option<f32> {
+    value_at(height - y, height, range)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SliderEvent {
     Change(f32),
@@ -38,6 +42,8 @@ pub(crate) struct Slider {
     bounds: Option<Bounds<Pixels>>,
     accent: gpui::Rgba,
     pill: Option<Pill>,
+    /// Vertical, filled from this value (e.g. 0 dB) to the current one.
+    vertical: Option<f32>,
 }
 impl EventEmitter<SliderEvent> for Slider {}
 impl Slider {
@@ -49,7 +55,12 @@ impl Slider {
             bounds: None,
             accent,
             pill: None,
+            vertical: None,
         }
+    }
+    /// Draws the slider upright, filled outward from `center`; double-click returns to it.
+    pub fn set_vertical(&mut self, center: f32) {
+        self.vertical = Some(center);
     }
     pub fn set_pill(&mut self, pill: Option<Pill>) {
         self.pill = pill;
@@ -69,11 +80,20 @@ impl Slider {
         let Some(bounds) = self.bounds else {
             return;
         };
-        if let Some(value) = value_at(
-            f32::from(position.x - bounds.left()),
-            f32::from(bounds.size.width),
-            self.range,
-        ) {
+        let value = if self.vertical.is_some() {
+            value_at_y(
+                f32::from(position.y - bounds.top()),
+                f32::from(bounds.size.height),
+                self.range,
+            )
+        } else {
+            value_at(
+                f32::from(position.x - bounds.left()),
+                f32::from(bounds.size.width),
+                self.range,
+            )
+        };
+        if let Some(value) = value {
             self.value = value;
             cx.emit(SliderEvent::Change(value));
             cx.notify();
@@ -82,11 +102,14 @@ impl Slider {
 }
 impl Render for Slider {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fraction = if self.range.1 > self.range.0 {
-            ((self.value - self.range.0) / (self.range.1 - self.range.0)).clamp(0., 1.)
-        } else {
-            0.
+        let fraction_of = |value: f32| {
+            if self.range.1 > self.range.0 {
+                ((value - self.range.0) / (self.range.1 - self.range.0)).clamp(0., 1.)
+            } else {
+                0.
+            }
         };
+        let fraction = fraction_of(self.value);
         let entity = cx.entity();
         let drawing = entity.clone();
         let pixel = crate::gpui_widgets::pixel_look();
@@ -97,18 +120,32 @@ impl Render for Slider {
         };
         let mut slider = div()
             .id("slider")
-            .w_full()
-            .h(px(height))
             .cursor_pointer()
             .relative()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    if let Some(center) = this.vertical.filter(|_| event.click_count == 2) {
+                        this.value = center;
+                        cx.emit(SliderEvent::Change(center));
+                        cx.notify();
+                        return;
+                    }
                     this.dragging = true;
                     this.move_to(event.position, cx);
                 }),
             );
+        slider = if let Some(center) = self.vertical {
+            let (low, high) = {
+                let c = fraction_of(center);
+                (c.min(fraction), c.max(fraction))
+            };
+            vertical(slider, (low, high), fraction, self.accent, pixel)
+        } else {
+            slider.w_full().h(px(height))
+        };
         slider = match &self.pill {
+            _ if self.vertical.is_some() => slider,
             Some(pill) if pixel => slider
                 .border_1()
                 .border_color(gpui::rgba(0x8080807a))
@@ -240,6 +277,82 @@ impl Render for Slider {
     }
 }
 
+/// Upright track: `lit` is the filled span and `knob` the value, both as
+/// fractions from the bottom.
+fn vertical(
+    slider: gpui::Stateful<gpui::Div>,
+    lit: (f32, f32),
+    knob: f32,
+    accent: gpui::Rgba,
+    pixel: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let slider = slider.w(px(28.)).h_full();
+    if pixel {
+        const CELLS: u16 = 24;
+        let cells = (0..CELLS).rev().map(|cell| {
+            let middle = (f32::from(cell) + 0.5) / f32::from(CELLS);
+            let on = (lit.0..=lit.1).contains(&middle);
+            div()
+                .flex_1()
+                .w(px(14.))
+                .bg(if on { accent } else { gpui::rgba(0xffffff14) })
+        });
+        return slider
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(2.))
+                    .children(cells),
+            )
+            .child(crate::gpui_widgets::frame(
+                div()
+                    .absolute()
+                    .left(px(4.))
+                    .top(gpui::relative(1. - knob))
+                    .mt(px(-4.))
+                    .w(px(20.))
+                    .h(px(8.))
+                    .bg(gpui::white()),
+            ));
+    }
+    slider
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(12.))
+                .w(px(4.))
+                .rounded(px(2.))
+                .bg(accent.opacity(0.2)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(12.))
+                .w(px(4.))
+                .top(gpui::relative(1. - lit.1))
+                .h(gpui::relative(lit.1 - lit.0))
+                .rounded(px(2.))
+                .bg(accent),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(6.))
+                .top(gpui::relative(1. - knob))
+                .mt(px(-8.))
+                .size(px(16.))
+                .rounded(px(8.))
+                .bg(gpui::white())
+                .shadow_md(),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +363,14 @@ mod tests {
         assert_eq!(value_at(25., 100., (10., 50.)), Some(20.));
         assert_eq!(value_at(20., 0., (0., 100.)), None);
         assert_eq!(value_at(f32::NAN, 100., (0., 100.)), None);
+    }
+    #[test]
+    fn vertical_tracks_put_the_maximum_at_the_top() {
+        assert_eq!(value_at_y(0., 100., (-12., 12.)), Some(12.));
+        assert_eq!(value_at_y(100., 100., (-12., 12.)), Some(-12.));
+        assert_eq!(value_at_y(50., 100., (-12., 12.)), Some(0.));
+        assert_eq!(value_at_y(10., 0., (-12., 12.)), None);
+        assert_eq!(value_at_y(f32::NAN, 100., (-12., 12.)), None);
     }
     #[test]
     #[ignore = "opens a native slider; requires Wayland"]

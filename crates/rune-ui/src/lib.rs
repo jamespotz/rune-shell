@@ -46,7 +46,7 @@ use launcher::{Kind, Launcher, Outcome};
 pub use panel::Panel;
 use panel::Panels;
 use rune_services::{
-    audio, bluetooth, capture, clipboard, hyprland,
+    audio, bluetooth, capture, clipboard, equalizer, hyprland,
     media::Control,
     notifications::{self, Image, Notification},
     system::{self, Network, PowerAction, PowerProfile},
@@ -943,6 +943,17 @@ impl App {
     }
 
     fn set_config(&mut self, config: Config) -> Effects<Message> {
+        let (eq, was) = (&config.equalizer, &self.config.equalizer);
+        if eq.bands != was.bands {
+            self.send(Action::Equalizer(equalizer::Command::Gains(eq.bands)));
+        }
+        if eq.enabled != was.enabled {
+            self.send(Action::Equalizer(if eq.enabled {
+                equalizer::Command::Enable
+            } else {
+                equalizer::Command::Disable
+            }));
+        }
         if config.calendar != self.config.calendar {
             self.send(Action::Calendar(config.calendar.clone()));
         }
@@ -1076,6 +1087,14 @@ impl App {
         self.run_panel(commands)
     }
 
+    /// A panel's top edge: just under the bar, ignoring the gap kept for windows.
+    fn panel_top(&self) -> i32 {
+        let bar = &self.config.bar;
+        i32::try_from(bar.height.saturating_add(bar.margin_top))
+            .unwrap_or(i32::MAX)
+            .saturating_add(panel::GAP)
+    }
+
     /// The focused monitor's name, for panels not opened from a bar.
     fn focused_monitor(&self) -> String {
         match self.snapshot.hypr.monitors.iter().find(|m| m.focused) {
@@ -1126,6 +1145,7 @@ impl App {
                             margin: left.map(|_| panel_margin(left)),
                             grabs_keyboard: panel.grabs_keyboard(),
                             output_option,
+                            top: self.panel_top(),
                         },
                     ));
                     // After the surface exists, so the launcher can focus its search box.
@@ -1399,7 +1419,7 @@ fn weather_query(config: &Config) -> Option<WeatherQuery> {
 
 /// Layer margin (top, right, bottom, left) for a panel at `left` (`None` = centered).
 fn panel_margin(left: Option<i32>) -> (i32, i32, i32, i32) {
-    (panel::GAP, 0, 0, left.unwrap_or(0))
+    (0, 0, 0, left.unwrap_or(0))
 }
 
 /// Capture settings from the config (the control socket uses this too).
@@ -1615,6 +1635,42 @@ mod tests {
         assert_eq!(
             app.surfaces.desired[&Surface::Bar(String::new())].size,
             Some((0, 38))
+        );
+    }
+
+    #[test]
+    fn equalizer_edits_reach_the_service() {
+        let (mut app, mut received) = test_app();
+        let mut config = app.config.clone();
+        config.equalizer.enabled = true;
+        config.equalizer.bands[0] = 4.;
+        let _ = app.set_config(config);
+        let mut sent = Vec::new();
+        while let Ok(action) = received.try_recv() {
+            if let Action::Equalizer(cmd) = action {
+                sent.push(cmd);
+            }
+        }
+        let mut bands = [0.; 10];
+        bands[0] = 4.;
+        assert_eq!(
+            sent,
+            [equalizer::Command::Gains(bands), equalizer::Command::Enable]
+        );
+    }
+
+    #[test]
+    fn panels_open_just_below_the_bar_whatever_the_window_gap() {
+        let (mut app, _received) = test_app();
+        let mut config = app.config.clone();
+        config.bar.height = 30;
+        config.bar.margin_top = 4;
+        config.bar.gap = 24;
+        let _ = app.set_config(config);
+        app.update(Message::Toggle(Panel::Quick));
+        assert_eq!(
+            app.surfaces.desired[&Surface::Panel].top,
+            30 + 4 + panel::GAP
         );
     }
 

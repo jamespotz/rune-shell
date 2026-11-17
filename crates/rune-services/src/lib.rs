@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod capture;
 pub mod clipboard;
 pub mod clock;
+pub mod equalizer;
 pub mod hyprland;
 pub mod icons;
 pub mod media;

@@ -131,7 +131,7 @@ mod tests {
                         .windows
                         .open(
                             Surface::Settings,
-                            options(&Surface::Settings, (500, 160), None, false),
+                            options(&Surface::Settings, (500, 160), None, false, 0),
                             cx,
                             |_, cx| cx.new(|_| View),
                         )
@@ -207,7 +207,7 @@ mod tests {
                 if stage == "open" {
                     let shell = cx.entity();
                     let mut options =
-                        options(&Surface::Bar(connector.clone()), (0, 32), None, false);
+                        options(&Surface::Bar(connector.clone()), (0, 32), None, false, 0);
                     options.display_id = Some(display);
                     let monitor = connector.clone();
                     let windows = windows.clone();

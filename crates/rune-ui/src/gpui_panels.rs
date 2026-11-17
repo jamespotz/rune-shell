@@ -2079,6 +2079,7 @@ pub(crate) mod tests {
                                 (672, 440),
                                 None,
                                 false,
+                                0,
                             ),
                             cx,
                             move |window, cx| {

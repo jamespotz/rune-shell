@@ -12,9 +12,12 @@ material-colors = { version = "0.5", features = ["quantize"] }
 serde = { workspace = true }
 serde_json = "1"
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros", "process"] }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros", "process", "fs"] }
 tracing = { workspace = true }
 zbus = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

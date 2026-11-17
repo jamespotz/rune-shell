@@ -12,7 +12,10 @@ daemon. CLI commands and configuration hot reload use the same event path.
 `rune-shell quit && rune-shell` restarts safely. The daemon answers `ok` and then
 leaks that connection's write half instead of dropping it. The kernel closes it at
 process exit, after the control socket is removed and every D-Bus name is
-released, and only then does the client read EOF. Shutdown waits at most one
+released, and only then does the client read EOF. Before that, the daemon waits
+up to three seconds for the equalizer to put the default output back and stop its
+`pipewire -c` filter chain, so a restart never finds a stale `rune_equalizer`
+sink. Shutdown waits at most one
 second for blocking tasks, such as reapers for launched apps, before the process
 exits. The client gives up after ten seconds.
 

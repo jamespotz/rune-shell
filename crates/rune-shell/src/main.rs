@@ -5,7 +5,7 @@ mod ipc;
 
 use anyhow::{Context, Result};
 use rune_services::{
-    apps, audio, bluetooth, calendar, capture, clipboard, clock,
+    apps, audio, bluetooth, calendar, capture, clipboard, clock, equalizer,
     hyprland::Hyprland,
     icons::IconIndex,
     media, notifications, stats, system,
@@ -189,7 +189,11 @@ fn daemon() -> Result<()> {
     }
     forward(calendar_state, ui.clone(), UiEvent::Calendar);
     let capture_conn = rt.block_on(zbus::Connection::session()).ok();
-    let (volume, audio_devices) = audio::spawn_volume();
+    let equalizer = Arc::new(equalizer::spawn(config.equalizer.bands));
+    if config.equalizer.enabled {
+        equalizer.send(equalizer::Command::Enable);
+    }
+    let (volume, audio_devices) = audio::spawn_volume(equalizer.output());
     forward(volume.clone(), ui.clone(), UiEvent::Volume);
     forward(audio_devices, ui.clone(), UiEvent::AudioDevices);
     let system_conn = rt.block_on(zbus::Connection::system()).ok();
@@ -234,6 +238,7 @@ fn daemon() -> Result<()> {
     forward(recording, ui.clone(), UiEvent::Recording);
     let actions_ui = ui.clone();
     let media_handle = media;
+    let eq = equalizer.clone();
     tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
             // Each action runs on its own task so a slow app scan never delays a click.
@@ -258,9 +263,15 @@ fn daemon() -> Result<()> {
                     spawn_handled("system", ui, async move |reply| c.handle(cmd, reply).await);
                 }
                 Action::Audio(cmd) => {
+                    let active = eq.output().borrow().is_some();
+                    if let Some(output) = equalizer::retarget_for(&cmd, active) {
+                        eq.send(equalizer::Command::Retarget(output.to_owned()));
+                        continue;
+                    }
                     let c = audio_controls.clone();
                     spawn_handled("audio", ui, async move |reply| c.handle(cmd, reply).await);
                 }
+                Action::Equalizer(cmd) => eq.send(cmd),
                 Action::Clipboard(cmd) => {
                     let Some(c) = clips.clone() else { continue };
                     spawn_handled("clipboard", ui, async move |reply| {
@@ -392,6 +403,16 @@ fn daemon() -> Result<()> {
         .ok();
 
     let result = rune_ui::run(config, ui_events, actions, hyprland);
+    // Puts the default output back before the daemon is gone, so a restart starts clean.
+    if rt
+        .block_on(tokio::time::timeout(
+            Duration::from_secs(3),
+            equalizer.shutdown(),
+        ))
+        .is_err()
+    {
+        warn!("equalizer: shutdown timed out; the default output may need resetting");
+    }
     ipc::remove_socket();
     drop(_rt);
     rt.shutdown_timeout(std::time::Duration::from_secs(1));

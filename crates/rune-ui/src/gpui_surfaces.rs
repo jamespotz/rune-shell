@@ -8,12 +8,13 @@ use gpui::{
 };
 
 /// For panels, `margin: Some` means explicit left placement, including zero.
-/// Centered panels use `None`; their top gap is supplied here.
+/// Centered panels use `None`. Either way a panel's top edge is `panel_top`.
 pub(crate) fn options(
     surface: &Surface,
     dimensions: (u32, u32),
     margin: Option<(i32, i32, i32, i32)>,
     grabs_keyboard: bool,
+    panel_top: i32,
 ) -> WindowOptions {
     let (layer, anchor, exclusive_zone, keyboard_interactivity) = match surface {
         Surface::Bar(_) => (
@@ -35,7 +36,9 @@ pub(crate) fn options(
             } else {
                 Anchor::TOP
             },
-            None,
+            // -1 ignores the bar's exclusive zone, which also covers its window gap;
+            // `panel_top` places the panel against the bar itself.
+            (!grabs_keyboard).then_some(px(-1.)),
             if grabs_keyboard {
                 KeyboardInteractivity::Exclusive
             } else {
@@ -75,12 +78,12 @@ pub(crate) fn options(
             anchor,
             exclusive_zone,
             keyboard_interactivity,
-            margin: margin
-                .filter(|_| !matches!(surface, Surface::Bar(_)))
-                .or_else(|| {
-                    matches!(surface, Surface::Panel).then_some((crate::panel::GAP, 0, 0, 0))
-                })
-                .map(|(t, r, b, l)| (px(t as f32), px(r as f32), px(b as f32), px(l as f32))),
+            margin: match surface {
+                Surface::Bar(_) => None,
+                Surface::Panel => Some((panel_top, 0, 0, margin.map_or(0, |m| m.3))),
+                _ => margin,
+            }
+            .map(|(t, r, b, l)| (px(t as f32), px(r as f32), px(b as f32), px(l as f32))),
             ..Default::default()
         }),
         ..Default::default()
@@ -163,7 +166,7 @@ mod tests {
 
     #[test]
     fn bars_reserve_space_without_keyboard_focus() {
-        let options = options(&Surface::Bar("DP-1".into()), (0, 32), None, false);
+        let options = options(&Surface::Bar("DP-1".into()), (0, 32), None, false, 0);
         let WindowKind::LayerShell(layer) = options.kind else {
             panic!("expected layer shell")
         };
@@ -181,6 +184,7 @@ mod tests {
             (0, 32),
             Some((0, 0, 8, 0)),
             false,
+            0,
         );
         let WindowKind::LayerShell(layer) = options.kind else {
             panic!("expected layer shell")
@@ -190,7 +194,7 @@ mod tests {
 
     #[test]
     fn keyboard_panels_center_on_screen() {
-        let options = options(&Surface::Panel, (640, 440), None, true);
+        let options = options(&Surface::Panel, (640, 440), None, true, 0);
         let WindowKind::LayerShell(layer) = options.kind else {
             panic!("expected layer shell")
         };
@@ -199,7 +203,7 @@ mod tests {
 
     #[test]
     fn launcher_grabs_keyboard_but_settings_does_not() {
-        let options = options(&Surface::Panel, (640, 440), None, true);
+        let options = options(&Surface::Panel, (640, 440), None, true, 0);
         let WindowKind::LayerShell(layer) = options.kind else {
             panic!("expected layer shell")
         };
@@ -218,16 +222,30 @@ mod tests {
     #[test]
     fn panel_at_left_edge_keeps_its_explicit_anchor() {
         let WindowKind::LayerShell(layer) =
-            options(&Surface::Panel, (640, 440), Some((8, 0, 0, 0)), false).kind
+            options(&Surface::Panel, (640, 440), Some((8, 0, 0, 0)), false, 0).kind
         else {
             panic!("expected layer shell")
         };
         assert_eq!(layer.anchor, Anchor::TOP | Anchor::LEFT);
     }
 
+    #[test]
+    fn dropdown_panels_sit_under_the_bar_not_the_window_gap() {
+        for margin in [None, Some((40, 0, 0, 120))] {
+            let WindowKind::LayerShell(layer) =
+                options(&Surface::Panel, (640, 440), margin, false, 40).kind
+            else {
+                panic!("expected layer shell")
+            };
+            // Ignoring exclusive zones keeps the bar's window gap out of the offset.
+            assert_eq!(layer.exclusive_zone, Some(px(-1.)));
+            assert_eq!(layer.margin.map(|m| m.0), Some(px(40.)));
+        }
+    }
+
     fn options_for_settings() -> gpui::layer_shell::LayerShellOptions {
         let WindowKind::LayerShell(layer) =
-            options(&Surface::Settings, (860, 580), None, false).kind
+            options(&Surface::Settings, (860, 580), None, false, 0).kind
         else {
             panic!("expected layer shell")
         };

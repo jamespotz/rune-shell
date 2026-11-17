@@ -4,7 +4,7 @@ use crate::{Config, Panel};
 use chrono::{DateTime, Local};
 use rune_services::{
     apps::App as DesktopApp,
-    audio, bluetooth, calendar as cal, capture, clipboard,
+    audio, bluetooth, calendar as cal, capture, clipboard, equalizer,
     hyprland::{self, Bind, HyprState},
     media::{Control, Media},
     notifications,
@@ -22,6 +22,7 @@ pub enum Action {
     System(system::Command),
     /// Volume, audio devices, brightness.
     Audio(audio::Command),
+    Equalizer(equalizer::Command),
     /// Clipboard history; answered with [`UiEvent::Clipboard`].
     Clipboard(clipboard::Command),
     /// Write this config to `config.toml` (sent by the settings window).

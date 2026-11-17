@@ -167,6 +167,7 @@ fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
             spec.size.unwrap_or((0, 0)),
             spec.margin,
             spec.grabs_keyboard,
+            spec.top,
         );
         options.display_id = display;
         let dispatch_shell = shell.clone();

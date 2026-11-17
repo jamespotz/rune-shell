@@ -23,6 +23,7 @@ pub enum Page {
     Wifi,
     Bluetooth,
     Sound,
+    Equalizer,
     Calendar,
     Capture,
     Launcher,
@@ -31,7 +32,7 @@ pub enum Page {
 
 impl Page {
     #[cfg(test)]
-    const ALL: [Page; 12] = [
+    const ALL: [Page; 13] = [
         Page::Appearance,
         Page::Theme,
         Page::Wallpaper,
@@ -40,6 +41,7 @@ impl Page {
         Page::Wifi,
         Page::Bluetooth,
         Page::Sound,
+        Page::Equalizer,
         Page::Calendar,
         Page::Capture,
         Page::Launcher,
@@ -47,7 +49,7 @@ impl Page {
     ];
 
     const GROUPS: [&'static [Page]; 3] = [
-        &[Page::Wifi, Page::Bluetooth, Page::Sound],
+        &[Page::Wifi, Page::Bluetooth, Page::Sound, Page::Equalizer],
         &[
             Page::Appearance,
             Page::Theme,
@@ -62,6 +64,7 @@ impl Page {
         match self {
             Page::Wifi | Page::Bluetooth => 0x0a84ffff,
             Page::Sound => 0xff375fff,
+            Page::Equalizer => 0x5e5ce6ff,
             Page::Appearance => 0x3a3a3cff,
             Page::Theme => 0xbf5af2ff,
             Page::Wallpaper => 0x32ade6ff,
@@ -83,6 +86,7 @@ impl Page {
             Page::Wifi => ("wifi", "Wi-Fi"),
             Page::Bluetooth => ("bluetooth", "Bluetooth"),
             Page::Sound => ("volume_up", "Sound"),
+            Page::Equalizer => ("equalizer", "Equalizer"),
             Page::Capture => ("screenshot_monitor", "Capture"),
             Page::Calendar => ("calendar_month", "Calendar"),
             Page::Bar => ("toolbar", "Menu Bar"),
@@ -236,6 +240,12 @@ pub enum Msg {
     /// Drop a new widget at a slot; past the end appends.
     Insert(Section, usize, Widget),
     Shape(BarShape),
+    EqEnabled(bool),
+    /// Index into `equalizer::PRESETS`.
+    EqPreset(usize),
+    /// Band index and gain in dB.
+    EqBand(usize, f32),
+    EqReset,
     Source(ThemeSource),
     Look(crate::config::Look),
     PixelFont(crate::config::PixelFont),
@@ -465,6 +475,20 @@ impl State {
                 list.insert(at.min(list.len()), w);
             }
             Msg::Shape(shape) => shape.apply(&mut config.bar),
+            Msg::EqEnabled(on) => config.equalizer.enabled = on,
+            Msg::EqPreset(index) => {
+                if let Some(preset) = rune_services::equalizer::PRESETS.get(index) {
+                    config.equalizer.bands = preset.gains;
+                }
+            }
+            Msg::EqBand(index, db) if db.is_finite() => {
+                if let Some(band) = config.equalizer.bands.get_mut(index) {
+                    // Half-dB steps, so dragging back to the middle lands on 0 and on presets.
+                    *band = rune_services::equalizer::clamp_gain((db * 2.).round() / 2.);
+                }
+            }
+            Msg::EqBand(..) => {}
+            Msg::EqReset => config.equalizer.bands = [0.; 10],
         }
         None
     }
@@ -583,9 +607,10 @@ mod tests {
     #[test]
     fn page_search_filters_groups() {
         assert_eq!(visible_groups("").len(), 3);
-        assert_eq!(visible_groups("").iter().map(Vec::len).sum::<usize>(), 12);
+        assert_eq!(visible_groups("").iter().map(Vec::len).sum::<usize>(), 13);
         assert_eq!(visible_groups("wi"), [vec![Page::Wifi]]);
         assert_eq!(visible_groups("SOUND"), [vec![Page::Sound]]);
+        assert_eq!(visible_groups("equal"), [vec![Page::Equalizer]]);
         assert!(visible_groups("zzz").is_empty());
         let mut config = Config::default();
         let mut state = State::default();
@@ -822,6 +847,34 @@ mod tests {
                 Widget::Capture
             ]
         );
+    }
+
+    #[test]
+    fn equalizer_edits_bands_presets_and_rejects_bad_values() {
+        use rune_services::equalizer::{PRESETS, preset_of};
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(&mut config, Msg::EqEnabled(true));
+        assert!(config.equalizer.enabled);
+        state.update(&mut config, Msg::EqPreset(4));
+        assert_eq!(
+            preset_of(&config.equalizer.bands).map(|p| p.id),
+            Some("rock")
+        );
+        state.update(&mut config, Msg::EqBand(3, 4.5));
+        assert_eq!(config.equalizer.bands[3], 4.5);
+        assert!(preset_of(&config.equalizer.bands).is_none());
+        let before = config.equalizer.bands;
+        state.update(&mut config, Msg::EqBand(10, 3.));
+        state.update(&mut config, Msg::EqBand(0, f32::NAN));
+        state.update(&mut config, Msg::EqPreset(99));
+        assert_eq!(config.equalizer.bands, before);
+        state.update(&mut config, Msg::EqBand(0, 40.));
+        assert_eq!(config.equalizer.bands[0], 12.);
+        state.update(&mut config, Msg::EqBand(1, 0.04)); // snaps to the 0.5 dB grid
+        assert_eq!(config.equalizer.bands[1], 0.);
+        state.update(&mut config, Msg::EqReset);
+        assert_eq!(config.equalizer.bands, PRESETS[0].gains);
     }
 
     #[test]

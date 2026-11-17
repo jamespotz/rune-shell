@@ -10,6 +10,8 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("clock.format {0:?} is not a valid strftime format")]
     ClockFormat(String),
+    #[error("equalizer.bands must be numbers, not nan or inf")]
+    EqualizerBand,
 }
 
 /// Whole shell configuration.
@@ -29,16 +31,22 @@ pub struct Config {
     pub power: PowerConfig,
     pub theme: ThemeConfig,
     pub wallpaper: WallpaperConfig,
+    pub equalizer: EqualizerConfig,
     pub colors: Colors,
 }
 
 impl Config {
     /// Parses and validates a TOML document.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(text)?;
+        let mut config: Self = toml::from_str(text)?;
         if !valid_clock_format(&config.clock.format) {
             return Err(ConfigError::ClockFormat(config.clock.format));
         }
+        if !config.equalizer.bands.iter().all(|db| db.is_finite()) {
+            return Err(ConfigError::EqualizerBand);
+        }
+        let bands = &mut config.equalizer.bands;
+        *bands = bands.map(rune_services::equalizer::clamp_gain);
         Ok(config)
     }
 
@@ -446,6 +454,16 @@ impl Default for ThemeConfig {
     }
 }
 
+/// `[equalizer]`: system-wide 10-band EQ. The preset shown is whichever one
+/// matches `bands`.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EqualizerConfig {
+    pub enabled: bool,
+    /// Gain in dB per band, 31 Hz to 16 kHz, within ±12.
+    pub bands: rune_services::equalizer::Gains,
+}
+
 /// `[wallpaper]`
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -584,6 +602,20 @@ mod tests {
         let c = Config::parse("[bar]\npixel_font = \"monocraft\"").unwrap();
         assert_eq!(c.bar.pixel_font.family(), "Monocraft");
     }
+    #[test]
+    fn equalizer_bands_are_validated() {
+        let eq = EqualizerConfig::default();
+        assert!(!eq.enabled);
+        assert_eq!(eq.bands, [0.; 10]);
+        assert!(Config::parse("[equalizer]\nbands = [1, 2, 3, 4, 5, 6, 7, 8, 9]").is_err());
+        assert!(matches!(
+            Config::parse("[equalizer]\nbands = [nan, 0, 0, 0, 0, 0, 0, 0, 0, 0]"),
+            Err(ConfigError::EqualizerBand)
+        ));
+        let c = Config::parse("[equalizer]\nbands = [30, -1e9, 0, 0, 0, 0, 0, 0, 0, 0]").unwrap();
+        assert_eq!(c.equalizer.bands[..2], [12., -12.]);
+    }
+
     #[test]
     fn empty_file_is_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());

@@ -380,7 +380,7 @@ mod tests {
                 })
             };
             let handle = cx.open_window(
-                crate::gpui_surfaces::options(&crate::Surface::Panel, (672, 440), None, true),
+                crate::gpui_surfaces::options(&crate::Surface::Panel, (672, 440), None, true, 0),
                 |window, cx| cx.new(|cx| LauncherView::new(shell.clone(), dispatch, window, cx)),
             ).unwrap();
             handle.update(cx, |view, window, cx| {

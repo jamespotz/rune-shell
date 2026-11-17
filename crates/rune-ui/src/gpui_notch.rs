@@ -314,6 +314,7 @@ mod tests {
                         (0, 32),
                         None,
                         false,
+                        0,
                     ),
                     |_, cx| {
                         cx.new(|cx| {

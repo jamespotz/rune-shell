@@ -79,7 +79,10 @@ impl Change {
 }
 
 /// Watches the default sink, and the device lists. `None` when pactl isn't available.
-pub fn spawn_volume() -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devices>) {
+/// `equalizer` is the output the equalizer plays into while it is on.
+pub fn spawn_volume(
+    mut equalizer: watch::Receiver<Option<String>>,
+) -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devices>) {
     let (tx, rx) = watch::channel(None);
     let (dev_tx, dev_rx) = watch::channel(Devices::default());
     tokio::spawn(async move {
@@ -96,13 +99,24 @@ pub fn spawn_volume() -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devic
             };
             let v = read_volume().await;
             tx.send_if_modified(|cur| replace(cur, v));
-            let d = read_devices().await;
+            let d = read_devices(&equalizer).await;
             dev_tx.send_if_modified(|cur| replace(cur, d));
             let Some(stdout) = child.stdout.take() else {
                 return;
             };
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = tokio::select! {
+                    line = lines.next_line() => match line {
+                        Ok(Some(line)) => line,
+                        _ => break,
+                    },
+                    Ok(()) = equalizer.changed() => {
+                        let d = read_devices(&equalizer).await;
+                        dev_tx.send_if_modified(|cur| replace(cur, d));
+                        continue;
+                    }
+                };
                 // Sink changes and default-sink switches ("server") both matter.
                 if !["sink", "server", "source", "card"]
                     .iter()
@@ -118,7 +132,7 @@ pub fn spawn_volume() -> (watch::Receiver<Option<Volume>>, watch::Receiver<Devic
                     lists |= changes_devices(&more);
                 }
                 if lists {
-                    let d = read_devices().await;
+                    let d = read_devices(&equalizer).await;
                     dev_tx.send_if_modified(|cur| replace(cur, d));
                 }
                 let v = read_volume().await;
@@ -185,7 +199,15 @@ fn changes_devices(line: &str) -> bool {
     .any(|p| line.contains(p))
 }
 
-async fn read_devices() -> Devices {
+/// The default output to show: the equalizer's own sink stands for its output.
+fn shown_default<'a>(default: &'a str, equalizer: Option<&'a str>) -> &'a str {
+    match equalizer {
+        Some(output) if default == crate::equalizer::SINK => output,
+        _ => default,
+    }
+}
+
+async fn read_devices(equalizer: &watch::Receiver<Option<String>>) -> Devices {
     let run = async |args: &[&str]| {
         Process::new("pactl")
             .args(args)
@@ -195,10 +217,14 @@ async fn read_devices() -> Devices {
             .unwrap_or_default()
     };
     Devices {
-        outputs: parse_devices(
-            &run(&["-f", "json", "list", "sinks"]).await,
-            &run(&["get-default-sink"]).await,
-        ),
+        outputs: {
+            let default = run(&["get-default-sink"]).await;
+            let output = equalizer.borrow().clone();
+            parse_devices(
+                &run(&["-f", "json", "list", "sinks"]).await,
+                shown_default(&default, output.as_deref()),
+            )
+        },
         inputs: parse_devices(
             &run(&["-f", "json", "list", "sources"]).await,
             &run(&["get-default-source"]).await,
@@ -222,6 +248,7 @@ fn parse_devices(json: &str, default: &str) -> Vec<Device> {
     nodes
         .into_iter()
         .filter(|n| n.properties.get("device.class").and_then(|v| v.as_str()) != Some("monitor"))
+        .filter(|n| n.name != crate::equalizer::SINK)
         .map(|n| Device {
             volume: n
                 .volume
@@ -405,6 +432,19 @@ mod tests {
         assert!(!changes_devices("Event 'change' on sink #54"));
         assert!(!changes_devices("Event 'new' on sink-input #91"));
         assert!(!changes_devices("Event 'change' on source-output #3"));
+    }
+
+    #[test]
+    fn hides_the_equalizer_sink_and_shows_its_output_as_default() {
+        let json = r#"[
+            {"name":"speakers","description":"Speakers","mute":false},
+            {"name":"rune_equalizer","description":"Rune Equalizer","mute":false}
+        ]"#;
+        let default = shown_default("rune_equalizer", Some("speakers"));
+        let d = parse_devices(json, default);
+        assert_eq!(d.len(), 1);
+        assert!(d[0].default);
+        assert_eq!(shown_default("hdmi", None), "hdmi");
     }
 
     #[test]

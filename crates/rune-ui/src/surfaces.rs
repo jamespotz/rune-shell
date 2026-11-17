@@ -14,6 +14,8 @@ pub(crate) struct WindowSpec {
     pub margin: Option<(i32, i32, i32, i32)>,
     pub output_option: OutputOption,
     pub grabs_keyboard: bool,
+    /// Panels only: distance from the top of the output, below the bar.
+    pub top: i32,
 }
 #[derive(Debug, Default)]
 pub struct Surfaces {
