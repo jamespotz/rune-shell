@@ -51,7 +51,10 @@ use rune_services::{
     tray::MenuEntry,
     weather::Query as WeatherQuery,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const PENDING_POWER_TIMEOUT: Duration = Duration::from_secs(3);
+const OWN_SAVE_ECHO: Duration = Duration::from_millis(1500);
 use std::{collections::HashMap, sync::Arc};
 pub use surfaces::Surface;
 use surfaces::Surfaces;
@@ -153,6 +156,8 @@ pub(crate) struct App {
     /// Height of the popup surface, while there are popups.
     popup_size: u32,
     popup_hover: bool,
+    wifi_pending: Option<(bool, bool, Instant)>,
+    bt_pending: Option<(bool, bool, Instant)>,
     pub popup_expand: animation::Animation<bool>,
     weather_at: Option<Instant>,
     /// Per monitor: notch width animating from `.0` to `.1`.
@@ -165,6 +170,7 @@ pub(crate) struct App {
     /// What the OSD shows and until when.
     pub osd: Option<status::Osd>,
     osd_until: Instant,
+    saved_at: Option<Instant>,
     /// First day of the month shown, and the selected day.
     pub cal_month: chrono::NaiveDate,
     pub cal_day: chrono::NaiveDate,
@@ -200,6 +206,8 @@ impl App {
             notif_images: HashMap::new(),
             popup_size: 0,
             popup_hover: false,
+            wifi_pending: None,
+            bt_pending: None,
             popup_expand: animation::Animation::new(false),
             weather_at: None,
             measure_until: Instant::now(),
@@ -207,6 +215,7 @@ impl App {
             power_confirm: None,
             osd: None,
             osd_until: Instant::now(),
+            saved_at: None,
             cal_month: Local::now().date_naive().with_day(1).unwrap_or_default(),
             cal_day: Local::now().date_naive(),
             game_mode: false,
@@ -218,12 +227,25 @@ impl App {
         app.send(Action::LoadApps); // warm the list so the first open is instant
         app.send(Action::Weather(weather_query(&app.config)));
         app.send(Action::Calendar(app.config.calendar.urls.clone()));
+        if app.config.bar.look == config::Look::Pixel {
+            app.send(Action::Hypr(hyprland::Command::SquareCorners(true)));
+        }
+        app.send_border_colors(&app.config.colors);
         let sync = app.sync_notches();
         (app, sync)
     }
 
     fn send(&self, action: Action) {
         let _ = self.actions.send(action); // fails only while exiting
+    }
+
+    fn send_border_colors(&self, colors: &config::Colors) {
+        let mut inactive = colors.muted.0;
+        inactive[3] = 0x66;
+        self.send(Action::Hypr(hyprland::Command::BorderColors(
+            colors.accent.0,
+            inactive,
+        )));
     }
 
     fn update(&mut self, message: Message) -> Effects<Message> {
@@ -265,7 +287,21 @@ impl App {
                 self.snapshot.now = now;
                 Effects::none()
             }
-            Message::Ui(UiEvent::Config(config)) => self.set_config(*config),
+            Message::Ui(UiEvent::Config(config)) => {
+                if self.saved_at.is_some_and(|at| at.elapsed() < OWN_SAVE_ECHO) {
+                    return Effects::none();
+                }
+                self.set_config(*config)
+            }
+            Message::Ui(UiEvent::ThemeColors(colors)) => {
+                if colors == self.config.colors {
+                    return Effects::none();
+                }
+                let mut config = self.config.clone();
+                config.colors = colors;
+                self.save_config(&config);
+                self.set_config(config)
+            }
             Message::Ui(UiEvent::Apps(apps)) => {
                 self.launcher.set_apps(apps);
                 Effects::none()
@@ -354,7 +390,7 @@ impl App {
                 self.send(Action::Notif(notifications::Command::SetDnd(on)));
                 let mut config = self.config.clone();
                 config.notifications.dnd = on;
-                self.send(Action::SaveConfig(Box::new(config.clone())));
+                self.save_config(&config);
                 self.set_config(config)
             }
             Message::PopupHover(on) => {
@@ -458,7 +494,7 @@ impl App {
                 self.close_panel()
             }
             Message::WifiToggle(on) => {
-                self.send(Action::System(system::Command::Wifi(on)));
+                self.request_wifi(on);
                 Effects::none()
             }
             Message::MicMuteToggle => {
@@ -505,7 +541,7 @@ impl App {
                 Effects::none()
             }
             Message::BtPower(on) => {
-                self.send(Action::Bluetooth(bluetooth::Command::Power(on)));
+                self.request_bt(on);
                 Effects::none()
             }
             Message::GameModeToggle => self.set_game_mode(!self.game_mode),
@@ -539,6 +575,17 @@ impl App {
                 }
                 self.settings_ui.network = n.clone();
                 self.snapshot.network = n;
+                let reported = self
+                    .snapshot
+                    .network
+                    .as_ref()
+                    .is_some_and(|n| n.wifi_enabled);
+                self.wifi_pending = self.wifi_pending.and_then(|(requested, _, deadline)| {
+                    (requested != reported).then_some((requested, reported, deadline))
+                });
+                if let Some((requested, _, _)) = self.wifi_pending {
+                    self.set_wifi_shown(requested);
+                }
                 Effects::none()
             }
             Message::Ui(UiEvent::WifiNetworks(list)) => {
@@ -619,6 +666,13 @@ impl App {
             Message::Ui(UiEvent::Bluetooth(state)) => {
                 self.settings_ui.bt = state.clone();
                 self.snapshot.bt = state;
+                let reported = self.snapshot.bt.powered;
+                self.bt_pending = self.bt_pending.and_then(|(requested, _, deadline)| {
+                    (requested != reported).then_some((requested, reported, deadline))
+                });
+                if let Some((requested, _, _)) = self.bt_pending {
+                    self.set_bt_shown(requested);
+                }
                 Effects::none()
             }
             Message::Ui(UiEvent::Geocoded(result)) => {
@@ -671,6 +725,9 @@ impl App {
                         }
                         settings::Request::Blur(on) => self.send(Action::Blur(on)),
                         settings::Request::Geocode(q) => self.send(Action::Geocode(q)),
+                        settings::Request::Bluetooth(bluetooth::Command::Power(on)) => {
+                            self.request_bt(on)
+                        }
                         settings::Request::Bluetooth(cmd) => self.send(Action::Bluetooth(cmd)),
                         settings::Request::Audio(cmd) => {
                             self.send(Action::Audio(audio::Command::Device(cmd)))
@@ -678,9 +735,7 @@ impl App {
                         settings::Request::WifiScan => {
                             self.send(Action::System(system::Command::WifiScan))
                         }
-                        settings::Request::WifiPower(on) => {
-                            self.send(Action::System(system::Command::Wifi(on)))
-                        }
+                        settings::Request::WifiPower(on) => self.request_wifi(on),
                         settings::Request::WifiConnect(net, pw) => {
                             self.send(Action::System(system::Command::WifiConnect(net, pw)))
                         }
@@ -698,7 +753,7 @@ impl App {
                 if config == self.config {
                     return Effects::none();
                 }
-                self.send(Action::SaveConfig(Box::new(config.clone())));
+                self.save_config(&config);
                 self.set_config(config)
             }
             Message::Ui(UiEvent::Wallpapers(list)) => {
@@ -738,6 +793,18 @@ impl App {
             Message::ClosePanel => self.close_panel(),
             Message::Frame(at) => {
                 self.instant = at;
+                if let Some((_, reported, deadline)) = self.wifi_pending
+                    && at >= deadline
+                {
+                    self.wifi_pending = None;
+                    self.set_wifi_shown(reported);
+                }
+                if let Some((_, reported, deadline)) = self.bt_pending
+                    && at >= deadline
+                {
+                    self.bt_pending = None;
+                    self.set_bt_shown(reported);
+                }
                 let osd = if at >= self.osd_until {
                     self.surfaces.close(&Surface::Osd)
                 } else {
@@ -755,12 +822,60 @@ impl App {
             || self.popup_expand.is_animating(now)
             || now < self.measure_until;
         if animating {
-            Some(now + std::time::Duration::from_millis(16))
-        } else if self.surfaces.is_open(&Surface::Osd) {
-            Some(self.osd_until.max(now))
-        } else {
-            None
+            return Some(now + std::time::Duration::from_millis(16));
         }
+        let osd = self
+            .surfaces
+            .is_open(&Surface::Osd)
+            .then(|| self.osd_until.max(now));
+        let pending = [self.wifi_pending, self.bt_pending]
+            .into_iter()
+            .flatten()
+            .map(|(_, _, deadline)| deadline.max(now));
+        pending.chain(osd).min()
+    }
+
+    fn save_config(&mut self, config: &Config) {
+        self.saved_at = Some(Instant::now());
+        self.send(Action::SaveConfig(Box::new(config.clone())));
+    }
+
+    fn set_wifi_shown(&mut self, on: bool) {
+        if let Some(n) = self.snapshot.network.as_mut() {
+            n.wifi_enabled = on;
+        }
+        if let Some(n) = self.settings_ui.network.as_mut() {
+            n.wifi_enabled = on;
+        }
+    }
+
+    fn set_bt_shown(&mut self, on: bool) {
+        self.snapshot.bt.powered = on;
+        self.settings_ui.bt.powered = on;
+    }
+
+    fn request_wifi(&mut self, on: bool) {
+        let reported = self.wifi_pending.map_or_else(
+            || {
+                self.snapshot
+                    .network
+                    .as_ref()
+                    .is_some_and(|n| n.wifi_enabled)
+            },
+            |(_, reported, _)| reported,
+        );
+        self.wifi_pending = Some((on, reported, Instant::now() + PENDING_POWER_TIMEOUT));
+        self.set_wifi_shown(on);
+        self.send(Action::System(system::Command::Wifi(on)));
+    }
+
+    fn request_bt(&mut self, on: bool) {
+        let reported = self
+            .bt_pending
+            .map_or(self.snapshot.bt.powered, |(_, reported, _)| reported);
+        self.bt_pending = Some((on, reported, Instant::now() + PENDING_POWER_TIMEOUT));
+        self.set_bt_shown(on);
+        self.send(Action::Bluetooth(bluetooth::Command::Power(on)));
     }
 
     fn set_config(&mut self, config: Config) -> Effects<Message> {
@@ -780,7 +895,22 @@ impl App {
             )));
         }
         let rebuild = config.bar.height != self.config.bar.height
+            || config.bar.margin_top != self.config.bar.margin_top
+            || config.bar.gap != self.config.bar.gap
             || config.bar.outputs != self.config.bar.outputs;
+        if config.bar.look != self.config.bar.look && !self.game_mode {
+            let square = config.bar.look == config::Look::Pixel;
+            self.send(Action::Hypr(hyprland::Command::SquareCorners(square)));
+            if !square {
+                if config.bar.blur {
+                    self.send(Action::Blur(true));
+                }
+                self.send_border_colors(&config.colors);
+            }
+        }
+        if config.colors != self.config.colors {
+            self.send_border_colors(&config.colors);
+        }
         self.config = config;
         self.popup_expand = self
             .popup_expand
@@ -829,7 +959,8 @@ impl App {
         {
             tasks.push(self.close_panel()); // its monitor was unplugged
         }
-        let h = self.config.bar.height;
+        let h = self.config.bar.height + self.config.bar.margin_top;
+        let gap = self.config.bar.gap as i32;
         for name in wanted {
             let output_option = if name.is_empty() {
                 OutputOption::Active
@@ -840,6 +971,7 @@ impl App {
                 Surface::Bar(name),
                 WindowSpec {
                     size: Some((0, h)),
+                    margin: Some((0, 0, gap, 0)),
                     output_option,
                     ..Default::default()
                 },
@@ -899,7 +1031,10 @@ impl App {
                 }
                 panel::Command::Resize { size, left } => {
                     tasks.push(self.surfaces.resize(&Surface::Panel, size));
-                    tasks.push(self.surfaces.margin(&Surface::Panel, panel_margin(left)));
+                    tasks.push(
+                        self.surfaces
+                            .margin(&Surface::Panel, left.map(|_| panel_margin(left))),
+                    );
                 }
                 panel::Command::Open {
                     panel,
@@ -1103,6 +1238,10 @@ impl App {
             if self.config.bar.blur {
                 self.send(Action::Blur(true));
             }
+            if self.config.bar.look == config::Look::Pixel {
+                self.send(Action::Hypr(hyprland::Command::SquareCorners(true)));
+            }
+            self.send_border_colors(&self.config.colors);
         }
         Effects::none()
     }
@@ -1197,6 +1336,68 @@ mod tests {
         let (_, events) = tokio::sync::mpsc::unbounded_channel();
         let (app, _) = App::new(Config::default(), events, actions, false);
         (app, received)
+    }
+
+    #[test]
+    fn bluetooth_power_is_shown_at_once_and_reverts_without_a_report() {
+        let (mut app, _received) = test_app();
+        app.snapshot.bt.available = true;
+        app.snapshot.bt.powered = false;
+        app.update(Message::BtPower(true));
+        assert!(app.snapshot.bt.powered && app.settings_ui.bt.powered);
+        let stale = app.snapshot.bt.clone();
+        app.update(Message::Ui(UiEvent::Bluetooth(
+            rune_services::bluetooth::State {
+                powered: false,
+                ..stale
+            },
+        )));
+        assert!(
+            app.snapshot.bt.powered,
+            "a stale report must not bounce the switch"
+        );
+        app.update(Message::Frame(Instant::now() + Duration::from_secs(4)));
+        assert!(!app.snapshot.bt.powered && !app.settings_ui.bt.powered);
+    }
+
+    #[test]
+    fn own_save_echo_does_not_undo_a_newer_toggle() {
+        let (mut app, _received) = test_app();
+        let stale = app.config.clone();
+        app.update(Message::Settings(settings::Msg::Flag(
+            settings::Flag::ThemeDark,
+            !stale.theme.dark,
+        )));
+        app.update(Message::Ui(UiEvent::Config(Box::new(stale.clone()))));
+        assert_eq!(app.config.theme.dark, !stale.theme.dark);
+        let mut colors = app.config.colors;
+        colors.accent = config::Rgba([1, 2, 3, 255]);
+        app.update(Message::Ui(UiEvent::ThemeColors(colors)));
+        assert_eq!(app.config.colors.accent, colors.accent);
+        assert_eq!(app.config.theme.dark, !stale.theme.dark);
+    }
+
+    #[test]
+    fn top_gap_grows_the_bar_surface() {
+        let (mut app, _received) = test_app();
+        let mut config = app.config.clone();
+        config.bar.margin_top = 6;
+        let _ = app.set_config(config);
+        assert_eq!(
+            app.surfaces.desired[&Surface::Bar(String::new())].size,
+            Some((0, 38))
+        );
+    }
+
+    #[test]
+    fn centered_panel_stays_centered_after_measuring() {
+        let (mut app, _received) = test_app();
+        app.update(Message::Toggle(Panel::Quick));
+        app.update(Message::PanelSize(gpui::size(
+            gpui::px(350.),
+            gpui::px(400.),
+        )));
+        assert_eq!(app.surfaces.desired[&Surface::Panel].margin, None);
     }
 
     #[test]

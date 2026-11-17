@@ -720,6 +720,10 @@ impl Controls {
             PowerAction::Reboot => run("systemctl", &["reboot"]).status().await,
             PowerAction::Shutdown => run("systemctl", &["poweroff"]).status().await,
         };
-        status.map(drop).map_err(|e| format!("{action:?}: {e}"))
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("{action:?}: command exited with {status}")),
+            Err(e) => Err(format!("{action:?}: {e}")),
+        }
     }
 }

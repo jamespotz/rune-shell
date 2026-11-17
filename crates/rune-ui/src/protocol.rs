@@ -95,6 +95,7 @@ pub enum UiEvent {
     Hypr(HyprState),
     Clock(DateTime<Local>),
     Config(Box<Config>),
+    ThemeColors(crate::config::Colors),
     Apps(Vec<DesktopApp>),
     Binds(Vec<Bind>),
     Media(Option<Media>),

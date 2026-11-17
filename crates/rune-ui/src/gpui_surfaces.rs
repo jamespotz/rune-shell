@@ -19,13 +19,17 @@ pub(crate) fn options(
         Surface::Bar(_) => (
             Layer::Top,
             Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
-            Some(px(dimensions.1 as f32)),
+            Some(px(
+                (dimensions.1 as i32 + margin.map_or(0, |(_, _, gap, _)| gap.max(0))) as f32,
+            )),
             KeyboardInteractivity::None,
         ),
         Surface::Catcher => (Layer::Top, Anchor::all(), None, KeyboardInteractivity::None),
         Surface::Panel => (
             Layer::Overlay,
-            if margin.is_some() {
+            if grabs_keyboard {
+                Anchor::empty()
+            } else if margin.is_some() {
                 Anchor::TOP | Anchor::LEFT
             } else {
                 Anchor::TOP
@@ -71,6 +75,7 @@ pub(crate) fn options(
             exclusive_zone,
             keyboard_interactivity,
             margin: margin
+                .filter(|_| !matches!(surface, Surface::Bar(_)))
                 .or_else(|| {
                     matches!(surface, Surface::Panel).then_some((crate::panel::GAP, 0, 0, 0))
                 })
@@ -169,13 +174,35 @@ mod tests {
     }
 
     #[test]
-    fn launcher_grabs_keyboard_but_settings_does_not() {
-        let options = options(&Surface::Panel, (640, 440), Some((8, 0, 0, 120)), true);
+    fn bar_gap_extends_reserved_space() {
+        let options = options(
+            &Surface::Bar("DP-1".into()),
+            (0, 32),
+            Some((0, 0, 8, 0)),
+            false,
+        );
         let WindowKind::LayerShell(layer) = options.kind else {
             panic!("expected layer shell")
         };
-        assert_eq!(layer.anchor, Anchor::TOP | Anchor::LEFT);
-        assert_eq!(layer.margin, Some((px(8.), px(0.), px(0.), px(120.))));
+        assert_eq!(layer.exclusive_zone, Some(px(40.)));
+    }
+
+    #[test]
+    fn keyboard_panels_center_on_screen() {
+        let options = options(&Surface::Panel, (640, 440), None, true);
+        let WindowKind::LayerShell(layer) = options.kind else {
+            panic!("expected layer shell")
+        };
+        assert_eq!(layer.anchor, Anchor::empty());
+    }
+
+    #[test]
+    fn launcher_grabs_keyboard_but_settings_does_not() {
+        let options = options(&Surface::Panel, (640, 440), None, true);
+        let WindowKind::LayerShell(layer) = options.kind else {
+            panic!("expected layer shell")
+        };
+        assert_eq!(layer.anchor, Anchor::empty());
         assert_eq!(
             layer.keyboard_interactivity,
             KeyboardInteractivity::Exclusive
@@ -190,7 +217,7 @@ mod tests {
     #[test]
     fn panel_at_left_edge_keeps_its_explicit_anchor() {
         let WindowKind::LayerShell(layer) =
-            options(&Surface::Panel, (640, 440), Some((8, 0, 0, 0)), true).kind
+            options(&Surface::Panel, (640, 440), Some((8, 0, 0, 0)), false).kind
         else {
             panic!("expected layer shell")
         };

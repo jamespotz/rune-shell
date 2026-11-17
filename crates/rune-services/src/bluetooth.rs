@@ -447,6 +447,11 @@ fn parse_profiles(text: &str, address: &str) -> Option<Profiles> {
             }
         }
     }
+    if p.active.starts_with("a2dp") {
+        p.audio = Some(p.active.clone());
+    } else if p.active.starts_with("headset") {
+        p.call = Some(p.active.clone());
+    }
     Some(p)
 }
 
@@ -486,6 +491,13 @@ mod tests {
         assert_eq!(p.audio.as_deref(), Some("a2dp-sink-sbc"));
         assert_eq!(p.call.as_deref(), Some("headset-head-unit"));
         assert!(parse_profiles(text, "00:00:00:00:00:00").is_none());
+        let call = text.replace(
+            "Active Profile: a2dp-sink-sbc",
+            "Active Profile: headset-head-unit-msbc",
+        );
+        let p = parse_profiles(&call, "34:09:C9:A5:6B:2A").unwrap();
+        assert_eq!(p.call.as_deref(), Some("headset-head-unit-msbc"));
+        assert_eq!(p.audio.as_deref(), Some("a2dp-sink-sbc"));
     }
 
     fn props(pairs: &[(&str, Value<'static>)]) -> HashMap<String, OwnedValue> {

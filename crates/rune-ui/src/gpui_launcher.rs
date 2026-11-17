@@ -164,7 +164,7 @@ impl Render for LauncherView {
                     Some(source) => gpui::img(source)
                         .size(px(40.))
                         .object_fit(gpui::ObjectFit::Contain)
-                        .rounded(px(4.))
+                        .rounded(crate::gpui_widgets::corner(4.))
                         .into_any_element(),
                     None => glyph("content_paste"),
                 },
@@ -180,7 +180,7 @@ impl Render for LauncherView {
                         div()
                             .px(px(7.))
                             .py(px(2.))
-                            .rounded(px(6.))
+                            .rounded(crate::gpui_widgets::corner(6.))
                             .bg(color(config.colors.foreground).opacity(0.1))
                             .text_size(px(12.))
                             .child(key.to_owned())
@@ -215,7 +215,7 @@ impl Render for LauncherView {
                 .gap(px(14.))
                 .h(px(ROW_H))
                 .px(px(12.))
-                .rounded(px(8.))
+                .rounded(crate::gpui_widgets::corner(8.))
                 .cursor_pointer()
                 .child(
                     div()
@@ -235,11 +235,13 @@ impl Render for LauncherView {
                             div()
                                 .text_size(px(15.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
+                                .truncate()
                                 .child(title),
                         )
                         .child(
                             div()
                                 .text_size(px(12.))
+                                .truncate()
                                 .text_color(if selected {
                                     color(config.colors.on_accent).opacity(0.75)
                                 } else {
@@ -292,7 +294,7 @@ impl Render for LauncherView {
                     .id("clear-clips")
                     .px(px(8.))
                     .py(px(4.))
-                    .rounded(px(6.))
+                    .rounded(crate::gpui_widgets::corner(6.))
                     .hover(|style| style.bg(color(config.colors.urgent).opacity(0.12)))
                     .active(|style| style.bg(color(config.colors.urgent).opacity(0.24)))
                     .cursor_pointer()

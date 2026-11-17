@@ -53,7 +53,7 @@ impl SettingsView {
             crate::Message::Settings(msg),
             &self.dispatch,
         )
-        .rounded(px(6.))
+        .rounded(crate::gpui_widgets::corner(6.))
         .px(px(10.))
         .bg(gpui::rgba(0xffffff14))
         .into_any_element()
@@ -119,7 +119,7 @@ impl SettingsView {
             .items_center()
             .justify_center()
             .size(px(26.))
-            .rounded(px(6.))
+            .rounded(crate::gpui_widgets::corner(6.))
             .font_family(self.icon_font.clone())
             .text_size(px(17.))
             .text_color(color(if destructive {
@@ -141,7 +141,7 @@ impl SettingsView {
         let mut control = row()
             .gap(px(2.))
             .p(px(2.))
-            .rounded(px(7.))
+            .rounded(crate::gpui_widgets::corner(7.))
             .bg(gpui::rgba(0xffffff12));
         for (index, (label, selected, msg)) in options.into_iter().enumerate() {
             let dispatch = self.dispatch.clone();
@@ -150,11 +150,12 @@ impl SettingsView {
                     .id(format!("{id}:{index}"))
                     .px(px(12.))
                     .py(px(3.))
-                    .rounded(px(5.))
+                    .rounded(crate::gpui_widgets::corner(5.))
                     .text_size(px(12.))
                     .when(selected, |segment| {
                         segment
-                            .bg(gpui::rgba(0xffffff2e))
+                            .bg(color(self.colors.accent))
+                            .text_color(color(self.colors.on_accent))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                     })
                     .when(!selected, |segment| {
@@ -208,7 +209,7 @@ impl SettingsView {
             crate::Message::Settings(msg),
             &self.dispatch,
         )
-        .rounded(px(6.))
+        .rounded(crate::gpui_widgets::corner(6.))
         .px(px(12.))
         .bg(color(self.colors.accent))
         .text_color(color(self.colors.on_accent))
@@ -279,7 +280,7 @@ impl SettingsView {
         let boxed = id != "settings-search";
         div()
             .w_full()
-            .rounded(px(6.))
+            .rounded(crate::gpui_widgets::corner(6.))
             .when(boxed, |field| field.bg(gpui::rgba(0xffffff12)))
             .child(self.inputs[&id].1.clone())
             .into_any_element()
@@ -347,7 +348,7 @@ impl SettingsView {
                                 gpui::rgba(0x00000000)
                             })
                             .bg(color(c.colors.foreground).opacity(0.08))
-                            .rounded(px(6.))
+                            .rounded(crate::gpui_widgets::corner(6.))
                             .child(entity),
                     )
                     .children(state.drafts.contains_key(&field).then(|| {
@@ -444,11 +445,11 @@ fn hero(
     description: impl Into<gpui::SharedString>,
     trailing: Option<AnyElement>,
 ) -> AnyElement {
-    row()
+    crate::gpui_widgets::frame(row())
         .w_full()
         .gap(px(14.))
         .p(px(14.))
-        .rounded(px(10.))
+        .rounded(crate::gpui_widgets::corner(10.))
         .bg(gpui::rgba(0xffffff0d))
         .child(
             div()
@@ -457,7 +458,7 @@ fn hero(
                 .items_center()
                 .justify_center()
                 .size(px(44.))
-                .rounded(px(10.))
+                .rounded(crate::gpui_widgets::corner(10.))
                 .bg(gpui::rgba(page.tint()))
                 .text_color(gpui::rgb(0xffffff))
                 .child(crate::gpui_widgets::icon(c, page.label().0, 26.)),
@@ -483,7 +484,7 @@ fn code(text: &str) -> AnyElement {
         .w_full()
         .px(px(8.))
         .py(px(4.))
-        .rounded(px(6.))
+        .rounded(crate::gpui_widgets::corner(6.))
         .bg(gpui::rgba(0x0000004d))
         .font_family("DejaVu Sans Mono")
         .text_size(px(11.))
@@ -494,14 +495,17 @@ fn swatch(value: crate::config::Rgba, size: f32) -> gpui::Div {
     div()
         .flex_none()
         .size(px(size))
-        .rounded_full()
+        .rounded(crate::gpui_widgets::corner(9999.))
         .border_1()
         .border_color(gpui::rgba(0xffffff33))
         .bg(color(value))
 }
 fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
     let count = children.len();
-    let mut list = column().gap_0().rounded(px(10.)).bg(gpui::rgba(0xffffff0d));
+    let mut list = crate::gpui_widgets::frame(column())
+        .gap_0()
+        .rounded(crate::gpui_widgets::corner(10.))
+        .bg(gpui::rgba(0xffffff0d));
     for (index, child) in children.into_iter().enumerate() {
         list = list.child(
             div()
@@ -521,7 +525,7 @@ fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
     column()
         .gap(px(6.))
         .child(
-            div()
+            crate::gpui_widgets::heading(div())
                 .px(px(4.))
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -611,6 +615,47 @@ impl Render for SettingsView {
                     "Hex values such as #cba6f7. Picking a theme replaces these.",
                 ));
                 items.push(group(
+                    "Look",
+                    vec![self.segmented(
+                        "look",
+                        vec![
+                            (
+                                "Glass".into(),
+                                c.bar.look == crate::config::Look::Glass,
+                                Msg::Look(crate::config::Look::Glass),
+                            ),
+                            (
+                                "Pixel".into(),
+                                c.bar.look == crate::config::Look::Pixel,
+                                Msg::Look(crate::config::Look::Pixel),
+                            ),
+                        ],
+                    )],
+                ));
+                if c.bar.look == crate::config::Look::Pixel {
+                    items.push(group(
+                        "Pixel font",
+                        vec![
+                            self.segmented(
+                                "pixel-font",
+                                [
+                                    crate::config::PixelFont::Tiny5,
+                                    crate::config::PixelFont::Monocraft,
+                                ]
+                                .into_iter()
+                                .map(|font| {
+                                    (
+                                        font.family().into(),
+                                        c.bar.pixel_font == font,
+                                        Msg::PixelFont(font),
+                                    )
+                                })
+                                .collect(),
+                            ),
+                        ],
+                    ));
+                }
+                items.push(group(
                     "Materials",
                     vec![flag!(Blur, "Translucent menu bar and panels", c.bar.blur)],
                 ));
@@ -630,6 +675,32 @@ impl Render for SettingsView {
                     "Size",
                     vec![
                         number!(Height, "Height", c.bar.height, 24., 56., 1.),
+                        number!(
+                            Width,
+                            "Width (0 fills the screen)",
+                            c.bar.width,
+                            0.,
+                            3840.,
+                            10.
+                        ),
+                        number!(Radius, "Corner rounding", c.bar.radius, 0., 28., 1.),
+                        number!(
+                            MarginTop,
+                            "Gap above (0 attaches it to the top edge as a notch)",
+                            c.bar.margin_top,
+                            0.,
+                            32.,
+                            1.
+                        ),
+                        number!(MarginX, "Gap at the sides", c.bar.margin_x, 0., 400., 1.),
+                        number!(
+                            Gap,
+                            "Gap below (space between the menu bar and windows)",
+                            c.bar.gap,
+                            0.,
+                            32.,
+                            1.
+                        ),
                         number!(Padding, "Side padding", c.bar.padding, 0., 32., 1.),
                         number!(Spacing, "Space between items", c.bar.spacing, 0., 32., 1.),
                     ],
@@ -676,7 +747,7 @@ impl Render for SettingsView {
                 let mut targets = row()
                     .gap(px(2.))
                     .p(px(2.))
-                    .rounded(px(7.))
+                    .rounded(crate::gpui_widgets::corner(7.))
                     .bg(gpui::rgba(0xffffff12));
                 for (label, section) in [
                     ("Left", Section::Left),
@@ -689,7 +760,7 @@ impl Render for SettingsView {
                             .id(format!("add-target:{section:?}"))
                             .px(px(12.))
                             .py(px(3.))
-                            .rounded(px(5.))
+                            .rounded(crate::gpui_widgets::corner(5.))
                             .text_size(px(12.))
                             .when(selected, |segment| {
                                 segment
@@ -714,7 +785,7 @@ impl Render for SettingsView {
                             .pl(px(4.))
                             .pr(px(8.))
                             .py(px(2.))
-                            .rounded_full()
+                            .rounded(crate::gpui_widgets::corner(9999.))
                             .text_size(px(11.))
                             .bg(gpui::rgba(0xffffff12))
                             .hover(|style| style.bg(gpui::rgba(0xffffff24)))
@@ -782,9 +853,13 @@ impl Render for SettingsView {
                         ],
                     )),
                 ));
+                items.push(group(
+                    "Appearance",
+                    vec![flag!(ThemeDark, "Dark appearance", c.theme.dark)],
+                ));
                 if c.theme.source == ThemeSource::Preset {
                     let mut grid = row().w_full().flex_wrap().gap(px(8.));
-                    for p in PRESETS.iter() {
+                    for p in PRESETS[usize::from(c.theme.dark)].iter() {
                         let selected = p.name == c.theme.preset;
                         let rgb = |v: rune_services::theme::Rgb| {
                             gpui::rgb((v.0[0] as u32) << 16 | (v.0[1] as u32) << 8 | v.0[2] as u32)
@@ -796,7 +871,7 @@ impl Render for SettingsView {
                                 .id(format!("preset:{}", p.name))
                                 .w(px(176.))
                                 .gap_0()
-                                .rounded(px(8.))
+                                .rounded(crate::gpui_widgets::corner(8.))
                                 .overflow_hidden()
                                 .border_2()
                                 .border_color(if selected {
@@ -835,7 +910,7 @@ impl Render for SettingsView {
                     }
                     items.push(group("Presets", vec![grid.into_any_element()]));
                 } else {
-                    let mut rows = vec![flag!(ThemeDark, "Dark appearance", c.theme.dark)];
+                    let mut rows = Vec::new();
                     for v in Variant::ALL {
                         rows.push(self.choice(
                             format!("scheme:{}", v.id()),
@@ -921,12 +996,12 @@ impl Render for SettingsView {
                         Some(thumb) => img(thumb.clone())
                             .w(px(166.))
                             .h(px(93.))
-                            .rounded(px(6.))
+                            .rounded(crate::gpui_widgets::corner(6.))
                             .into_any_element(),
                         None => div()
                             .w(px(166.))
                             .h(px(93.))
-                            .rounded(px(6.))
+                            .rounded(crate::gpui_widgets::corner(6.))
                             .bg(gpui::rgba(0xffffff0d))
                             .into_any_element(),
                     };
@@ -943,7 +1018,7 @@ impl Render for SettingsView {
                                 div()
                                     .relative()
                                     .p(px(1.))
-                                    .rounded(px(8.))
+                                    .rounded(crate::gpui_widgets::corner(8.))
                                     .border_2()
                                     .border_color(if selected {
                                         color(c.colors.accent)
@@ -1302,7 +1377,7 @@ impl Render for SettingsView {
                             }
                         }
                         rows.push(self.toggle(
-                            &format!("bt-trust:{i}"),
+                            &format!("bt-trust:{}", d.address),
                             "Connect automatically",
                             d.trusted,
                             Msg::Bt(BtCommand::Trust(d.path.clone(), !d.trusted)),
@@ -1585,6 +1660,7 @@ impl Render for SettingsView {
                 &c,
                 crate::gpui_widgets::Material::Sidebar,
             ))
+            .rounded_l(crate::gpui_widgets::corner(12.))
             .border_r_1()
             .border_color(gpui::rgba(0x00000066))
             .child(
@@ -1592,7 +1668,7 @@ impl Render for SettingsView {
                     .gap(px(6.))
                     .mb(px(10.))
                     .pl(px(8.))
-                    .rounded(px(7.))
+                    .rounded(crate::gpui_widgets::corner(7.))
                     .bg(foreground.opacity(0.08))
                     .text_size(px(13.))
                     .child(crate::gpui_widgets::icon(&c, "search", 15.).opacity(0.5))
@@ -1621,7 +1697,7 @@ impl Render for SettingsView {
                         .w_full()
                         .px(px(6.))
                         .py(px(4.))
-                        .rounded(px(6.))
+                        .rounded(crate::gpui_widgets::corner(6.))
                         .when(selected, |item| {
                             item.bg(color(c.colors.accent))
                                 .text_color(color(c.colors.on_accent))
@@ -1638,7 +1714,7 @@ impl Render for SettingsView {
                                 .items_center()
                                 .justify_center()
                                 .size(px(22.))
-                                .rounded(px(6.))
+                                .rounded(crate::gpui_widgets::corner(6.))
                                 .bg(gpui::rgba(page.tint()))
                                 .text_color(gpui::rgb(0xffffff))
                                 .child(crate::gpui_widgets::icon(&c, page.label().0, 15.)),
@@ -1663,10 +1739,10 @@ impl Render for SettingsView {
             .relative()
             .size_full()
             .gap_0()
-            .rounded(px(12.))
+            .rounded(crate::gpui_widgets::corner(12.))
             .overflow_hidden()
             .items_start()
-            .font_family(c.bar.font.clone())
+            .font_family(crate::gpui_widgets::text_font(&c))
             .text_size(px(13.))
             .text_color(foreground)
             .bg(crate::gpui_widgets::material(
@@ -1688,7 +1764,7 @@ impl Render for SettingsView {
                             .pr(px(12.))
                             .justify_between()
                             .child(
-                                div()
+                                crate::gpui_widgets::heading(div())
                                     .text_size(px(15.))
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .child(s.page.label().1),

@@ -165,23 +165,29 @@ impl Render for PanelView {
         } + 2. * PANEL_PAD;
         let content =
             crate::gpui_widgets::surface(&app.config, crate::gpui_widgets::Material::Popover, 14.)
+                .id("feature-panel")
                 .flex()
                 .flex_col()
-                .gap(px(8.))
-                .id("feature-panel")
-                .relative()
                 .flex_none()
                 .w(px(width))
-                .track_focus(&self.focus)
-                .p(px(PANEL_PAD))
                 .max_h(px(crate::panel::MAX_H))
-                .overflow_y_scroll()
+                .overflow_hidden()
+                .track_focus(&self.focus)
                 .on_key_down(move |event, window, cx| {
                     if event.keystroke.key == "escape" {
                         dispatch(Message::Escape, window, cx);
                     }
                 })
-                .child(body)
+                .child(
+                    div()
+                        .id("feature-panel-scroll")
+                        .flex()
+                        .flex_col()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p(px(PANEL_PAD))
+                        .child(body),
+                )
                 .child(crate::gpui_widgets::measure_panel(
                     self.measurement.clone(),
                     self.dispatch.clone(),
@@ -240,7 +246,10 @@ impl PanelView {
             .as_ref()
             .and_then(|bytes| self.images.encoded("media", bytes));
         let picture = match picture {
-            Some(source) => img(source).size(px(56.)).rounded(px(8.)).into_any_element(),
+            Some(source) => img(source)
+                .size(px(56.))
+                .rounded(crate::gpui_widgets::corner(8.))
+                .into_any_element(),
             None => status_circle(c, "music_note", false, 56.).into_any_element(),
         };
         let info = column()
@@ -475,7 +484,7 @@ impl PanelView {
                 Some(message) => clickable(
                     div()
                         .id(format!("shortcut:{glyph}"))
-                        .rounded(px(8.))
+                        .rounded(crate::gpui_widgets::corner(8.))
                         .p(px(2.))
                         .active(|style| style.opacity(0.7))
                         .cursor_pointer()
@@ -529,7 +538,10 @@ impl PanelView {
                 .as_ref()
                 .and_then(|bytes| self.images.encoded("media", bytes));
             let art = match art {
-                Some(source) => img(source).size(px(38.)).rounded(px(6.)).into_any_element(),
+                Some(source) => img(source)
+                    .size(px(38.))
+                    .rounded(crate::gpui_widgets::corner(6.))
+                    .into_any_element(),
                 None => status_circle(c, "music_note", false, 38.).into_any_element(),
             };
             body = body.child(
@@ -611,7 +623,7 @@ fn quick_tile(
             div()
                 .id(format!("tile:{label}"))
                 .p(px(4.))
-                .rounded(px(8.))
+                .rounded(crate::gpui_widgets::corner(8.))
                 .hover(|style| style.bg(color(c.colors.foreground).opacity(0.06)))
                 .active(|style| style.bg(color(c.colors.foreground).opacity(0.12)))
                 .cursor_pointer()
@@ -643,7 +655,7 @@ fn glyph_button(
             .items_center()
             .justify_center()
             .p(px(4.))
-            .rounded(px(7.))
+            .rounded(crate::gpui_widgets::corner(7.))
             .hover(|style| style.bg(fg.opacity(0.10)))
             .active(|style| style.bg(fg.opacity(0.18)))
             .cursor_pointer()
@@ -1032,14 +1044,15 @@ fn weather(app: &Shell) -> AnyElement {
         );
     }
     body = body.child(module(c).child(div().id("hourly-weather").overflow_x_scroll().child(hours)));
-    let mut details = module(c).flex().flex_col().gap(px(4.)).text_size(px(12.));
     let detail = |label: &str, value: String| {
         row()
             .justify_between()
             .child(crate::gpui_widgets::muted(c, label.to_owned()))
             .child(value)
     };
-    details = details
+    let left = column()
+        .flex_1()
+        .gap(px(4.))
         .child(detail("Feels Like", format!("{:.0}°", current.feels_like)))
         .child(detail("Humidity", format!("{:.0}%", current.humidity)))
         .child(detail(
@@ -1050,14 +1063,22 @@ fn weather(app: &Shell) -> AnyElement {
                 if weather.imperial { "mph" } else { "km/h" }
             ),
         ));
+    let mut right = column().flex_1().gap(px(4.));
     if let Some(today) = today {
         let time = |t: Option<chrono::NaiveDateTime>| {
             t.map_or("—".into(), |t| t.format("%H:%M").to_string())
         };
-        details = details
+        right = right
             .child(detail("Sunrise", time(today.sunrise)))
             .child(detail("Sunset", time(today.sunset)));
     }
+    let details = module(c)
+        .flex()
+        .items_start()
+        .gap(px(16.))
+        .text_size(px(12.))
+        .child(left)
+        .child(right);
     body = body.child(details);
     let mut days = module(c).flex().flex_col().gap(px(2.)).text_size(px(12.));
     for day in &weather.daily {
@@ -1140,7 +1161,7 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
+                .rounded(crate::gpui_widgets::corner(9999.))
                 .text_size(px(12.))
                 .child(day.day().to_string());
             if day == today {
@@ -1160,14 +1181,14 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                     .w(px(cell))
                     .items_center()
                     .gap(px(1.))
-                    .rounded(px(6.))
+                    .rounded(crate::gpui_widgets::corner(6.))
                     .hover(|style| style.bg(fg.opacity(0.06)))
                     .cursor_pointer()
                     .child(number)
                     .child(
                         div()
                             .size(px(4.))
-                            .rounded_full()
+                            .rounded(crate::gpui_widgets::corner(9999.))
                             .when(has_events, |d| d.bg(color(c.colors.accent))),
                     ),
                 Message::CalDay(day),
@@ -1212,7 +1233,7 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                 div()
                     .w(px(3.))
                     .h(px(30.))
-                    .rounded(px(2.))
+                    .rounded(crate::gpui_widgets::corner(2.))
                     .bg(color(c.colors.accent)),
             )
             .child(text);
@@ -1299,7 +1320,7 @@ pub(crate) fn notification(
         .h(px(44.))
         .overflow_hidden()
         .child(
-            div()
+            crate::gpui_widgets::heading(div())
                 .h(px(16.))
                 .text_size(px(14.))
                 .line_height(px(16.))
@@ -1325,7 +1346,7 @@ pub(crate) fn notification(
             img(source)
                 .size(px(40.))
                 .object_fit(gpui::ObjectFit::Contain)
-                .rounded(px(6.)),
+                .rounded(crate::gpui_widgets::corner(6.)),
         );
     }
     content = content.child(text);
@@ -1357,7 +1378,10 @@ pub(crate) fn notification(
     }
     let message = notification_click(notification, center);
     let dispatch = dispatch.clone();
-    let foreground = color(app.config.colors.foreground);
+    let hovered =
+        crate::gpui_widgets::tinted(&app.config, crate::gpui_widgets::Material::Card, 0.08);
+    let pressed =
+        crate::gpui_widgets::tinted(&app.config, crate::gpui_widgets::Material::Card, 0.14);
     column()
         .id(("notification", id as u64))
         .w_full()
@@ -1365,7 +1389,7 @@ pub(crate) fn notification(
         .py(px(8.))
         .px(px(12.))
         .relative()
-        .rounded(px(14.))
+        .rounded(crate::gpui_widgets::corner(14.))
         .child(crate::gpui_widgets::edge(&app.config, 14.))
         .when(
             notification.urgency == rune_services::notifications::Urgency::Critical,
@@ -1378,8 +1402,8 @@ pub(crate) fn notification(
             &app.config,
             crate::gpui_widgets::Material::Card,
         ))
-        .hover(|style| style.bg(foreground.opacity(0.12)))
-        .active(|style| style.bg(foreground.opacity(0.18)))
+        .hover(|style| style.bg(hovered))
+        .active(|style| style.bg(pressed))
         .cursor_pointer()
         .child(body)
         .on_click(move |_, window, cx| dispatch(message.clone(), window, cx))
@@ -1480,7 +1504,7 @@ fn tray_menu(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                         .id(format!("menu-{}", entry.id))
                         .px(px(6.))
                         .py(px(5.))
-                        .rounded(px(5.))
+                        .rounded(crate::gpui_widgets::corner(5.))
                         .hover(|style| {
                             style
                                 .bg(color(c.colors.accent))

@@ -134,16 +134,28 @@ impl std::fmt::Display for Widget {
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
     pub height: u32,
-    /// Bottom corner radius; also the size of the concave top shoulders.
+    /// Bar width; 0 fills the monitor between the side gaps.
+    pub width: u32,
+    /// Corner radius. Only the bottom corners round when `margin_top` is 0, giving a notch.
     pub radius: f32,
+    /// Space between the top of the monitor and the bar.
+    pub margin_top: u32,
+    /// Space kept free on the left and right of the bar.
+    pub margin_x: u32,
     /// Space between the notch sides and the outermost widgets.
     pub padding: f32,
     /// Space between widgets.
     pub spacing: f32,
+    /// Space kept free between the bar and the windows below it.
+    pub gap: u32,
     pub font: String,
     pub font_size: f32,
     /// Blur what's behind the notch and panels (visible when `colors.background` has transparency).
     pub blur: bool,
+    /// Overall look: `glass` (rounded, translucent) or `pixel` (square frames, pixel font).
+    pub look: Look,
+    /// Font used everywhere in the pixel look: `tiny5` or `monocraft`.
+    pub pixel_font: PixelFont,
     /// Icon font; icons are written by name, e.g. `"schedule"`.
     pub icon_font: String,
     /// Connector names (`DP-1`) to show a bar on. Empty means every monitor.
@@ -157,13 +169,19 @@ impl Default for BarConfig {
     fn default() -> Self {
         Self {
             height: 32,
-            radius: 14.0,
+            width: 0,
+            radius: 0.0,
+            margin_top: 0,
+            margin_x: 0,
             padding: 6.0,
             spacing: 10.0,
+            gap: 8,
             font: "Noto Sans".into(),
             font_size: 13.0,
             icon_font: "Material Symbols Rounded".into(),
             blur: false,
+            look: Look::Glass,
+            pixel_font: PixelFont::Tiny5,
             outputs: Vec::new(),
             left: vec![Widget::Workspaces],
             center: vec![Widget::Media, Widget::WindowTitle],
@@ -349,6 +367,33 @@ impl Default for LauncherConfig {
     }
 }
 
+/// Overall look of every surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Look {
+    #[default]
+    Glass,
+    Pixel,
+}
+
+/// Pixel-look font family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PixelFont {
+    #[default]
+    Tiny5,
+    Monocraft,
+}
+
+impl PixelFont {
+    pub fn family(self) -> &'static str {
+        match self {
+            Self::Tiny5 => "Tiny5",
+            Self::Monocraft => "Monocraft",
+        }
+    }
+}
+
 /// Where theme colors come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -509,6 +554,15 @@ impl Rgba {
 mod tests {
     use super::*;
 
+    #[test]
+    fn look_parses_and_defaults_to_glass() {
+        assert_eq!(Config::default().bar.look, Look::Glass);
+        let c = Config::parse("[bar]\nlook = \"pixel\"").unwrap();
+        assert_eq!(c.bar.look, Look::Pixel);
+        assert_eq!(c.bar.pixel_font, PixelFont::Tiny5);
+        let c = Config::parse("[bar]\npixel_font = \"monocraft\"").unwrap();
+        assert_eq!(c.bar.pixel_font.family(), "Monocraft");
+    }
     #[test]
     fn empty_file_is_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());

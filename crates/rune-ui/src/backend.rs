@@ -81,6 +81,12 @@ fn dispatch(shell: Entity<Shell>, backend: Shared, message: Message, cx: &mut gp
     reconcile(shell, backend, cx);
 }
 fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
+    let bar = &shell.read(cx).config.bar;
+    crate::gpui_widgets::set_look(bar.look, bar.pixel_font);
+    let reduce = shell.read(cx).config.animations.duration().is_zero();
+    if cx.reduce_motion() != reduce {
+        cx.set_reduce_motion(reduce);
+    }
     let desired = shell.read(cx).surfaces.desired.clone();
     let panel = shell.read(cx).panels.current();
     let mut state = backend.borrow_mut();

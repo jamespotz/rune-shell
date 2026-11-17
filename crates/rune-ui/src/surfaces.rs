@@ -37,10 +37,10 @@ impl Surfaces {
     pub(crate) fn margin(
         &mut self,
         surface: &Surface,
-        margin: (i32, i32, i32, i32),
+        margin: Option<(i32, i32, i32, i32)>,
     ) -> Effects<Message> {
         if let Some(spec) = self.desired.get_mut(surface) {
-            spec.margin = Some(margin);
+            spec.margin = margin;
         }
         Effects::none()
     }
@@ -75,7 +75,7 @@ mod tests {
         );
         surfaces.open(Surface::Panel, WindowSpec::default());
         surfaces.resize(&Surface::Panel, (480, 300));
-        surfaces.margin(&Surface::Panel, (8, 0, 0, 0));
+        surfaces.margin(&Surface::Panel, Some((8, 0, 0, 0)));
         assert_eq!(surfaces.bars(), ["DP-1"]);
         assert_eq!(surfaces.desired[&Surface::Panel].size, Some((480, 300)));
         assert_eq!(surfaces.desired[&Surface::Panel].margin, Some((8, 0, 0, 0)));

@@ -239,6 +239,34 @@ pub fn presets() -> Vec<Palette> {
     PRESETS.iter().map(preset).collect()
 }
 
+/// Built-in palettes in the requested appearance, in selector order.
+pub fn presets_for(dark: bool) -> Vec<Palette> {
+    PRESETS
+        .iter()
+        .filter_map(|row| preset_for(row.0, dark))
+        .collect()
+}
+
+/// A preset in the requested appearance. Catppuccin flavours switch between
+/// Mocha and Latte; other presets regenerate their palette from their accent.
+pub fn preset_for(name: &str, dark: bool) -> Option<Palette> {
+    let palette = preset_named(name)?;
+    if palette.dark == dark {
+        return Some(palette);
+    }
+    let mut flipped = if name.starts_with("Catppuccin") {
+        preset_named(if dark {
+            "Catppuccin Mocha"
+        } else {
+            "Catppuccin Latte"
+        })?
+    } else {
+        from_seed(palette.primary, Variant::TonalSpot, dark)
+    };
+    flipped.name = palette.name;
+    Some(flipped)
+}
+
 /// A preset by name.
 pub fn preset_named(name: &str) -> Option<Palette> {
     PRESETS.iter().find(|p| p.0 == name).map(preset)
@@ -247,7 +275,7 @@ pub fn preset_named(name: &str) -> Option<Palette> {
 type Row = (&'static str, bool, [&'static str; 12], [&'static str; 16]);
 
 // name, dark, [bg_dim, bg, surface, surface_high, fg, muted, outline, primary, on_primary, secondary, tertiary, error], terminal 0-15
-const PRESETS: [Row; 10] = [
+const PRESETS: [Row; 11] = [
     (
         "Catppuccin Mocha",
         true,
@@ -368,6 +396,18 @@ const PRESETS: [Row; 10] = [
             "#859289", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
         ],
     ),
+    (
+        "Coffee Bean",
+        true,
+        [
+            "#140e0b", "#1c1410", "#2a1f19", "#3a2b22", "#ecdcc8", "#bfa58c", "#7a5f4b", "#d4a373",
+            "#1c1410", "#b5835a", "#a3b18a", "#d0675a",
+        ],
+        [
+            "#2a1f19", "#d0675a", "#a3b18a", "#e0b872", "#8fa3b8", "#c08497", "#8fb3a6", "#d9c6b0",
+            "#5c4636", "#e07b6c", "#b5c39c", "#ecc888", "#a3b6c9", "#d199ab", "#a3c4b8", "#ecdcc8",
+        ],
+    ),
 ];
 
 fn preset(row: &Row) -> Palette {
@@ -417,7 +457,7 @@ mod tests {
                 assert!(Rgb::parse(hex).is_some(), "{name}: bad color {hex}");
             }
         }
-        assert_eq!(presets().len(), 10);
+        assert_eq!(presets().len(), 11);
         assert_eq!(preset_named("Nord").unwrap().primary.hex(), "#88c0d0");
     }
 
@@ -448,5 +488,17 @@ mod tests {
         for v in Variant::ALL {
             assert_eq!(Variant::from_id(v.id()), Some(v));
         }
+    }
+
+    #[test]
+    fn presets_follow_the_requested_appearance() {
+        for dark in [true, false] {
+            let palettes = presets_for(dark);
+            assert_eq!(palettes.len(), 11);
+            assert!(palettes.iter().all(|p| p.dark == dark));
+        }
+        let latte = preset_for("Catppuccin Mocha", false).unwrap();
+        assert_eq!(latte.name, "Catppuccin Mocha");
+        assert_eq!(latte.bg, preset_named("Catppuccin Latte").unwrap().bg);
     }
 }

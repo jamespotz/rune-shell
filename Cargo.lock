@@ -4114,6 +4114,7 @@ name = "rune-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "notify",
  "rune-services",
  "rune-ui",

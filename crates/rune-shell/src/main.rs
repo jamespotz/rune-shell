@@ -71,12 +71,23 @@ fn main() -> Result<()> {
     }
 }
 
+#[cfg(target_env = "gnu")]
+fn limit_malloc_arenas() {
+    if unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) } == 0 {
+        warn!("could not limit malloc arenas; memory use may be higher");
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn limit_malloc_arenas() {}
+
 fn daemon() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    limit_malloc_arenas();
 
     let path = config_path()?;
     let config = load_config(&path).unwrap_or_else(|e| {
@@ -150,7 +161,7 @@ fn daemon() -> Result<()> {
             (None, None, None)
         }
     };
-    let theme_jobs = theme_worker(ui.clone(), save.clone());
+    let theme_jobs = theme_worker(ui.clone());
     if config.bar.blur
         && let Some(h) = hypr.clone()
     {
@@ -518,10 +529,7 @@ async fn launch(hypr: Option<Hyprland>, command: String) {
 }
 
 /// Applies themes one at a time; rapid clicks collapse to the latest choice.
-fn theme_worker(
-    ui: UnboundedSender<UiEvent>,
-    save: watch::Sender<Option<Config>>,
-) -> watch::Sender<Option<Config>> {
+fn theme_worker(ui: UnboundedSender<UiEvent>) -> watch::Sender<Option<Config>> {
     let (tx, mut rx) = watch::channel(None::<Config>);
     tokio::spawn(async move {
         while rx.changed().await.is_ok() {
@@ -531,8 +539,7 @@ fn theme_worker(
             match tokio::task::spawn_blocking(move || apply_theme(config)).await {
                 Ok(Ok((config, status))) => {
                     info!("{status}");
-                    let _ = save.send(Some(config.clone()));
-                    let _ = ui.send(UiEvent::Config(Box::new(config)));
+                    let _ = ui.send(UiEvent::ThemeColors(config.colors));
                     let _ = ui.send(UiEvent::Status(status));
                 }
                 Ok(Err(e)) => {
@@ -550,7 +557,7 @@ fn theme_worker(
 fn apply_theme(mut config: Config) -> std::result::Result<(Config, String), String> {
     let t = &config.theme;
     let palette = match t.source {
-        ThemeSource::Preset => theme::preset_named(&t.preset)
+        ThemeSource::Preset => theme::preset_for(&t.preset, t.dark)
             .ok_or_else(|| format!("Unknown preset {:?}", t.preset))?,
         ThemeSource::Wallpaper => {
             let path = Some(PathBuf::from(&config.wallpaper.current))

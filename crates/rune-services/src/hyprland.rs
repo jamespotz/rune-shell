@@ -21,6 +21,10 @@ pub enum Command {
     /// Switch the focused monitor to this workspace.
     Focus(i32),
     GameMode(bool),
+    /// Square window corners; off reloads the user's config.
+    SquareCorners(bool),
+    /// Active and inactive window border colours as RGBA.
+    BorderColors([u8; 4], [u8; 4]),
     /// Fetch the keybinds.
     Binds,
 }
@@ -148,6 +152,10 @@ impl Hyprland {
         match command {
             Command::Focus(id) => self.focus_workspace(id).await,
             Command::GameMode(on) => self.game_mode(on).await,
+            Command::SquareCorners(on) => self.square_corners(on).await,
+            Command::BorderColors(active, inactive) => {
+                self.eval(&border_colors(active, inactive)).await
+            }
             Command::Binds => {
                 reply(Reply::Binds(self.binds().await?));
                 Ok(())
@@ -200,6 +208,15 @@ impl Hyprland {
              general = { gaps_in = 0, gaps_out = 0 } })",
         )
         .await
+    }
+
+    /// Square window corners. Turning it off reloads the user's config to restore rounding.
+    pub async fn square_corners(&self, on: bool) -> Result<(), Error> {
+        if !on {
+            return self.request("reload").await.map(drop);
+        }
+        self.eval("hl.config({ decoration = { rounding = 0 } })")
+            .await
     }
 
     /// Runs a Lua snippet in Hyprland (e.g. a runtime `hl.layer_rule`).
@@ -365,6 +382,15 @@ pub fn lua_string(s: &str) -> String {
     format!("[{eq}[{s}]{eq}]")
 }
 
+fn border_colors(active: [u8; 4], inactive: [u8; 4]) -> String {
+    let rgba = |[r, g, b, a]: [u8; 4]| format!("\"rgba({r:02x}{g:02x}{b:02x}{a:02x})\"");
+    format!(
+        "hl.config({{ general = {{ col = {{ active_border = {}, inactive_border = {} }} }} }})",
+        rgba(active),
+        rgba(inactive)
+    )
+}
+
 /// Splits a `.socket2.sock` line into `(event, data)`.
 pub fn parse_event(line: &str) -> Option<(&str, &str)> {
     line.split_once(">>")
@@ -374,6 +400,14 @@ pub fn parse_event(line: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use tokio::net::UnixListener;
+
+    #[test]
+    fn border_colors_are_lua_rgba() {
+        assert_eq!(
+            border_colors([0xd4, 0xa3, 0x73, 0xff], [1, 2, 3, 0x80]),
+            "hl.config({ general = { col = { active_border = \"rgba(d4a373ff)\", inactive_border = \"rgba(01020380)\" } } })"
+        );
+    }
 
     const MONITORS: &str =
         r#"[{"id":0,"name":"DP-1","focused":true,"activeWorkspace":{"id":2,"name":"2"}}]"#;

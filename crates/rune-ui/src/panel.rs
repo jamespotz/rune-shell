@@ -51,6 +51,7 @@ impl Panel {
     }
 
     /// Whether the panel takes the keyboard while open (it has a text field).
+    /// Such panels are modal and sit in the middle of the screen.
     pub fn grabs_keyboard(self) -> bool {
         matches!(self, Self::Launcher(_))
     }
@@ -59,7 +60,7 @@ impl Panel {
 /// Gap between the bar and a panel, and between a panel and the screen edge.
 pub const GAP: i32 = 8;
 /// The tallest a panel gets; longer content scrolls inside it.
-pub const MAX_H: f32 = 440.0;
+pub const MAX_H: f32 = 560.0;
 
 /// What the surface layer should do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +173,7 @@ impl Panels {
     }
 
     fn open_at(&mut self, panel: Panel, (monitor, x): (String, Option<f32>)) -> Command {
+        let x = x.filter(|_| !panel.grabs_keyboard());
         // Starts at last time's size; the sensor corrects it on the first frame.
         let size = self.sizes.get(&panel).copied().unwrap_or((1, 1));
         let left = left(x, size.0, self.widths.get(&monitor).copied());
@@ -204,6 +206,22 @@ fn left(x: Option<f32>, width: u32, screen: Option<f32>) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launcher_ignores_the_bar_pointer_and_centers() {
+        let mut p = Panels::default();
+        p.bar_width("DP-1".into(), 2000.);
+        p.pointer(Some(("DP-1".into(), 600.)));
+        let open = p.toggle(Panel::Launcher(Kind::Apps), "DP-1");
+        assert!(matches!(&open[0], Command::Open { left: None, .. }));
+        assert_eq!(
+            p.measured(640., 400.),
+            Some(Command::Resize {
+                size: (640, 400),
+                left: None
+            })
+        );
+    }
+
     use super::*;
 
     fn panels() -> Panels {

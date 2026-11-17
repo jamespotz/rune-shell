@@ -48,6 +48,7 @@ impl Render for Notch {
         let config = &app.config;
         let bar = &config.bar;
         let height = bar.height as f32;
+        let radius = bar.radius.clamp(0., height / 2.);
         let mut content = div()
             .relative()
             .w_full()
@@ -109,7 +110,7 @@ impl Render for Notch {
                                     .min_w(px(22.))
                                     .h(px((height - 10.).max(12.)))
                                     .px(px(5.))
-                                    .rounded(px(5.))
+                                    .rounded(crate::gpui_widgets::corner(5.))
                                     .text_size(px(bar.font_size * 0.92))
                                     .text_color(crate::notch::mix(rest, foreground, t))
                                     .when(active, |slot| {
@@ -154,7 +155,7 @@ impl Render for Notch {
                             .into_any_element()
                     }
                     Widget::Clock => {
-                        let mut clock = crate::gpui_widgets::row();
+                        let mut clock = crate::gpui_widgets::heading(crate::gpui_widgets::row());
                         if !config.clock.icon.is_empty() {
                             clock = clock.child(crate::gpui_widgets::icon(
                                 config,
@@ -244,19 +245,26 @@ impl Render for Notch {
             .flex()
             .justify_center()
             .items_start()
-            .font_family(bar.font.clone())
+            .pt(px(bar.margin_top as f32))
+            .px(px(bar.margin_x as f32))
+            .font_family(crate::gpui_widgets::text_font(config))
             .text_size(px(bar.font_size))
             .text_color(color(config.colors.foreground))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .bg(crate::gpui_widgets::material(
-                config,
-                crate::gpui_widgets::Material::Bar,
-            ))
             .child(
                 div()
                     .w_full()
+                    .when(bar.width > 0, |inner| inner.max_w(px(bar.width as f32)))
                     .h(px(height))
                     .px(px(bar.padding + 4.))
+                    .bg(crate::gpui_widgets::material(
+                        config,
+                        crate::gpui_widgets::Material::Bar,
+                    ))
+                    .rounded_b(crate::gpui_widgets::corner(radius))
+                    .when(bar.margin_top > 0, |inner| {
+                        inner.rounded_t(crate::gpui_widgets::corner(radius))
+                    })
                     .child(content),
             )
             .child(

@@ -5,8 +5,107 @@ use crate::{
     gpui_images::Images,
     gpui_notch::Dispatch,
 };
-use gpui::{AnyElement, Div, MouseButton, Stateful, div, img, prelude::*, px};
+use gpui::{AnimationExt, AnyElement, Div, MouseButton, Stateful, div, img, prelude::*, px};
 
+static PIXEL_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub(crate) fn set_look(look: crate::config::Look, font: crate::config::PixelFont) {
+    let value = match (look, font) {
+        (crate::config::Look::Glass, _) => 0,
+        (crate::config::Look::Pixel, crate::config::PixelFont::Tiny5) => 1,
+        (crate::config::Look::Pixel, crate::config::PixelFont::Monocraft) => 2,
+    };
+    PIXEL_FONT.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+fn pixel_font() -> Option<&'static str> {
+    match PIXEL_FONT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(crate::config::PixelFont::Tiny5.family()),
+        2 => Some(crate::config::PixelFont::Monocraft.family()),
+        _ => None,
+    }
+}
+pub(crate) fn pixel_look() -> bool {
+    pixel_font().is_some()
+}
+pub(crate) fn corner(radius: f32) -> gpui::Pixels {
+    if pixel_look() { px(0.) } else { px(radius) }
+}
+pub(crate) fn text_font(config: &Config) -> gpui::SharedString {
+    match pixel_font() {
+        Some(family) => family.into(),
+        None => config.bar.font.clone().into(),
+    }
+}
+pub(crate) fn fill<E: Styled + ParentElement>(element: E, fill: impl Into<gpui::Hsla>) -> E {
+    let fill = fill.into();
+    if !pixel_look() {
+        return element.bg(fill);
+    }
+    element.child(
+        gpui::canvas(
+            |bounds, _, _| bounds,
+            move |_, bounds, window, _| {
+                let mut left = bounds.left();
+                while left < bounds.right() {
+                    let width = (bounds.right() - left).min(px(4.));
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(
+                            gpui::point(left, bounds.top()),
+                            gpui::size(width, bounds.size.height),
+                        ),
+                        fill,
+                    ));
+                    left += px(6.);
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+pub(crate) fn heading<E: Styled>(element: E) -> E {
+    match pixel_font() {
+        Some(family) => element.font_family(family),
+        None => element,
+    }
+}
+pub(crate) fn frame<E: Styled + ParentElement>(element: E) -> E {
+    if !pixel_look() {
+        return element;
+    }
+    let shadow = px(3.);
+    element
+        .relative()
+        .border_1()
+        .border_color(gpui::rgba(0x8080807a))
+        .child(
+            gpui::canvas(
+                |bounds, _, _| bounds,
+                move |_, bounds, window, _| {
+                    let black = gpui::black();
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(
+                            gpui::point(bounds.right(), bounds.top() + shadow),
+                            gpui::size(shadow, bounds.size.height),
+                        ),
+                        black,
+                    ));
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(
+                            gpui::point(bounds.left() + shadow, bounds.bottom()),
+                            gpui::size(bounds.size.width - shadow, shadow),
+                        ),
+                        black,
+                    ));
+                },
+            )
+            .absolute()
+            .top(px(-1.))
+            .left(px(-1.))
+            .right(px(-1.))
+            .bottom(px(-1.)),
+        )
+}
 pub(crate) fn color(value: Rgba) -> gpui::Rgba {
     gpui::rgba(u32::from_be_bytes(value.0))
 }
@@ -32,7 +131,7 @@ pub(crate) enum Material {
 }
 pub(crate) fn material_alpha(material: Material, blur: bool) -> f32 {
     if !blur {
-        return 0.96;
+        return 1.0;
     }
     match material {
         Material::Bar | Material::Card => 0.70,
@@ -44,13 +143,25 @@ pub(crate) fn material_alpha(material: Material, blur: bool) -> f32 {
 pub(crate) fn material(config: &Config, material: Material) -> gpui::Rgba {
     color(config.colors.background).opacity(material_alpha(material, config.bar.blur))
 }
+pub(crate) fn tinted(config: &Config, material: Material, amount: f32) -> gpui::Rgba {
+    let base = self::material(config, material);
+    let tint = color(config.colors.foreground);
+    let mix = |from: f32, to: f32| from + (to - from) * amount;
+    gpui::Rgba {
+        r: mix(base.r, tint.r),
+        g: mix(base.g, tint.g),
+        b: mix(base.b, tint.b),
+        a: base.a,
+    }
+}
 pub(crate) fn edge(config: &Config, radius: f32) -> impl IntoElement {
     let edge = color(config.colors.foreground).opacity(0.18);
     gpui::canvas(
         |bounds, _, _| bounds,
         move |_, bounds, window, _| {
             window.paint_quad(
-                gpui::outline(bounds, edge, Default::default()).corner_radii(px(radius)),
+                gpui::outline(bounds, edge, Default::default())
+                    .corner_radii(crate::gpui_widgets::corner(radius)),
             );
         },
     )
@@ -61,15 +172,15 @@ pub(crate) fn edge(config: &Config, radius: f32) -> impl IntoElement {
 pub(crate) fn surface(config: &Config, kind: Material, radius: f32) -> Div {
     div()
         .relative()
-        .rounded(px(radius))
+        .rounded(crate::gpui_widgets::corner(radius))
         .child(edge(config, radius))
         .bg(material(config, kind))
         .text_color(color(config.colors.foreground))
-        .font_family(config.bar.font.clone())
+        .font_family(text_font(config))
         .text_size(px(13.))
 }
 pub(crate) fn section_label(config: &Config, label: impl Into<gpui::SharedString>) -> Div {
-    div()
+    heading(div())
         .px(px(6.))
         .pt(px(4.))
         .text_size(px(11.))
@@ -91,7 +202,7 @@ pub(crate) fn status_circle(config: &Config, glyph: &str, on: bool, size: f32) -
         .items_center()
         .justify_center()
         .size(px(size))
-        .rounded_full()
+        .rounded(crate::gpui_widgets::corner(9999.))
         .bg(if on {
             color(config.colors.accent)
         } else {
@@ -117,7 +228,7 @@ pub(crate) fn menu_row(
         .gap(px(10.))
         .px(px(6.))
         .py(px(5.))
-        .rounded(px(7.))
+        .rounded(crate::gpui_widgets::corner(7.))
         .hover(|style| style.bg(fg.opacity(0.10)))
         .active(|style| style.bg(fg.opacity(0.16)))
         .cursor_pointer();
@@ -143,30 +254,49 @@ pub(crate) fn switch(
     on: bool,
     message: Message,
     dispatch: &Dispatch,
-) -> Stateful<Div> {
+) -> impl IntoElement {
     let dispatch = dispatch.clone();
+    let id = id.into();
+    let accent = color(colors.accent);
+    let foreground = color(colors.foreground);
+    let off = gpui::Rgba {
+        a: foreground.a * 0.2,
+        ..foreground
+    };
     div()
-        .id(id)
-        .flex()
+        .id(id.clone())
+        .relative()
         .flex_none()
-        .items_center()
         .w(px(32.))
         .h(px(19.))
-        .px(px(1.))
-        .rounded_full()
-        .bg(if on {
-            color(colors.accent)
-        } else {
-            color(colors.foreground).opacity(0.2)
-        })
-        .when(on, |track| track.justify_end())
+        .rounded(crate::gpui_widgets::corner(9999.))
         .active(|style| style.opacity(0.8))
         .cursor_pointer()
-        .child(div().size(px(17.)).rounded_full().bg(gpui::rgb(0xffffff)))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             dispatch(message.clone(), window, cx);
         })
+        .with_spring(
+            id,
+            gpui::SpringAnimation::new(gpui::SpringConfig::new(500., 44.7, 1.)).to(on),
+            move |track, phase| {
+                let t = phase.clamp(0.0..=1.0);
+                let t = if pixel_look() {
+                    gpui::AnimationPhase((t.0 * 4.).round() / 4.)
+                } else {
+                    t
+                };
+                track.bg(t.interpolate(off, accent)).child(
+                    div()
+                        .absolute()
+                        .top(px(1.))
+                        .left(t.interpolate(px(1.), px(14.)))
+                        .size(px(17.))
+                        .rounded(crate::gpui_widgets::corner(9999.))
+                        .bg(gpui::rgb(0xffffff)),
+                )
+            },
+        )
 }
 pub(crate) fn muted(config: &Config, text: impl Into<gpui::SharedString>) -> Div {
     div()
@@ -175,9 +305,9 @@ pub(crate) fn muted(config: &Config, text: impl Into<gpui::SharedString>) -> Div
         .child(text.into())
 }
 pub(crate) fn module(config: &Config) -> Div {
-    div()
+    frame(div())
         .p(px(8.))
-        .rounded(px(12.))
+        .rounded(crate::gpui_widgets::corner(12.))
         .bg(color(config.colors.foreground).opacity(0.09))
 }
 pub(crate) fn button(
@@ -194,7 +324,7 @@ pub(crate) fn button(
         .justify_center()
         .px(px(6.))
         .py(px(3.))
-        .rounded(px(8.))
+        .rounded(crate::gpui_widgets::corner(8.))
         .bg(gpui::rgba(0xffffff0a))
         .hover(|style| style.opacity(0.92))
         .active(|style| style.opacity(0.75))
@@ -213,7 +343,7 @@ pub(crate) fn visualizer(app: &Shell, count: usize, width: f32, height: f32) -> 
                 div()
                     .w(px(width))
                     .h(px((value * height).max(2.)))
-                    .rounded(px(2.))
+                    .rounded(crate::gpui_widgets::corner(2.))
                     .bg(color(app.config.colors.accent))
             }),
     )
@@ -236,7 +366,7 @@ pub(crate) fn bar_button(
         .gap(px(5.))
         .px(px(8.))
         .h(px((app.config.bar.height as f32 - 6.).max(12.)))
-        .rounded(px(5.))
+        .rounded(crate::gpui_widgets::corner(5.))
         .when(open, |item| item.bg(fg.opacity(0.18)))
         .hover(|style| style.bg(fg.opacity(0.18)))
         .active(|style| style.bg(fg.opacity(0.26)))
@@ -404,7 +534,7 @@ pub(crate) fn bar_widget(
             let lead = match art {
                 Some(source) => img(source)
                     .size(px((c.bar.height as f32 - 12.).max(12.)))
-                    .rounded(px(4.))
+                    .rounded(crate::gpui_widgets::corner(4.))
                     .into_any_element(),
                 None => icon(c, "music_note", size * 0.9).into_any_element(),
             };
@@ -438,7 +568,7 @@ pub(crate) fn bar_widget(
                     .id(format!("tray:{}", item.key))
                     .px(px(5.))
                     .py(px(3.))
-                    .rounded(px(5.))
+                    .rounded(crate::gpui_widgets::corner(5.))
                     .hover(|style| style.bg(fg.opacity(0.18)))
                     .active(|style| style.bg(fg.opacity(0.26)))
                     .cursor_pointer()

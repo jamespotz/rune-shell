@@ -73,34 +73,73 @@ impl Render for Overlay {
                 .w(px(crate::status::OSD_W as f32))
                 .h(px(crate::status::OSD_H as f32))
                 .p(px(12.))
-                .child({
+                .when(crate::gpui_widgets::pixel_look(), |osd| {
                     let fill = color(app.config.colors.foreground);
-                    div()
-                        .relative()
-                        .flex_1()
-                        .h(px(24.))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .bg(fill.opacity(0.18))
+                    let bar = if muted { fill.opacity(0.45) } else { fill };
+                    osd.gap(px(8.))
+                        .text_color(fill)
+                        .child(icon(&app.config, glyph, 16.))
                         .child(
                             div()
-                                .absolute()
-                                .left_0()
-                                .top_0()
-                                .h_full()
-                                .min_w(px(24.))
-                                .w(gpui::relative(value / 100.))
-                                .rounded_full()
-                                .bg(if muted { fill.opacity(0.45) } else { fill }),
+                                .relative()
+                                .flex_1()
+                                .h(px(10.))
+                                .border_1()
+                                .border_color(gpui::rgba(0x8080807a))
+                                .bg(fill.opacity(0.08))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(1.))
+                                        .top(px(1.))
+                                        .bottom(px(1.))
+                                        .w(gpui::relative(value / 100.))
+                                        .map(|level| crate::gpui_widgets::fill(level, bar)),
+                                ),
                         )
                         .child(
-                            icon(&app.config, glyph, 16.)
-                                .absolute()
-                                .left(px(5.))
-                                .top(px(3.))
-                                .line_height(px(18.))
-                                .text_color(color(app.config.colors.background)),
+                            div()
+                                .min_w(px(24.))
+                                .flex()
+                                .justify_end()
+                                .child(format!("{value:.0}")),
                         )
+                })
+                .when(!crate::gpui_widgets::pixel_look(), |osd| {
+                    osd.child({
+                        let fill = color(app.config.colors.foreground);
+                        div()
+                            .relative()
+                            .flex_1()
+                            .h(px(24.))
+                            .rounded(crate::gpui_widgets::corner(9999.))
+                            .overflow_hidden()
+                            .bg(fill.opacity(0.18))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .h_full()
+                                    .min_w(px(24.))
+                                    .w(gpui::relative(value / 100.))
+                                    .rounded(crate::gpui_widgets::corner(9999.))
+                                    .map(|bar| {
+                                        crate::gpui_widgets::fill(
+                                            bar,
+                                            if muted { fill.opacity(0.45) } else { fill },
+                                        )
+                                    }),
+                            )
+                            .child(
+                                icon(&app.config, glyph, 16.)
+                                    .absolute()
+                                    .left(px(5.))
+                                    .top(px(3.))
+                                    .line_height(px(18.))
+                                    .text_color(color(app.config.colors.background)),
+                            )
+                    })
                 })
                 .into_any_element()
             }
@@ -122,7 +161,7 @@ impl Render for Overlay {
                     .relative()
                     .size_full()
                     .text_color(color(app.config.colors.foreground))
-                    .font_family(app.config.bar.font.clone())
+                    .font_family(crate::gpui_widgets::text_font(&app.config))
                     .on_hover(move |hovered, window, cx| {
                         dispatch(Message::PopupHover(*hovered), window, cx)
                     });
@@ -148,7 +187,7 @@ impl Render for Overlay {
                     } else {
                         div()
                             .size_full()
-                            .rounded(px(14.))
+                            .rounded(crate::gpui_widgets::corner(14.))
                             .bg(color(app.config.colors.background))
                             .border_1()
                             .border_color(color(app.config.colors.foreground).opacity(0.12))

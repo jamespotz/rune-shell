@@ -131,6 +131,11 @@ pub enum Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Num {
     Height,
+    Width,
+    Radius,
+    MarginTop,
+    MarginX,
+    Gap,
     Padding,
     Spacing,
     FontSize,
@@ -189,6 +194,8 @@ pub enum Msg {
     Remove(Section, usize),
     Add(Section, Widget),
     Source(ThemeSource),
+    Look(crate::config::Look),
+    PixelFont(crate::config::PixelFont),
     Preset(String),
     Scheme(Variant),
     ApplyTheme,
@@ -241,7 +248,8 @@ pub struct State {
     pub(crate) page_search: String,
 }
 
-static PRESETS: LazyLock<Vec<Palette>> = LazyLock::new(theme::presets);
+static PRESETS: LazyLock<[Vec<Palette>; 2]> =
+    LazyLock::new(|| [theme::presets_for(false), theme::presets_for(true)]);
 
 impl State {
     /// Applies `msg` to `config`; returns daemon work it needs.
@@ -362,6 +370,8 @@ impl State {
                     return Some(Request::ApplyTheme);
                 }
             }
+            Msg::Look(look) => config.bar.look = look,
+            Msg::PixelFont(font) => config.bar.pixel_font = font,
             Msg::Source(source) => {
                 config.theme.source = source;
                 return Some(Request::ApplyTheme);
@@ -485,6 +495,11 @@ fn set(slot: &mut String, value: &str) -> bool {
 fn set_num(config: &mut Config, num: Num, v: f32) {
     match num {
         Num::Height => config.bar.height = v.round() as u32,
+        Num::Width => config.bar.width = v.round() as u32,
+        Num::Radius => config.bar.radius = v,
+        Num::MarginTop => config.bar.margin_top = v.round() as u32,
+        Num::MarginX => config.bar.margin_x = v.round() as u32,
+        Num::Gap => config.bar.gap = v.round() as u32,
         Num::Padding => config.bar.padding = v,
         Num::Spacing => config.bar.spacing = v,
         Num::FontSize => config.bar.font_size = v,

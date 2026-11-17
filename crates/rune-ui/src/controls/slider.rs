@@ -89,7 +89,12 @@ impl Render for Slider {
         };
         let entity = cx.entity();
         let drawing = entity.clone();
-        let height = if self.pill.is_some() { 24. } else { 20. };
+        let pixel = crate::gpui_widgets::pixel_look();
+        let height = match (&self.pill, pixel) {
+            (Some(_), true) => 10.,
+            (Some(_), false) => 24.,
+            (None, _) => 20.,
+        };
         let mut slider = div()
             .id("slider")
             .w_full()
@@ -104,8 +109,21 @@ impl Render for Slider {
                 }),
             );
         slider = match &self.pill {
+            Some(pill) if pixel => slider
+                .border_1()
+                .border_color(gpui::rgba(0x8080807a))
+                .bg(pill.fill.opacity(0.08))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(1.))
+                        .top(px(1.))
+                        .bottom(px(1.))
+                        .w(gpui::relative(fraction))
+                        .map(|bar| crate::gpui_widgets::fill(bar, pill.fill)),
+                ),
             Some(pill) => slider
-                .rounded_full()
+                .rounded(crate::gpui_widgets::corner(9999.))
                 .overflow_hidden()
                 .bg(pill.fill.opacity(0.18))
                 .child(
@@ -116,8 +134,8 @@ impl Render for Slider {
                         .h_full()
                         .min_w(px(height))
                         .w(gpui::relative(fraction))
-                        .rounded_full()
-                        .bg(pill.fill),
+                        .rounded(crate::gpui_widgets::corner(9999.))
+                        .map(|bar| crate::gpui_widgets::fill(bar, pill.fill)),
                 )
                 .child(
                     div()
@@ -138,7 +156,7 @@ impl Render for Slider {
                         .right_0()
                         .top(px(7.))
                         .h(px(6.))
-                        .rounded_full()
+                        .rounded(crate::gpui_widgets::corner(9999.))
                         .bg(self.accent.opacity(0.2)),
                 )
                 .child(
@@ -148,8 +166,8 @@ impl Render for Slider {
                         .top(px(7.))
                         .h(px(6.))
                         .w(gpui::relative(fraction))
-                        .rounded_full()
-                        .bg(self.accent),
+                        .rounded(crate::gpui_widgets::corner(9999.))
+                        .map(|bar| crate::gpui_widgets::fill(bar, self.accent)),
                 )
                 .child(
                     div()
@@ -158,13 +176,13 @@ impl Render for Slider {
                         .ml(px(-5.))
                         .top(px(5.))
                         .size(px(10.))
-                        .rounded_full()
+                        .rounded(crate::gpui_widgets::corner(9999.))
                         .bg(self.accent)
                         .border_1()
                         .border_color(gpui::rgba(0xffffff80)),
                 ),
         };
-        slider.child(
+        let track = slider.child(
             canvas(
                 move |bounds, _, cx| {
                     drawing.update(cx, |this, _| this.bounds = Some(bounds));
@@ -194,7 +212,31 @@ impl Render for Slider {
                 },
             )
             .size_full(),
-        )
+        );
+        match self.pill.as_ref().filter(|_| pixel) {
+            Some(pill) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .w_full()
+                .text_color(pill.fill)
+                .child(
+                    div()
+                        .font_family(pill.font.clone())
+                        .text_size(px(16.))
+                        .child(pill.glyph.clone()),
+                )
+                .child(div().flex_1().child(track))
+                .child(
+                    div()
+                        .min_w(px(24.))
+                        .flex()
+                        .justify_end()
+                        .child(format!("{:.0}", self.value)),
+                )
+                .into_any_element(),
+            None => track.into_any_element(),
+        }
     }
 }
 

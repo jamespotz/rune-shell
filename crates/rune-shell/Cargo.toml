@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+libc = "0.2"
 notify = "8"
 rune-services = { version = "0.1.0", path = "../rune-services" }
 rune-ui = { version = "0.1.0", path = "../rune-ui" }

@@ -759,7 +759,7 @@ impl Render for TextInput {
         let line_height = (self.text_size * 1.4).round();
         div()
             .id("text-input")
-            .rounded(px(6.))
+            .rounded(crate::gpui_widgets::corner(6.))
             .border_1()
             .border_color(gpui::transparent_black())
             .focus(|style| style.border_color(foreground.opacity(0.5)))
