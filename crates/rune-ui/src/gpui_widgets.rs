@@ -525,6 +525,15 @@ pub(crate) fn bar_widget(
             dispatch,
         )
         .into_any_element(),
+        Widget::Capture => bar_button(
+            app,
+            widget,
+            id,
+            glyph("photo_camera"),
+            toggle(Panel::Capture),
+            dispatch,
+        )
+        .into_any_element(),
         Widget::Media => {
             let media = app.snapshot.media.as_ref()?;
             let art = media

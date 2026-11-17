@@ -36,8 +36,15 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
         Widget::QuickSettings => Panel::Quick,
         Widget::Media => Panel::Media,
         Widget::Power => Panel::Power,
+        Widget::Capture => Panel::Capture,
         _ => return None,
     })
+}
+
+pub(crate) fn bar_has(bar: &crate::config::BarConfig, widget: crate::config::Widget) -> bool {
+    [&bar.left, &bar.center, &bar.right]
+        .iter()
+        .any(|section| section.contains(&widget))
 }
 
 pub(crate) fn media_label(media: &rune_services::media::Media, max_chars: usize) -> String {
@@ -63,6 +70,16 @@ pub(crate) fn mix(a: Color, b: Color, t: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_widget_opens_capture_panel_and_is_found_in_any_section() {
+        use crate::{Panel, config::Widget};
+        assert_eq!(widget_panel(Widget::Capture), Some(Panel::Capture));
+        let mut bar = Config::default().bar;
+        assert!(!bar_has(&bar, Widget::Capture));
+        bar.center.push(Widget::Capture);
+        assert!(bar_has(&bar, Widget::Capture));
+    }
     use rune_services::hyprland::Workspace;
 
     #[test]

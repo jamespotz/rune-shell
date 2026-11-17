@@ -85,10 +85,12 @@ pub enum Widget {
     QuickSettings,
     /// Opens the power menu.
     Power,
+    /// Screenshots, recording and text capture; the recording timer while recording.
+    Capture,
 }
 
 impl Widget {
-    pub const ALL: [Widget; 15] = [
+    pub const ALL: [Widget; 16] = [
         Widget::Workspaces,
         Widget::WindowTitle,
         Widget::Clock,
@@ -103,6 +105,7 @@ impl Widget {
         Widget::Stats,
         Widget::QuickSettings,
         Widget::Power,
+        Widget::Capture,
         Widget::Settings,
     ];
 }
@@ -125,6 +128,7 @@ impl std::fmt::Display for Widget {
             Widget::Stats => "System stats",
             Widget::QuickSettings => "Quick settings",
             Widget::Power => "Power menu",
+            Widget::Capture => "Capture",
         })
     }
 }
@@ -564,6 +568,12 @@ impl Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_widget_parses() {
+        let c = Config::parse("[bar]\nright = [\"capture\"]").unwrap();
+        assert_eq!(c.bar.right, [Widget::Capture]);
+    }
 
     #[test]
     fn look_parses_and_defaults_to_glass() {
