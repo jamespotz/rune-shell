@@ -591,6 +591,348 @@ fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
         .child(list)
         .into_any_element()
 }
+/// A bar item being dragged: from a section slot, or new from the shelf.
+struct DraggedWidget {
+    widget: Widget,
+    from: Option<(Section, usize)>,
+}
+struct WidgetGhost {
+    widget: Widget,
+    font: gpui::SharedString,
+    colors: crate::config::Colors,
+}
+impl Render for WidgetGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        crate::gpui_widgets::frame(row())
+            .gap(px(8.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(crate::gpui_widgets::corner(7.))
+            .bg(color(self.colors.background))
+            .text_color(color(self.colors.foreground))
+            .shadow_lg()
+            .child(
+                div()
+                    .font_family(self.font.clone())
+                    .text_size(px(16.))
+                    .child(widget_glyph(self.widget)),
+            )
+            .child(self.widget.to_string())
+    }
+}
+fn widget_glyph(widget: Widget) -> &'static str {
+    match widget {
+        Widget::Workspaces => "grid_view",
+        Widget::WindowTitle => "web_asset",
+        Widget::Clock => "schedule",
+        Widget::Media => "music_note",
+        Widget::Notifications => "notifications",
+        Widget::Tray => "apps",
+        Widget::Weather => "partly_cloudy_day",
+        Widget::Bluetooth => "bluetooth",
+        Widget::Volume => "volume_up",
+        Widget::Network => "wifi",
+        Widget::Battery => "battery_5_bar",
+        Widget::Stats => "memory",
+        Widget::QuickSettings => "toggle_on",
+        Widget::Power => "power_settings_new",
+        Widget::Capture => "photo_camera",
+        Widget::Settings => "settings",
+    }
+}
+const SECTIONS: [(&str, Section); 3] = [
+    ("Left", Section::Left),
+    ("Center", Section::Center),
+    ("Right", Section::Right),
+];
+fn section_items(c: &Config, section: Section) -> &[Widget] {
+    match section {
+        Section::Left => &c.bar.left,
+        Section::Center => &c.bar.center,
+        Section::Right => &c.bar.right,
+    }
+}
+/// Mock screen showing the bar's shape, spacing and items as configured.
+/// Heights are drawn 1:1; widths are scaled from the settings window's monitor.
+fn bar_preview(c: &Config, window: &Window, cx: &gpui::App) -> AnyElement {
+    let screen = window
+        .display(cx)
+        .map(|display| f32::from(display.bounds().size.width))
+        .filter(|width| *width > 0.)
+        .unwrap_or(2560.);
+    let side = (c.bar.margin_x as f32 / screen).min(0.5);
+    let fraction = match c.bar.width {
+        0 => 1. - 2. * side,
+        width => (width as f32 / screen).min(1. - 2. * side),
+    };
+    let radius = crate::gpui_widgets::corner(c.bar.radius);
+    let height = c.bar.height as f32;
+    let top = c.bar.margin_top as f32;
+    let glyph_size = (height * 0.5).clamp(10., 20.);
+    let item = |widget: Widget| -> AnyElement {
+        let glyph = |name: &str| crate::gpui_widgets::icon(c, name, glyph_size);
+        match widget {
+            Widget::Workspaces => row()
+                .gap(px(4.))
+                .children((0..c.workspaces.min.clamp(1, 10)).map(|index| {
+                    div()
+                        .h(px(6.))
+                        .w(px(if index == 0 { 14. } else { 6. }))
+                        .rounded(crate::gpui_widgets::corner(3.))
+                        .bg(color(c.colors.foreground).opacity(if index == 0 { 1. } else { 0.4 }))
+                }))
+                .into_any_element(),
+            Widget::Clock if crate::config::valid_clock_format(&c.clock.format) => row()
+                .gap(px(4.))
+                .when(!c.clock.icon.is_empty(), |line| {
+                    line.child(glyph(&c.clock.icon))
+                })
+                .child(chrono::Local::now().format(&c.clock.format).to_string())
+                .into_any_element(),
+            Widget::WindowTitle => div()
+                .text_color(color(c.colors.muted))
+                .child(crate::settings::truncate(
+                    "Firefox — Rune Shell",
+                    c.window_title.max_chars,
+                ))
+                .into_any_element(),
+            widget => glyph(widget_glyph(widget)).into_any_element(),
+        }
+    };
+    let section = |section: Section| {
+        row()
+            .gap(px(c.bar.spacing))
+            .flex_none()
+            .children(section_items(c, section).iter().map(|&widget| item(widget)))
+    };
+    let mut bar = crate::gpui_widgets::frame(row())
+        .absolute()
+        .top(px(top))
+        .left(gpui::relative((1. - fraction) / 2.))
+        .w(gpui::relative(fraction))
+        .h(px(height))
+        .justify_between()
+        .px(px(c.bar.padding))
+        .overflow_hidden()
+        .bg(color(c.colors.background))
+        .text_color(color(c.colors.foreground))
+        .text_size(px(c.bar.font_size.clamp(9., 14.)))
+        .child(section(Section::Left))
+        .child(section(Section::Right))
+        .child(
+            row()
+                .absolute()
+                .inset_0()
+                .justify_center()
+                .child(section(Section::Center)),
+        );
+    bar = if top == 0. {
+        bar.rounded_b(radius)
+    } else {
+        bar.rounded(radius)
+    };
+    let windows_top = top + height + c.bar.gap as f32;
+    crate::gpui_widgets::frame(div())
+        .relative()
+        .w_full()
+        .h(px(150.))
+        .overflow_hidden()
+        .rounded(crate::gpui_widgets::corner(10.))
+        .bg(gpui::linear_gradient(
+            135.,
+            gpui::linear_color_stop(color(c.colors.accent).opacity(0.45), 0.),
+            gpui::linear_color_stop(color(c.colors.background), 1.),
+        ))
+        .child(
+            div()
+                .absolute()
+                .top(px(windows_top))
+                .left(px(14.))
+                .right(px(14.))
+                .bottom(px(14.))
+                .rounded(crate::gpui_widgets::corner(8.))
+                .border_1()
+                .border_color(gpui::rgba(0xffffff24))
+                .bg(gpui::rgba(0xffffff0d)),
+        )
+        .child(bar)
+        .into_any_element()
+}
+impl SettingsView {
+    /// Left, Center and Right columns of draggable items, then a shelf of every item.
+    fn bar_layout(&self, c: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let accent = color(c.colors.accent);
+        let ghost = {
+            let font = self.icon_font.clone();
+            let colors = self.colors;
+            move |drag: &DraggedWidget,
+                  _: gpui::Point<gpui::Pixels>,
+                  _: &mut Window,
+                  cx: &mut gpui::App| {
+                cx.new(|_| WidgetGhost {
+                    widget: drag.widget,
+                    font: font.clone(),
+                    colors,
+                })
+            }
+        };
+        let drop_at = |section: Section, at: usize| {
+            let dispatch = self.dispatch.clone();
+            move |drag: &DraggedWidget, window: &mut Window, cx: &mut gpui::App| {
+                let msg = match drag.from {
+                    Some(from) => Msg::Place(from, (section, at)),
+                    None => Msg::Insert(section, at, drag.widget),
+                };
+                dispatch(crate::Message::Settings(msg), window, cx)
+            }
+        };
+        let mut lanes = row().w_full().items_start().gap(px(8.));
+        for (label, section) in SECTIONS {
+            let list = section_items(c, section);
+            let targeted = section == self.add_target;
+            let mut lane = column()
+                .id(format!("lane:{section:?}"))
+                .flex_1()
+                .min_w_0()
+                .min_h(px(120.))
+                .gap(px(6.))
+                .p(px(6.))
+                .rounded(crate::gpui_widgets::corner(8.))
+                .bg(gpui::rgba(0x0000002e))
+                .border_1()
+                .border_dashed()
+                .border_color(if targeted {
+                    gpui::rgba(0xffffff40)
+                } else {
+                    gpui::rgba(0x00000000)
+                })
+                .drag_over::<DraggedWidget>(move |style, _, _, _| {
+                    style.border_color(accent).bg(accent.opacity(0.12))
+                })
+                .on_drop(drop_at(section, usize::MAX))
+                .child(
+                    row()
+                        .id(format!("lane-head:{section:?}"))
+                        .w_full()
+                        .justify_between()
+                        .px(px(2.))
+                        .text_size(px(11.))
+                        .text_color(color(c.colors.muted))
+                        .cursor_pointer()
+                        .child(label)
+                        .child(list.len().to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_target = section;
+                            cx.notify();
+                        })),
+                );
+            for (index, &widget) in list.iter().enumerate() {
+                lane = lane.child(
+                    crate::gpui_widgets::frame(row())
+                        .id(format!("chip:{section:?}:{index}:{widget:?}"))
+                        .w_full()
+                        .gap(px(6.))
+                        .pl(px(4.))
+                        .pr(px(2.))
+                        .py(px(2.))
+                        .rounded(crate::gpui_widgets::corner(7.))
+                        .bg(gpui::rgba(0xffffff12))
+                        .hover(|style| style.bg(gpui::rgba(0xffffff1c)))
+                        .active(|style| style.opacity(0.8))
+                        .cursor(gpui::CursorStyle::OpenHand)
+                        .drag_over::<DraggedWidget>(move |style, _, _, _| {
+                            style.border_t_2().border_color(accent)
+                        })
+                        .on_drag(
+                            DraggedWidget {
+                                widget,
+                                from: Some((section, index)),
+                            },
+                            ghost.clone(),
+                        )
+                        .on_drop(drop_at(section, index))
+                        .child(crate::gpui_widgets::icon(c, widget_glyph(widget), 16.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(widget.to_string()),
+                        )
+                        .child(self.glyph(
+                            format!("remove:{section:?}:{index}"),
+                            "close",
+                            Msg::Remove(section, index),
+                            true,
+                        )),
+                );
+            }
+            if list.is_empty() {
+                lane = lane.child(
+                    div()
+                        .w_full()
+                        .py(px(16.))
+                        .text_center()
+                        .text_size(px(11.))
+                        .text_color(color(c.colors.muted))
+                        .child("Drop items here"),
+                );
+            }
+            lanes = lanes.child(lane);
+        }
+        let mut shelf = row().w_full().flex_wrap().gap(px(6.));
+        for widget in Widget::ALL {
+            let used = SECTIONS
+                .iter()
+                .any(|&(_, section)| section_items(c, section).contains(&widget));
+            let dispatch = self.dispatch.clone();
+            let target = self.add_target;
+            shelf = shelf.child(
+                crate::gpui_widgets::frame(row())
+                    .id(format!("shelf:{widget:?}"))
+                    .gap(px(2.))
+                    .pl(px(4.))
+                    .pr(px(8.))
+                    .py(px(2.))
+                    .rounded(crate::gpui_widgets::corner(9999.))
+                    .text_size(px(11.))
+                    .bg(gpui::rgba(0xffffff12))
+                    .when(used, |chip| chip.opacity(0.5))
+                    .hover(|style| style.bg(gpui::rgba(0xffffff24)))
+                    .active(|style| style.opacity(0.8))
+                    .cursor(gpui::CursorStyle::OpenHand)
+                    .on_drag(DraggedWidget { widget, from: None }, ghost.clone())
+                    .child(crate::gpui_widgets::icon(c, "add", 13.))
+                    .child(widget.to_string())
+                    .on_click(move |_, window, cx| {
+                        dispatch(
+                            crate::Message::Settings(Msg::Add(target, widget)),
+                            window,
+                            cx,
+                        )
+                    }),
+            );
+        }
+        let target = SECTIONS
+            .iter()
+            .find(|&&(_, section)| section == self.add_target)
+            .map_or("Right", |&(label, _)| label);
+        column()
+            .w_full()
+            .gap(px(10.))
+            .child(lanes)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(color(c.colors.muted))
+                    .child(format!(
+                        "Drag items to reorder or move them. Click an item below to add it to {target}, or click a column title to change where it goes."
+                    )),
+            )
+            .child(shelf)
+            .into_any_element()
+    }
+}
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let app = self.shell.read(cx);
@@ -722,34 +1064,61 @@ impl Render for SettingsView {
                 ));
             }
             Page::Bar => {
+                let shapes = BarShape::ALL
+                    .into_iter()
+                    .map(|shape| {
+                        (
+                            shape.label().to_owned(),
+                            BarShape::of(&c.bar) == Some(shape),
+                            Msg::Shape(shape),
+                        )
+                    })
+                    .collect();
                 items.push(hero(
                     &c,
                     Page::Bar,
-                    "Size, layout and what appears in the menu bar.",
-                    None,
+                    "Drag items to arrange them. Changes apply instantly.",
+                    Some(self.segmented("bar-shape", shapes)),
                 ));
+                items.push(bar_preview(&c, window, cx));
+                items.push(group("Layout", vec![self.bar_layout(&c, cx)]));
+                let mut shape = vec![
+                    number!(Height, "Height", c.bar.height, 24., 56., 1.),
+                    number!(
+                        Width,
+                        "Width (0 fills the screen)",
+                        c.bar.width,
+                        0.,
+                        3840.,
+                        10.
+                    ),
+                ];
+                // The pixel look forces square corners, so rounding would do nothing.
+                if !crate::gpui_widgets::pixel_look() {
+                    shape.push(number!(
+                        Radius,
+                        "Corner rounding",
+                        c.bar.radius,
+                        0.,
+                        28.,
+                        1.
+                    ));
+                }
+                shape.push(number!(
+                    MarginTop,
+                    "Gap above (0 attaches it to the top edge as a notch)",
+                    c.bar.margin_top,
+                    0.,
+                    32.,
+                    1.
+                ));
+                items.push(group("Shape", shape));
                 items.push(group(
-                    "Size",
+                    "Spacing",
                     vec![
-                        number!(Height, "Height", c.bar.height, 24., 56., 1.),
-                        number!(
-                            Width,
-                            "Width (0 fills the screen)",
-                            c.bar.width,
-                            0.,
-                            3840.,
-                            10.
-                        ),
-                        number!(Radius, "Corner rounding", c.bar.radius, 0., 28., 1.),
-                        number!(
-                            MarginTop,
-                            "Gap above (0 attaches it to the top edge as a notch)",
-                            c.bar.margin_top,
-                            0.,
-                            32.,
-                            1.
-                        ),
                         number!(MarginX, "Gap at the sides", c.bar.margin_x, 0., 400., 1.),
+                        number!(Padding, "Side padding", c.bar.padding, 0., 32., 1.),
+                        number!(Spacing, "Space between items", c.bar.spacing, 0., 32., 1.),
                         number!(
                             Gap,
                             "Gap below (space between the menu bar and windows)",
@@ -758,111 +1127,6 @@ impl Render for SettingsView {
                             32.,
                             1.
                         ),
-                        number!(Padding, "Side padding", c.bar.padding, 0., 32., 1.),
-                        number!(Spacing, "Space between items", c.bar.spacing, 0., 32., 1.),
-                    ],
-                ));
-                for (label, section, list) in [
-                    ("Left", Section::Left, &c.bar.left),
-                    ("Center", Section::Center, &c.bar.center),
-                    ("Right", Section::Right, &c.bar.right),
-                ] {
-                    let mut rows = Vec::new();
-                    for (i, widget) in list.iter().enumerate() {
-                        rows.push(
-                            row()
-                                .w_full()
-                                .gap(px(4.))
-                                .child(div().flex_1().child(widget.to_string()))
-                                .child(self.glyph(
-                                    format!("left:{section:?}:{i}"),
-                                    "arrow_upward",
-                                    Msg::Move(section, i, -1),
-                                    false,
-                                ))
-                                .child(self.glyph(
-                                    format!("right:{section:?}:{i}"),
-                                    "arrow_downward",
-                                    Msg::Move(section, i, 1),
-                                    false,
-                                ))
-                                .child(self.glyph(
-                                    format!("remove:{section:?}:{i}"),
-                                    "remove_circle",
-                                    Msg::Remove(section, i),
-                                    true,
-                                ))
-                                .into_any_element(),
-                        );
-                    }
-                    if rows.is_empty() {
-                        rows.push(crate::gpui_widgets::muted(&c, "Empty").into_any_element());
-                    }
-                    items.push(group(label, rows));
-                }
-                let target = self.add_target;
-                let mut targets = row()
-                    .gap(px(2.))
-                    .p(px(2.))
-                    .rounded(crate::gpui_widgets::corner(7.))
-                    .bg(gpui::rgba(0xffffff12));
-                for (label, section) in [
-                    ("Left", Section::Left),
-                    ("Center", Section::Center),
-                    ("Right", Section::Right),
-                ] {
-                    let selected = section == target;
-                    targets = targets.child(
-                        div()
-                            .id(format!("add-target:{section:?}"))
-                            .px(px(12.))
-                            .py(px(3.))
-                            .rounded(crate::gpui_widgets::corner(5.))
-                            .text_size(px(12.))
-                            .when(selected, |segment| {
-                                segment
-                                    .bg(gpui::rgba(0xffffff2e))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                            })
-                            .cursor_pointer()
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_target = section;
-                                cx.notify();
-                            })),
-                    );
-                }
-                let mut adds = row().w_full().flex_wrap().gap(px(6.));
-                for widget in Widget::ALL {
-                    let dispatch = self.dispatch.clone();
-                    adds = adds.child(
-                        row()
-                            .id(format!("add:{widget}"))
-                            .gap(px(2.))
-                            .pl(px(4.))
-                            .pr(px(8.))
-                            .py(px(2.))
-                            .rounded(crate::gpui_widgets::corner(9999.))
-                            .text_size(px(11.))
-                            .bg(gpui::rgba(0xffffff12))
-                            .hover(|style| style.bg(gpui::rgba(0xffffff24)))
-                            .cursor_pointer()
-                            .child(crate::gpui_widgets::icon(&c, "add", 13.))
-                            .child(widget.to_string())
-                            .on_click(move |_, window, cx| {
-                                dispatch(
-                                    crate::Message::Settings(Msg::Add(target, widget)),
-                                    window,
-                                    cx,
-                                )
-                            }),
-                    );
-                }
-                items.push(group(
-                    "Add an Item",
-                    vec![
-                        self.labeled("Add to", targets.into_any_element()),
-                        adds.into_any_element(),
                     ],
                 ));
                 items.push(group(

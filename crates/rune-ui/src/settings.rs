@@ -183,6 +183,45 @@ pub enum Section {
     Right,
 }
 
+/// One-click bar shapes; any other combination of the fields shows as custom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarShape {
+    Notch,
+    Floating,
+    Edge,
+}
+
+impl BarShape {
+    pub const ALL: [BarShape; 3] = [BarShape::Notch, BarShape::Floating, BarShape::Edge];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BarShape::Notch => "Notch",
+            BarShape::Floating => "Floating",
+            BarShape::Edge => "Edge",
+        }
+    }
+
+    /// `(margin_top, margin_x, width, radius)`
+    fn fields(self) -> (u32, u32, u32, f32) {
+        match self {
+            BarShape::Notch => (0, 0, 1200, 14.),
+            BarShape::Floating => (8, 12, 0, 12.),
+            BarShape::Edge => (0, 0, 0, 0.),
+        }
+    }
+
+    fn apply(self, bar: &mut crate::config::BarConfig) {
+        (bar.margin_top, bar.margin_x, bar.width, bar.radius) = self.fields();
+    }
+
+    pub fn of(bar: &crate::config::BarConfig) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|shape| shape.fields() == (bar.margin_top, bar.margin_x, bar.width, bar.radius))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Msg {
     Page(Page),
@@ -190,9 +229,13 @@ pub enum Msg {
     Text(Field, String),
     Num(Num, f32),
     Flag(Flag, bool),
-    Move(Section, usize, isize),
     Remove(Section, usize),
     Add(Section, Widget),
+    /// Drag result: move the widget at `from` to slot `to`, counted before it was lifted.
+    Place((Section, usize), (Section, usize)),
+    /// Drop a new widget at a slot; past the end appends.
+    Insert(Section, usize, Widget),
+    Shape(BarShape),
     Source(ThemeSource),
     Look(crate::config::Look),
     PixelFont(crate::config::PixelFont),
@@ -399,13 +442,6 @@ impl State {
                 config.wallpaper.current = path.display().to_string();
                 return Some(Request::SetWallpaper(path));
             }
-            Msg::Move(section, i, by) => {
-                let list = section_mut(config, section);
-                let j = i.checked_add_signed(by).filter(|&j| j < list.len());
-                if let Some(j) = j {
-                    list.swap(i, j);
-                }
-            }
             Msg::Remove(section, i) => {
                 let list = section_mut(config, section);
                 if i < list.len() {
@@ -413,6 +449,22 @@ impl State {
                 }
             }
             Msg::Add(section, w) => section_mut(config, section).push(w),
+            Msg::Place((from, index), (to, mut at)) => {
+                if index >= section_mut(config, from).len() {
+                    return None;
+                }
+                let widget = section_mut(config, from).remove(index);
+                if from == to && index < at {
+                    at -= 1;
+                }
+                let list = section_mut(config, to);
+                list.insert(at.min(list.len()), widget);
+            }
+            Msg::Insert(section, at, w) => {
+                let list = section_mut(config, section);
+                list.insert(at.min(list.len()), w);
+            }
+            Msg::Shape(shape) => shape.apply(&mut config.bar),
         }
         None
     }
@@ -708,13 +760,80 @@ mod tests {
         let mut state = State::default();
         let mut config = Config::default();
         config.bar.right = vec![Widget::Clock, Widget::Settings];
-        state.update(&mut config, Msg::Move(Section::Right, 0, 1));
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 0), (Section::Right, 2)),
+        );
         assert_eq!(config.bar.right, [Widget::Settings, Widget::Clock]);
-        state.update(&mut config, Msg::Move(Section::Right, 1, 1)); // past the end: no-op
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 1), (Section::Right, 9)),
+        );
         assert_eq!(config.bar.right, [Widget::Settings, Widget::Clock]);
         state.update(&mut config, Msg::Remove(Section::Right, 0));
         state.update(&mut config, Msg::Add(Section::Left, Widget::Clock));
         assert_eq!(config.bar.right, [Widget::Clock]);
         assert_eq!(config.bar.left, [Widget::Workspaces, Widget::Clock]);
+    }
+
+    #[test]
+    fn places_dragged_widgets_and_ignores_hostile_indices() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        config.bar.left = vec![Widget::Workspaces];
+        config.bar.right = vec![Widget::Clock, Widget::Battery, Widget::Power];
+        // Within a section, `at` is the slot before the drag lifted the item.
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 0), (Section::Right, 2)),
+        );
+        assert_eq!(
+            config.bar.right,
+            [Widget::Battery, Widget::Clock, Widget::Power]
+        );
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 2), (Section::Left, 0)),
+        );
+        assert_eq!(config.bar.left, [Widget::Power, Widget::Workspaces]);
+        assert_eq!(config.bar.right, [Widget::Battery, Widget::Clock]);
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 0), (Section::Center, usize::MAX)),
+        );
+        assert_eq!(config.bar.center.last(), Some(&Widget::Battery));
+        let before = config.bar.clone();
+        state.update(
+            &mut config,
+            Msg::Place((Section::Left, 99), (Section::Right, 0)),
+        );
+        assert_eq!(config.bar, before);
+        state.update(&mut config, Msg::Insert(Section::Left, 1, Widget::Stats));
+        state.update(
+            &mut config,
+            Msg::Insert(Section::Left, usize::MAX, Widget::Capture),
+        );
+        assert_eq!(
+            config.bar.left,
+            [
+                Widget::Power,
+                Widget::Stats,
+                Widget::Workspaces,
+                Widget::Capture
+            ]
+        );
+    }
+
+    #[test]
+    fn shape_presets_round_trip() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        assert_eq!(BarShape::of(&config.bar), Some(BarShape::Edge));
+        for shape in BarShape::ALL {
+            state.update(&mut config, Msg::Shape(shape));
+            assert_eq!(BarShape::of(&config.bar), Some(shape));
+        }
+        state.update(&mut config, Msg::Num(Num::Radius, 3.));
+        assert_eq!(BarShape::of(&config.bar), None);
     }
 }
