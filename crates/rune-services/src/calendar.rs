@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::{Notify, watch};
 use tracing::warn;
 
+use crate::notifications::{Notification, Urgency};
+
 const REFRESH: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 /// Expansion window around today.
 const PAST_DAYS: u64 = 45;
@@ -68,6 +70,58 @@ pub fn spawn(
         }
     });
     rx
+}
+
+/// Timed events whose reminder, `lead` before the start, is due at `now` and that have not started.
+pub fn due(events: &[Event], lead: Duration, now: DateTime<Local>) -> impl Iterator<Item = &Event> {
+    events
+        .iter()
+        .filter(move |e| !e.all_day && e.start - lead <= now && now < e.start)
+}
+
+/// Posts a notification `lead` minutes before each timed event; a lead of 0 turns reminders off.
+pub fn spawn_reminders(
+    events: watch::Receiver<State>,
+    lead: watch::Receiver<u32>,
+    post: impl Fn(Notification) -> bool + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let mut reminded: HashSet<(String, DateTime<Local>)> = HashSet::new();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let minutes = *lead.borrow();
+            if minutes == 0 {
+                continue;
+            }
+            let now = Local::now();
+            reminded.retain(|(_, start)| *start > now);
+            let state = events.borrow();
+            for event in due(&state.events, Duration::minutes(minutes.into()), now) {
+                if reminded.insert((event.title.clone(), event.start)) && !post(reminder(event)) {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn reminder(event: &Event) -> Notification {
+    let mut body = event.start.format("%H:%M").to_string();
+    if !event.location.is_empty() {
+        body = format!("{body} · {}", event.location);
+    }
+    Notification {
+        id: 0,
+        app_name: "Calendar".into(),
+        summary: event.title.clone(),
+        body,
+        image: None,
+        actions: Vec::new(),
+        urgency: Urgency::Normal,
+        time: Local::now(),
+        resident: false,
+    }
 }
 
 async fn fetch(url: &str) -> Result<String, String> {
@@ -537,6 +591,31 @@ pub fn meeting_link(texts: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reminders_fire_within_lead_before_start() {
+        let now = Local::now();
+        let event = |title: &str, minutes: i64, all_day: bool| Event {
+            title: title.into(),
+            start: now + Duration::minutes(minutes),
+            end: now + Duration::minutes(minutes + 30),
+            all_day,
+            location: String::new(),
+            meeting: None,
+            calendar: 0,
+        };
+        let events = [
+            event("started", -1, false),
+            event("soon", 5, false),
+            event("edge", 10, false),
+            event("later", 11, false),
+            event("holiday", 5, true),
+        ];
+        let titles: Vec<_> = due(&events, Duration::minutes(10), now)
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(titles, ["soon", "edge"]);
+    }
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()

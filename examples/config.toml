@@ -51,6 +51,7 @@ imperial = false          # °F and mph
 
 [calendar]                # ICS links; Google: calendar settings → "Secret address in iCal format"
 urls = []
+remind_minutes = 10       # notify this long before timed events; 0 turns reminders off
 
 [power]
 lock_command = "loginctl lock-session"   # e.g. "hyprlock"

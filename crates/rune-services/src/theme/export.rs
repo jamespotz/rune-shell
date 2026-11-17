@@ -289,7 +289,11 @@ pub fn apply(apps: &[App], p: &Palette, home: &Path, backup: &mut Backup) -> Vec
                 for c in &plan.reload {
                     let _ = Command::new(&c[0]).args(&c[1..]).status(); // fine if the app isn't running
                 }
-                report.push(format!("{}: done", app.label()));
+                let note = match app {
+                    App::Vivaldi => vivaldi_folder_note(home, &read),
+                    _ => None,
+                };
+                report.push(note.unwrap_or_else(|| format!("{}: done", app.label())));
             }
             Err(e) => report.push(format!("{}: {e}", app.label())),
         }
@@ -1029,6 +1033,23 @@ fn vivaldi(p: &Palette) -> String {
     s + "}\n"
 }
 
+/// Vivaldi only loads the folder set in Settings → Appearance → Custom UI Modifications.
+fn vivaldi_folder_note(home: &Path, read: &dyn Fn(&Path) -> String) -> Option<String> {
+    let cfg = home.join(".config/vivaldi");
+    let prefs: serde_json::Value =
+        serde_json::from_str(&read(&cfg.join("Default/Preferences"))).ok()?;
+    let folder = prefs
+        .pointer("/vivaldi/appearance/css_ui_mods_directory")?
+        .as_str()?;
+    let rune = cfg.join("rune");
+    (Path::new(folder) != rune).then(|| {
+        format!(
+            "Vivaldi: written, but Custom UI Modifications loads {folder}; set it to {} and restart Vivaldi",
+            rune.display()
+        )
+    })
+}
+
 fn kde_scheme(p: &Palette) -> String {
     let mut text = format!("# {HEADER}\n[General]\nName=Rune\n");
     for (section, key, value) in kde_keys(p).into_iter().skip(1) {
@@ -1040,6 +1061,20 @@ fn kde_scheme(p: &Palette) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vivaldi_note_names_the_wrong_folder() {
+        let home = Path::new("/home/u");
+        let prefs = |dir: &str| {
+            let text =
+                format!(r#"{{"vivaldi":{{"appearance":{{"css_ui_mods_directory":"{dir}"}}}}}}"#);
+            move |_: &Path| text.clone()
+        };
+        let note = vivaldi_folder_note(home, &prefs("/home/u/.config/vivaldi/helios"));
+        assert!(note.is_some_and(|n| n.contains("helios") && n.contains("/home/u/.config/vivaldi/rune")));
+        assert!(vivaldi_folder_note(home, &prefs("/home/u/.config/vivaldi/rune")).is_none());
+        assert!(vivaldi_folder_note(home, &|_: &Path| String::new()).is_none());
+    }
     use crate::theme::preset_named;
 
     #[test]

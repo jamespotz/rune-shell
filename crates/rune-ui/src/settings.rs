@@ -196,6 +196,7 @@ pub enum Msg {
     Source(ThemeSource),
     Look(crate::config::Look),
     PixelFont(crate::config::PixelFont),
+    RemindMinutes(u32),
     Preset(String),
     Scheme(Variant),
     ApplyTheme,
@@ -372,6 +373,7 @@ impl State {
             }
             Msg::Look(look) => config.bar.look = look,
             Msg::PixelFont(font) => config.bar.pixel_font = font,
+            Msg::RemindMinutes(minutes) => config.calendar.remind_minutes = minutes,
             Msg::Source(source) => {
                 config.theme.source = source;
                 return Some(Request::ApplyTheme);

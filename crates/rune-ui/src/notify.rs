@@ -1,40 +1,88 @@
 //! Notification stack geometry and text helpers.
+use crate::animation::Animation;
 use chrono::Local;
 use rune_services::notifications::Notification;
 #[cfg(test)]
 use rune_services::notifications::Urgency;
+use std::time::{Duration, Instant};
 
-/// Popup width, and the gap between toasts when fanned out.
-pub const WIDTH: f32 = 360.0;
-pub(crate) const GAP: f32 = 10.0;
-/// How much each older toast peeks out below the one in front when stacked.
-pub(crate) const PEEK: f32 = 14.0;
-/// Older toasts visible behind the front one when stacked.
-pub(crate) const BEHIND: usize = 2;
-/// Most toasts shown when fanned out.
-pub const MAX_SHOWN: usize = 5;
+/// Toast width, as in Sonner.
+pub const WIDTH: f32 = 356.0;
+/// Fixed toast height keeps the stack layout (and the surface size) predictable.
+pub(crate) const HEIGHT: f32 = 88.0;
+/// Offset between stacked toasts, and the gap between them when expanded.
+pub(crate) const GAP: f32 = 14.0;
+/// Toasts shown at once.
+pub const VISIBLE: usize = 3;
+/// Room around the stack for the close buttons and shadows.
+pub(crate) const PAD: f32 = 12.0;
 
-/// Fixed toast heights keep the stack layout (and the surface size) predictable.
-pub(crate) fn toast_height(n: &Notification) -> f32 {
-    if n.actions.iter().any(|(k, _)| k != "default") {
-        122.0
-    } else {
-        86.0
+/// Surface height for `popups` at expand progress `t` (0 stacked, 1 expanded).
+pub fn stack_height(popups: &[Notification], t: f32) -> f32 {
+    let shown = popups.len().min(VISIBLE) as f32;
+    if shown == 0.0 {
+        return 0.0;
+    }
+    HEIGHT + GAP * (shown - 1.0) + HEIGHT * (shown - 1.0) * t + 2.0 * PAD
+}
+
+/// A shown toast's entrance and its slot in the stack, both animated.
+#[derive(Debug, Clone)]
+pub(crate) struct Motion {
+    enter: Animation<bool>,
+    from: f32,
+    to: f32,
+    shift: Animation<bool>,
+    duration: Duration,
+}
+
+impl Motion {
+    pub fn new(slot: f32, duration: Duration, now: Instant) -> Self {
+        Self {
+            enter: Animation::new(false).duration(duration).go(true, now),
+            from: slot,
+            to: slot,
+            shift: Animation::new(true).duration(duration),
+            duration,
+        }
+    }
+
+    pub fn move_to(&mut self, slot: f32, now: Instant) {
+        if self.to == slot {
+            return;
+        }
+        self.from = self.depth(now);
+        self.to = slot;
+        self.shift = Animation::new(false).duration(self.duration).go(true, now);
+    }
+
+    /// Stack position: 0 is the front toast.
+    pub fn depth(&self, now: Instant) -> f32 {
+        self.shift.interpolate(self.from, self.to, now)
+    }
+
+    pub fn entered(&self, now: Instant) -> f32 {
+        self.enter.interpolate(0., 1., now)
+    }
+
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.enter.is_animating(now) || self.shift.is_animating(now)
     }
 }
 
-/// Surface height for `popups` at fan-out progress `t` (0 stacked, 1 fanned).
-pub fn stack_height(popups: &[Notification], t: f32) -> f32 {
-    let Some(front) = popups.first() else {
-        return 0.0;
-    };
-    let stacked =
-        toast_height(front) + PEEK * popups.len().min(BEHIND + 1).saturating_sub(1) as f32;
-    let shown = &popups[..popups.len().min(MAX_SHOWN)];
-    let fanned =
-        shown.iter().map(toast_height).sum::<f32>() + GAP * shown.len().saturating_sub(1) as f32;
-    stacked + (fanned - stacked) * t
+/// A toast that was closed and is animating out.
+#[derive(Debug, Clone)]
+pub(crate) struct Leaving {
+    pub notification: Notification,
+    pub depth: f32,
+    /// Horizontal drag offset when it was swiped away.
+    pub swipe: Option<f32>,
+    pub fade: Animation<bool>,
 }
+
+/// How far, or how fast in px/ms, a toast must be dragged to dismiss it.
+pub(crate) const SWIPE_DISTANCE: f32 = 45.0;
+pub(crate) const SWIPE_VELOCITY: f32 = 0.11;
 
 pub(crate) fn ago(n: &Notification) -> String {
     let mins = (Local::now() - n.time).num_minutes();
@@ -61,17 +109,14 @@ pub(crate) fn cut(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn n(actions: &[&str]) -> Notification {
+    fn n() -> Notification {
         Notification {
             id: 1,
             app_name: String::new(),
             summary: String::new(),
             body: String::new(),
             image: None,
-            actions: actions
-                .iter()
-                .map(|k| ((*k).to_owned(), (*k).to_owned()))
-                .collect(),
+            actions: Vec::new(),
             urgency: Urgency::Normal,
             time: Local::now(),
             resident: false,
@@ -81,28 +126,33 @@ mod tests {
     #[test]
     fn stack_heights() {
         assert_eq!(stack_height(&[], 1.0), 0.0);
-        let three = [n(&[]), n(&["reply"]), n(&[])];
+        let pad = 2.0 * PAD;
+        assert_eq!(stack_height(&[n()], 1.0), HEIGHT + pad);
+        let many: Vec<_> = (0..9).map(|_| n()).collect();
         assert_eq!(
-            stack_height(&three, 0.0),
-            86.0 + 2.0 * PEEK,
+            stack_height(&many, 0.0),
+            HEIGHT + 2.0 * GAP + pad,
             "stacked: front plus two peeks"
         );
         assert_eq!(
-            stack_height(&three, 1.0),
-            86.0 + 122.0 + 86.0 + 2.0 * GAP,
-            "fanned: every toast"
-        );
-        let many: Vec<_> = (0..9).map(|_| n(&["default"])).collect();
-        assert_eq!(
-            stack_height(&many, 0.0),
-            86.0 + 2.0 * PEEK,
-            "only two peek behind"
-        );
-        assert_eq!(
             stack_height(&many, 1.0),
-            5.0 * 86.0 + 4.0 * GAP,
-            "at most five fan out"
+            3.0 * HEIGHT + 2.0 * GAP + pad,
+            "expanded: three toasts"
         );
+    }
+
+    #[test]
+    fn motion_shifts_from_where_it_is() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(400);
+        let mut motion = Motion::new(0., duration, now);
+        assert_eq!(motion.entered(now), 0.);
+        motion.move_to(1., now);
+        assert_eq!(motion.depth(now), 0.);
+        let later = now + Duration::from_secs(2);
+        assert_eq!(motion.depth(later), 1.);
+        assert_eq!(motion.entered(later), 1.);
+        assert!(!motion.is_animating(later));
     }
 
     #[test]

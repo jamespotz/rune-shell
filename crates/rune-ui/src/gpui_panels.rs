@@ -1284,129 +1284,175 @@ pub(crate) fn notification(
     dispatch: &Dispatch,
     images: &mut Images,
 ) -> AnyElement {
+    let c = &app.config;
     let id = notification.id;
-    let close = button(
-        format!("dismiss-{id}"),
-        icon(&app.config, "close", 14.),
-        if center {
-            Message::NotifRemove(id)
-        } else {
-            Message::NotifDismiss(id)
-        },
-        dispatch,
-    )
-    .p_0()
-    .size(px(14.));
-    let header = row()
-        .h(px(14.))
-        .text_size(px(11.))
-        .line_height(px(14.))
-        .text_color(color(app.config.colors.muted))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(color(app.config.colors.foreground))
-                .child(notification.app_name.clone()),
+    let critical = notification.urgency == rune_services::notifications::Urgency::Critical;
+    let mut close = Some(
+        button(
+            format!("dismiss-{id}"),
+            icon(c, "close", 12.),
+            if center {
+                Message::NotifRemove(id)
+            } else {
+                Message::NotifDismiss(id)
+            },
+            dispatch,
         )
-        .child(crate::notify::ago(notification))
-        .child(close);
+        .p_0()
+        .size(px(20.))
+        .rounded(crate::gpui_widgets::corner(9999.))
+        .text_color(color(c.colors.foreground))
+        .bg(crate::gpui_widgets::material(
+            c,
+            crate::gpui_widgets::Material::Card,
+        ))
+        .border_1()
+        .border_color(color(c.colors.foreground).opacity(0.12)),
+    );
+    let description = if notification.body.is_empty() {
+        notification.app_name.clone()
+    } else {
+        crate::notify::cut(&notification.body, 110)
+    };
     let text = column()
-        .gap(px(2.))
+        .gap_0()
         .flex_1()
         .min_w_0()
-        .h(px(44.))
-        .overflow_hidden()
+        .text_size(px(13.))
         .child(
             crate::gpui_widgets::heading(div())
-                .h(px(16.))
-                .text_size(px(14.))
-                .line_height(px(16.))
-                .font_weight(gpui::FontWeight::BOLD)
+                .line_height(px(19.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .truncate()
                 .child(crate::notify::cut(&notification.summary, 48)),
         )
         .child(
             div()
-                .h(px(26.))
-                .text_size(px(12.))
-                .line_height(px(13.))
+                .max_h(px(36.))
+                .line_height(px(18.))
                 .overflow_hidden()
-                .child(crate::notify::cut(&notification.body, 110)),
+                .text_color(color(c.colors.muted))
+                .child(description),
         );
-    let mut content = row().h(px(44.)).items_start().gap(px(10.));
-    if let Some(source) = notification
+    let mut content = row().size_full().gap(px(10.));
+    if critical {
+        content = content.child(
+            icon(c, "error", 16.)
+                .flex_none()
+                .text_color(color(c.colors.urgent)),
+        );
+    } else if let Some(source) = notification
         .image
         .as_ref()
         .and_then(|image| images.source(&format!("notification:{id}"), image))
     {
         content = content.child(
             img(source)
-                .size(px(40.))
+                .flex_none()
+                .size(px(32.))
                 .object_fit(gpui::ObjectFit::Contain)
-                .rounded(crate::gpui_widgets::corner(6.)),
+                .rounded(crate::gpui_widgets::corner(4.)),
         );
     }
     content = content.child(text);
-    let mut body = column().gap(px(4.)).child(header).child(content);
-    let extra: Vec<_> = notification
+    for (index, (key, label)) in notification
         .actions
         .iter()
         .filter(|(key, _)| key != "default")
-        .take(3)
-        .collect();
-    if !extra.is_empty() {
-        let mut actions = row().h(px(28.));
-        for (key, label) in extra {
-            actions = actions.child(
-                button(
-                    format!("action-{id}-{key}"),
-                    div().truncate().child(label.clone()),
-                    Message::NotifAction(id, key.clone()),
-                    dispatch,
-                )
-                .flex_1()
-                .min_w_0()
-                .h(px(28.))
-                .text_size(px(12.))
-                .bg(color(app.config.colors.foreground).opacity(0.08)),
-            );
-        }
-        body = body.child(actions);
+        .take(2)
+        .enumerate()
+    {
+        let primary = index == 0;
+        content = content.child(
+            button(
+                format!("action-{id}-{key}"),
+                div().truncate().child(label.clone()),
+                Message::NotifAction(id, key.clone()),
+                dispatch,
+            )
+            .flex_none()
+            .max_w(px(96.))
+            .h(px(24.))
+            .px(px(8.))
+            .rounded(crate::gpui_widgets::corner(4.))
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .when(primary, |action| {
+                action
+                    .bg(color(c.colors.foreground))
+                    .text_color(color(c.colors.background))
+            })
+            .when(!primary, |action| {
+                action.bg(color(c.colors.foreground).opacity(0.08))
+            }),
+        );
+    }
+    if center {
+        content = content.child(
+            column()
+                .flex_none()
+                .h_full()
+                .gap(px(4.))
+                .items_end()
+                .children(close.take())
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(color(c.colors.muted))
+                        .child(crate::notify::ago(notification)),
+                ),
+        );
     }
     let message = notification_click(notification, center);
     let dispatch = dispatch.clone();
-    let hovered =
-        crate::gpui_widgets::tinted(&app.config, crate::gpui_widgets::Material::Card, 0.08);
-    let pressed =
-        crate::gpui_widgets::tinted(&app.config, crate::gpui_widgets::Material::Card, 0.14);
-    column()
+    let hovered = crate::gpui_widgets::tinted(c, crate::gpui_widgets::Material::Card, 0.08);
+    let pressed = crate::gpui_widgets::tinted(c, crate::gpui_widgets::Material::Card, 0.14);
+    let card = div()
         .id(("notification", id as u64))
-        .w_full()
-        .h(px(crate::notify::toast_height(notification)))
-        .py(px(8.))
-        .px(px(12.))
-        .relative()
-        .rounded(crate::gpui_widgets::corner(14.))
-        .child(crate::gpui_widgets::edge(&app.config, 14.))
-        .when(
-            notification.urgency == rune_services::notifications::Urgency::Critical,
-            |card| {
-                card.border_1()
-                    .border_color(color(app.config.colors.urgent))
-            },
-        )
+        .size_full()
+        .p(px(16.))
+        .rounded(crate::gpui_widgets::corner(8.))
+        .border_1()
+        .border_color(if critical {
+            color(c.colors.urgent).into()
+        } else {
+            gpui::Hsla::from(color(c.colors.foreground)).opacity(0.12)
+        })
         .bg(crate::gpui_widgets::material(
-            &app.config,
+            c,
             crate::gpui_widgets::Material::Card,
         ))
+        .when(!crate::gpui_widgets::pixel_look(), |card| {
+            card.shadow(vec![gpui::BoxShadow {
+                color: gpui::hsla(0., 0., 0., 0.1),
+                offset: gpui::point(px(0.), px(4.)),
+                blur_radius: px(12.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+        })
         .hover(|style| style.bg(hovered))
         .active(|style| style.bg(pressed))
         .cursor_pointer()
-        .child(body)
-        .on_click(move |_, window, cx| dispatch(message.clone(), window, cx))
+        .child(content)
+        .on_click(move |_, window, cx| dispatch(message.clone(), window, cx));
+    if center {
+        return card.h(px(crate::notify::HEIGHT)).into_any_element();
+    }
+    let group = gpui::SharedString::from(format!("toast-{id}"));
+    div()
+        .group(group.clone())
+        .relative()
+        .size_full()
+        .child(card)
+        .children(close.map(|close| {
+            close
+                .absolute()
+                .top(px(-7.))
+                .left(px(-7.))
+                .opacity(0.)
+                .group_hover(group, |style| style.opacity(1.))
+        }))
         .into_any_element()
 }
 

@@ -46,7 +46,7 @@ use panel::Panels;
 use rune_services::{
     audio, bluetooth, capture, clipboard, hyprland,
     media::Control,
-    notifications::{self, Image},
+    notifications::{self, Image, Notification},
     system::{self, Network, PowerAction, PowerProfile},
     tray::MenuEntry,
     weather::Query as WeatherQuery,
@@ -120,6 +120,8 @@ pub(crate) enum Message {
     /// Open a URL in the default browser (meeting links).
     OpenLink(String),
     NotifDismiss(u32),
+    /// A toast was swiped away by this many pixels.
+    NotifSwipe(u32, f32),
     NotifAction(u32, String),
     NotifRemove(u32),
     NotifClear,
@@ -159,6 +161,9 @@ pub(crate) struct App {
     wifi_pending: Option<(bool, bool, Instant)>,
     bt_pending: Option<(bool, bool, Instant)>,
     pub popup_expand: animation::Animation<bool>,
+    pub toast_motion: HashMap<u32, notify::Motion>,
+    pub toast_leave: Vec<notify::Leaving>,
+    swiped: Option<(u32, f32)>,
     weather_at: Option<Instant>,
     /// Per monitor: notch width animating from `.0` to `.1`.
     /// Keep frames running until then so the notch can measure its new content.
@@ -209,6 +214,9 @@ impl App {
             wifi_pending: None,
             bt_pending: None,
             popup_expand: animation::Animation::new(false),
+            toast_motion: HashMap::new(),
+            toast_leave: Vec::new(),
+            swiped: None,
             weather_at: None,
             measure_until: Instant::now(),
             seek: None,
@@ -226,7 +234,7 @@ impl App {
         };
         app.send(Action::LoadApps); // warm the list so the first open is instant
         app.send(Action::Weather(weather_query(&app.config)));
-        app.send(Action::Calendar(app.config.calendar.urls.clone()));
+        app.send(Action::Calendar(app.config.calendar.clone()));
         if app.config.bar.look == config::Look::Pixel {
             app.send(Action::Hypr(hyprland::Command::SquareCorners(true)));
         }
@@ -351,6 +359,8 @@ impl App {
                             });
                     }
                 }
+                self.instant = Instant::now();
+                self.animate_toasts(&state.popups);
                 self.snapshot.notif = state;
                 self.sync_popups()
             }
@@ -381,6 +391,10 @@ impl App {
                 Effects::none()
             }
             Message::NotifDismiss(id) => self.notif_command(notifications::Command::Dismiss(id)),
+            Message::NotifSwipe(id, offset) => {
+                self.swiped = Some((id, offset));
+                self.notif_command(notifications::Command::Dismiss(id))
+            }
             Message::NotifRemove(id) => self.notif_command(notifications::Command::Remove(id)),
             Message::NotifClear => self.notif_command(notifications::Command::ClearHistory),
             Message::NotifAction(id, key) => {
@@ -394,6 +408,9 @@ impl App {
                 self.set_config(config)
             }
             Message::PopupHover(on) => {
+                if on == self.popup_hover {
+                    return Effects::none();
+                }
                 self.popup_hover = on;
                 self.instant = Instant::now();
                 self.popup_expand = self
@@ -810,6 +827,8 @@ impl App {
                 } else {
                     Effects::none()
                 };
+                self.toast_leave
+                    .retain(|leaving| leaving.fade.is_animating(at));
                 Effects::batch([self.sync_popups(), osd])
             }
             _ => Effects::none(),
@@ -820,6 +839,8 @@ impl App {
         let now = Instant::now();
         let animating = self.pills.values().any(|a| a.is_animating(now))
             || self.popup_expand.is_animating(now)
+            || self.toast_motion.values().any(|m| m.is_animating(now))
+            || !self.toast_leave.is_empty()
             || now < self.measure_until;
         if animating {
             return Some(now + std::time::Duration::from_millis(16));
@@ -880,7 +901,7 @@ impl App {
 
     fn set_config(&mut self, config: Config) -> Effects<Message> {
         if config.calendar != self.config.calendar {
-            self.send(Action::Calendar(config.calendar.urls.clone()));
+            self.send(Action::Calendar(config.calendar.clone()));
         }
         if config.weather != self.config.weather {
             self.send(Action::Weather(weather_query(&config)));
@@ -1140,7 +1161,7 @@ impl App {
 
     /// Opens, resizes or closes the popup surface to fit the popups.
     fn sync_popups(&mut self) -> Effects<Message> {
-        if self.snapshot.notif.popups.is_empty() {
+        if self.snapshot.notif.popups.is_empty() && self.toast_leave.is_empty() {
             self.popup_size = 0;
             if self.popup_hover {
                 self.popup_hover = false;
@@ -1151,10 +1172,13 @@ impl App {
         }
         // Fanned-out size while hovered or animating, so the stack never gets cut off.
         let open = self.popup_hover || self.popup_expand.is_animating(self.instant);
-        let height = notify::stack_height(&self.snapshot.notif.popups, if open { 1.0 } else { 0.0 })
-            .ceil() as u32
-            + 4;
-        let width = notify::WIDTH as u32;
+        let mut height =
+            notify::stack_height(&self.snapshot.notif.popups, if open { 1.0 } else { 0.0 }).ceil()
+                as u32;
+        if !self.toast_leave.is_empty() {
+            height = height.max(self.popup_size);
+        }
+        let width = (notify::WIDTH + 2. * notify::PAD) as u32;
         if self.surfaces.is_open(&Surface::Popups) {
             if self.popup_size == height {
                 return Effects::none();
@@ -1173,6 +1197,51 @@ impl App {
                 ..Default::default()
             },
         )
+    }
+
+    /// Moves shown toasts to their new slots and starts exits for the ones that closed.
+    fn animate_toasts(&mut self, popups: &[Notification]) {
+        let now = self.instant;
+        let duration = self.config.animations.duration();
+        let swiped = self.swiped.take();
+        for (slot, n) in self
+            .snapshot
+            .notif
+            .popups
+            .iter()
+            .take(notify::VISIBLE)
+            .enumerate()
+        {
+            if popups.iter().any(|p| p.id == n.id) {
+                continue;
+            }
+            let depth = self
+                .toast_motion
+                .get(&n.id)
+                .map_or(slot as f32, |m| m.depth(now));
+            self.toast_leave.push(notify::Leaving {
+                notification: n.clone(),
+                depth,
+                swipe: swiped
+                    .filter(|(id, _)| *id == n.id)
+                    .map(|(_, offset)| offset),
+                fade: animation::Animation::new(true)
+                    .duration(duration)
+                    .go(false, now),
+            });
+        }
+        self.toast_motion
+            .retain(|id, _| popups.iter().any(|n| n.id == *id));
+        for (slot, n) in popups.iter().enumerate() {
+            let slot = slot.min(notify::VISIBLE) as f32;
+            match self.toast_motion.get_mut(&n.id) {
+                Some(motion) => motion.move_to(slot, now),
+                None => {
+                    self.toast_motion
+                        .insert(n.id, notify::Motion::new(slot, duration, now));
+                }
+            }
+        }
     }
 
     fn tray_click(&mut self, key: String, click: tray::Click) -> Effects<Message> {
@@ -1329,6 +1398,38 @@ mod tests {
         app.set_config(config);
         assert_eq!(app.popup_expand.interpolate(0., 1., app.instant), 0.);
         assert!(!app.popup_expand.is_animating(app.instant));
+    }
+
+    #[test]
+    fn closed_toasts_animate_out_from_their_swipe() {
+        let (mut app, _received) = test_app();
+        let toast = |id| Notification {
+            id,
+            app_name: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            image: None,
+            actions: Vec::new(),
+            urgency: notifications::Urgency::Normal,
+            time: Local::now(),
+            resident: false,
+        };
+        let shown = |popups| {
+            Message::Ui(UiEvent::Notifications(notifications::State {
+                popups,
+                ..Default::default()
+            }))
+        };
+        app.update(shown(vec![toast(2), toast(1)]));
+        assert_eq!(app.toast_motion.len(), 2);
+        app.update(Message::NotifSwipe(2, 60.));
+        app.update(shown(vec![toast(1)]));
+        let [leaving] = app.toast_leave.as_slice() else {
+            panic!("one toast should be leaving");
+        };
+        assert_eq!(leaving.notification.id, 2);
+        assert_eq!(leaving.swipe, Some(60.));
+        assert!(app.toast_motion.contains_key(&1) && !app.toast_motion.contains_key(&2));
     }
 
     fn test_app() -> (App, tokio::sync::mpsc::UnboundedReceiver<Action>) {

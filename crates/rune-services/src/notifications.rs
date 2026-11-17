@@ -87,6 +87,8 @@ pub enum Command {
     Hover(bool),
     /// New popup timing and history size (the config changed).
     SetOptions(Options),
+    /// Show a notification raised by the shell itself.
+    Post(Notification),
 }
 
 /// Popup timing and history size.
@@ -371,6 +373,9 @@ pub async fn spawn(
                         Command::SetOptions(options) => {
                             i.options = options;
                             i.state.history.truncate(options.history);
+                        }
+                        Command::Post(n) => {
+                            i.add(n, 0, -1, Instant::now());
                         }
                     }
                     tx.send_replace(i.state.clone());

@@ -1524,6 +1524,33 @@ impl Render for SettingsView {
                     );
                 }
                 items.push(group("Calendars", rows));
+                items.push(group(
+                    "Reminders",
+                    vec![
+                        self.labeled(
+                            "Notify before timed events",
+                            self.segmented(
+                                "remind-minutes",
+                                [
+                                    (0, "Off"),
+                                    (5, "5 min"),
+                                    (10, "10 min"),
+                                    (15, "15 min"),
+                                    (30, "30 min"),
+                                ]
+                                .into_iter()
+                                .map(|(minutes, label)| {
+                                    (
+                                        label.to_owned(),
+                                        c.calendar.remind_minutes == minutes,
+                                        Msg::RemindMinutes(minutes),
+                                    )
+                                })
+                                .collect(),
+                            ),
+                        ),
+                    ],
+                ));
                 items.push(note(
                     &c,
                     "Use a read-only ICS link. Google: Settings → calendar → Secret address in iCal format. Outlook: Shared calendars → Publish → ICS. Apple, Nextcloud, Proton: share link (webcal:// works). Refreshes every 15 minutes.",

@@ -55,8 +55,8 @@ pub enum Action {
     /// Extract text from a selected region.
     Ocr(capture::Options),
     Record(capture::RecordCommand),
-    /// Calendar links to follow.
-    Calendar(Vec<String>),
+    /// Calendar links to follow and the reminder lead time.
+    Calendar(crate::config::CalendarConfig),
     RefreshCalendar,
 }
 

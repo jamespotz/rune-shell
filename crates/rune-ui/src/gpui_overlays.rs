@@ -12,7 +12,24 @@ pub(crate) struct Overlay {
     surface: Surface,
     dispatch: Dispatch,
     images: Images,
+    swipe: Option<Swipe>,
     _subscription: gpui::Subscription,
+}
+
+/// A toast being dragged sideways.
+struct Swipe {
+    id: u32,
+    origin: f32,
+    offset: f32,
+    started: std::time::Instant,
+}
+
+impl Swipe {
+    fn dismisses(&self) -> bool {
+        let millis = self.started.elapsed().as_secs_f32() * 1000.;
+        self.offset >= crate::notify::SWIPE_DISTANCE
+            || self.offset / millis.max(1.) >= crate::notify::SWIPE_VELOCITY
+    }
 }
 impl Overlay {
     pub fn new(
@@ -30,6 +47,7 @@ impl Overlay {
             surface,
             dispatch,
             images,
+            swipe: None,
             _subscription: subscription,
         }
     }
@@ -144,38 +162,75 @@ impl Render for Overlay {
                 .into_any_element()
             }
             Surface::Popups => {
+                use crate::notify::{GAP, HEIGHT, PAD, VISIBLE, WIDTH};
                 let t = app.popup_expand.interpolate(0., 1., app.instant);
                 let list = &app.snapshot.notif.popups;
-                self.images
-                    .retain(|key| list.iter().any(|n| key == format!("notification:{}", n.id)));
-                let front_height = list.first().map_or(0., crate::notify::toast_height);
-                let mut positions = Vec::new();
-                let mut fanned = 0.;
-                for (index, notification) in list.iter().take(crate::notify::MAX_SHOWN).enumerate()
-                {
-                    positions.push((index, notification, fanned));
-                    fanned += crate::notify::toast_height(notification) + crate::notify::GAP;
-                }
+                let leaving = &app.toast_leave;
+                self.images.retain(|key| {
+                    list.iter()
+                        .chain(leaving.iter().map(|l| &l.notification))
+                        .any(|n| key == format!("notification:{}", n.id))
+                });
+                let place = |depth: f32| {
+                    let scale = 1. - 0.05 * depth * (1. - t);
+                    (PAD + (GAP + HEIGHT * t) * depth, WIDTH * (1. - scale) / 2.)
+                };
+                let swipe_end = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                    let Some(swipe) = this.swipe.take() else {
+                        return false;
+                    };
+                    cx.notify();
+                    if swipe.dismisses() {
+                        (this.dispatch)(Message::NotifSwipe(swipe.id, swipe.offset), window, cx);
+                    }
+                    swipe.offset.abs() > 4.
+                };
                 let mut stack = div()
                     .id("popup-stack")
                     .relative()
                     .size_full()
                     .text_color(color(app.config.colors.foreground))
                     .font_family(crate::gpui_widgets::text_font(&app.config))
-                    .on_hover(move |hovered, window, cx| {
-                        dispatch(Message::PopupHover(*hovered), window, cx)
-                    });
-                for (index, notification, fanned) in positions.into_iter().rev() {
-                    if index > crate::notify::BEHIND && t < 0.05 {
-                        continue;
-                    }
-                    let depth = index.min(crate::notify::BEHIND + 1) as f32;
-                    let y =
-                        crate::notify::PEEK * depth + (fanned - crate::notify::PEEK * depth) * t;
-                    let scale = 1. - 0.05 * depth * (1. - t);
-                    let height = front_height
-                        + (crate::notify::toast_height(notification) - front_height) * t;
-                    let inset = crate::notify::WIDTH * (1. - scale) / 2.;
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        if !*hovered {
+                            swipe_end(this, window, cx);
+                            (this.dispatch)(Message::PopupHover(false), window, cx)
+                        }
+                    }))
+                    .on_mouse_move(
+                        cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                            if let Some(swipe) = this.swipe.as_mut() {
+                                if event.pressed_button == Some(MouseButton::Left) {
+                                    let dx = f32::from(event.position.x) - swipe.origin;
+                                    swipe.offset = if dx < 0. { dx * 0.2 } else { dx };
+                                    cx.notify();
+                                } else {
+                                    this.swipe = None;
+                                    cx.notify();
+                                }
+                            }
+                            if !this.shell.read(cx).popup_hover {
+                                (this.dispatch)(Message::PopupHover(true), window, cx)
+                            }
+                        }),
+                    )
+                    .capture_any_mouse_up(cx.listener(
+                        move |this, _: &gpui::MouseUpEvent, window, cx| {
+                            if swipe_end(this, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        },
+                    ));
+                for (index, notification) in list.iter().take(VISIBLE).enumerate().rev() {
+                    let motion = app.toast_motion.get(&notification.id);
+                    let enter = motion.map_or(1., |m| m.entered(app.instant));
+                    let depth = motion.map_or(index as f32, |m| m.depth(app.instant));
+                    let (y, inset) = place(depth);
+                    let offset = self
+                        .swipe
+                        .as_ref()
+                        .filter(|swipe| swipe.id == notification.id)
+                        .map_or(0., |swipe| swipe.offset);
                     let content = if index == 0 || t > 0.5 {
                         crate::gpui_panels::notification(
                             app,
@@ -185,23 +240,53 @@ impl Render for Overlay {
                             &mut self.images,
                         )
                     } else {
+                        placeholder(app)
+                    };
+                    let id = notification.id;
+                    stack = stack.child(
                         div()
-                            .size_full()
-                            .rounded(crate::gpui_widgets::corner(14.))
-                            .bg(color(app.config.colors.background))
-                            .border_1()
-                            .border_color(color(app.config.colors.foreground).opacity(0.12))
-                            .into_any_element()
+                            .absolute()
+                            .top(px(y - HEIGHT * (1. - enter)))
+                            .left(px(PAD + inset + offset))
+                            .w(px(WIDTH - 2. * inset))
+                            .h(px(HEIGHT))
+                            .opacity(enter * (1. - (offset.abs() / WIDTH).min(1.)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
+                                    this.swipe = Some(Swipe {
+                                        id,
+                                        origin: f32::from(event.position.x),
+                                        offset: 0.,
+                                        started: std::time::Instant::now(),
+                                    });
+                                }),
+                            )
+                            .child(content),
+                    );
+                }
+                for leaving in leaving {
+                    let fade = leaving.fade.interpolate(0., 1., app.instant);
+                    let (y, inset) = place(leaving.depth);
+                    let (x, lift) = match leaving.swipe {
+                        Some(offset) => (offset + (WIDTH - offset).max(0.) * (1. - fade), 0.),
+                        None => (0., HEIGHT * 0.5 * (1. - fade)),
                     };
                     stack = stack.child(
                         div()
                             .absolute()
-                            .top(px(y))
-                            .left(px(inset))
-                            .w(px(crate::notify::WIDTH - 2. * inset))
-                            .h(px(height))
-                            .overflow_hidden()
-                            .child(content),
+                            .top(px(y - lift))
+                            .left(px(PAD + inset + x))
+                            .w(px(WIDTH - 2. * inset))
+                            .h(px(HEIGHT))
+                            .opacity(fade)
+                            .child(crate::gpui_panels::notification(
+                                app,
+                                &leaving.notification,
+                                false,
+                                &self.dispatch,
+                                &mut self.images,
+                            )),
                     );
                 }
                 stack.into_any_element()
@@ -211,4 +296,17 @@ impl Render for Overlay {
         self.images.release_unused_assets(cx);
         content
     }
+}
+
+fn placeholder(app: &Shell) -> gpui::AnyElement {
+    div()
+        .size_full()
+        .rounded(crate::gpui_widgets::corner(8.))
+        .bg(crate::gpui_widgets::material(
+            &app.config,
+            crate::gpui_widgets::Material::Card,
+        ))
+        .border_1()
+        .border_color(color(app.config.colors.foreground).opacity(0.12))
+        .into_any_element()
 }

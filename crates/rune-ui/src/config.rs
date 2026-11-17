@@ -293,10 +293,21 @@ impl Default for WeatherConfig {
 }
 
 /// `[calendar]`: read-only ICS links (Google: calendar settings → "Secret address in iCal format").
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CalendarConfig {
     pub urls: Vec<String>,
+    /// Minutes before a timed event to show a reminder; 0 turns reminders off.
+    pub remind_minutes: u32,
+}
+
+impl Default for CalendarConfig {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            remind_minutes: 10,
+        }
+    }
 }
 
 /// `[power]`

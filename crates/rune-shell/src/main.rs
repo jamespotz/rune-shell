@@ -178,11 +178,14 @@ fn daemon() -> Result<()> {
     forward(bt_state, ui.clone(), UiEvent::Bluetooth);
     let (calendar_urls, calendar_rx) = watch::channel(Vec::new());
     let calendar_refresh = Arc::new(tokio::sync::Notify::new());
-    forward(
-        calendar::spawn(calendar_rx, calendar_refresh.clone()),
-        ui.clone(),
-        UiEvent::Calendar,
-    );
+    let calendar_state = calendar::spawn(calendar_rx, calendar_refresh.clone());
+    let (remind_minutes, remind_rx) = watch::channel(config.calendar.remind_minutes);
+    if let Some(cmds) = notif_cmds.clone() {
+        calendar::spawn_reminders(calendar_state.clone(), remind_rx, move |n| {
+            cmds.send(notifications::Command::Post(n)).is_ok()
+        });
+    }
+    forward(calendar_state, ui.clone(), UiEvent::Calendar);
     let capture_conn = rt.block_on(zbus::Connection::session()).ok();
     let (volume, audio_devices) = audio::spawn_volume();
     forward(volume.clone(), ui.clone(), UiEvent::Volume);
@@ -295,8 +298,12 @@ fn daemon() -> Result<()> {
                         }
                     });
                 }
-                Action::Calendar(urls) => {
+                Action::Calendar(calendar) => {
+                    let urls = calendar.urls;
                     calendar_urls.send_if_modified(|u| std::mem::replace(u, urls.clone()) != urls);
+                    remind_minutes.send_if_modified(|m| {
+                        std::mem::replace(m, calendar.remind_minutes) != calendar.remind_minutes
+                    });
                 }
                 Action::RefreshCalendar => calendar_refresh.notify_one(),
                 Action::Record(cmd) => {
