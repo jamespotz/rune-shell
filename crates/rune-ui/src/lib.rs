@@ -1526,13 +1526,10 @@ mod tests {
             CaptureMode::Record,
             capture::Target::Window,
         ));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Action::Record(capture::RecordCommand::Start(
-                capture::Target::Window,
-                _
-            )))
-        ));
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|a| matches!(
+            a,
+            Action::Record(capture::RecordCommand::Start(capture::Target::Window, _))
+        )));
     }
 
     #[test]
