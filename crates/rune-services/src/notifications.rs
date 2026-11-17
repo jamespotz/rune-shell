@@ -199,7 +199,10 @@ impl Server {
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl Server {
-    #[allow(clippy::too_many_arguments)] // fixed by the D-Bus spec
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature fixed by the freedesktop notification spec"
+    )]
     async fn notify(
         &self,
         app_name: String,
@@ -211,11 +214,20 @@ impl Server {
         hints: HashMap<String, OwnedValue>,
         expire_timeout: i32,
     ) -> u32 {
-        let Ok(mut inner) = self.inner.lock() else {
+        let Some(icons) = self.inner.lock().ok().map(|i| Arc::clone(&i.icons)) else {
             return 0;
         };
-        let image =
-            image_from_hints(&hints, &inner.icons).or_else(|| icon_path(&app_icon, &inner.icons));
+        let urgency = urgency(&hints);
+        let resident = hints
+            .get("resident")
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(false);
+        let image = tokio::task::spawn_blocking(move || {
+            image_from_hints(&hints, &icons).or_else(|| icon_path(&app_icon, &icons))
+        })
+        .await
+        .ok()
+        .flatten();
         let n = Notification {
             id: 0,
             app_name,
@@ -228,12 +240,12 @@ impl Server {
                 .iter()
                 .map(|[k, v]| (k.clone(), v.clone()))
                 .collect(),
-            urgency: urgency(&hints),
+            urgency,
             time: Local::now(),
-            resident: hints
-                .get("resident")
-                .and_then(|v| bool::try_from(v).ok())
-                .unwrap_or(false),
+            resident,
+        };
+        let Ok(mut inner) = self.inner.lock() else {
+            return 0;
         };
         let id = inner.add(n, replaces_id, expire_timeout, Instant::now());
         self.publish(&inner);

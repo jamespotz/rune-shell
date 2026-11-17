@@ -413,7 +413,7 @@ pub enum Reply {
 }
 
 /// Carries out [`Command`]s.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Controls {
     volume: watch::Receiver<Option<Volume>>,
 }

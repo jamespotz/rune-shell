@@ -84,6 +84,12 @@ pub(crate) struct Leaving {
 pub(crate) const SWIPE_DISTANCE: f32 = 45.0;
 pub(crate) const SWIPE_VELOCITY: f32 = 0.11;
 
+/// Whether a rightward drag of `offset` px lasting `elapsed` dismisses its toast.
+pub(crate) fn swipe_dismisses(offset: f32, elapsed: Duration) -> bool {
+    let millis = elapsed.as_secs_f32() * 1000.;
+    offset >= SWIPE_DISTANCE || offset / millis.max(1.) >= SWIPE_VELOCITY
+}
+
 pub(crate) fn ago(n: &Notification) -> String {
     let mins = (Local::now() - n.time).num_minutes();
     match mins {
@@ -153,6 +159,25 @@ mod tests {
         assert_eq!(motion.depth(later), 1.);
         assert_eq!(motion.entered(later), 1.);
         assert!(!motion.is_animating(later));
+    }
+
+    #[test]
+    fn swipes_dismiss_by_distance_or_flick() {
+        let ms = Duration::from_millis;
+        assert!(
+            swipe_dismisses(SWIPE_DISTANCE, ms(2000)),
+            "far enough, however slow"
+        );
+        assert!(swipe_dismisses(20., ms(100)), "a short fast flick");
+        assert!(!swipe_dismisses(20., ms(1000)), "a short slow drag");
+        assert!(
+            !swipe_dismisses(-200., ms(50)),
+            "leftward drags never dismiss"
+        );
+        assert!(
+            swipe_dismisses(1., Duration::ZERO),
+            "zero time does not divide by zero"
+        );
     }
 
     #[test]

@@ -96,11 +96,15 @@ pub fn spawn_reminders(
             }
             let now = Local::now();
             reminded.retain(|(_, start)| *start > now);
-            let state = events.borrow();
-            for event in due(&state.events, Duration::minutes(minutes.into()), now) {
-                if reminded.insert((event.title.clone(), event.start)) && !post(reminder(event)) {
-                    return;
-                }
+            let fresh: Vec<Notification> = {
+                let state = events.borrow();
+                due(&state.events, Duration::minutes(minutes.into()), now)
+                    .filter(|event| reminded.insert((event.title.clone(), event.start)))
+                    .map(reminder)
+                    .collect()
+            };
+            if !fresh.into_iter().all(&post) {
+                return;
             }
         }
     });
@@ -465,7 +469,10 @@ fn expand(rule: &str, start: NaiveDateTime, from: NaiveDate, to: NaiveDate) -> V
         Some("DAILY") => {
             let mut d = first;
             while push(d, &mut out) {
-                d = d + Days::new(u64::from(interval));
+                let Some(next) = d.checked_add_days(Days::new(u64::from(interval))) else {
+                    break;
+                };
+                d = next;
             }
         }
         Some("WEEKLY") => {
@@ -477,12 +484,17 @@ fn expand(rule: &str, start: NaiveDateTime, from: NaiveDate, to: NaiveDate) -> V
             let mut week = first - Days::new(u64::from(first.weekday().num_days_from_monday()));
             'weeks: loop {
                 for offset in 0..7 {
-                    let d = week + Days::new(offset);
+                    let Some(d) = week.checked_add_days(Days::new(offset)) else {
+                        break 'weeks;
+                    };
                     if days.contains(&d.weekday()) && !push(d, &mut out) {
                         break 'weeks;
                     }
                 }
-                week = week + Days::new(7 * u64::from(interval));
+                let Some(next) = week.checked_add_days(Days::new(7 * u64::from(interval))) else {
+                    break;
+                };
+                week = next;
             }
         }
         Some("MONTHLY") => {
@@ -521,7 +533,13 @@ fn expand(rule: &str, start: NaiveDateTime, from: NaiveDate, to: NaiveDate) -> V
                 if !push(d, &mut out) {
                     break;
                 }
-                year += interval as i32;
+                let Some(next) = i32::try_from(interval)
+                    .ok()
+                    .and_then(|step| year.checked_add(step))
+                else {
+                    break;
+                };
+                year = next;
             }
         }
         _ => out.push(start), // unsupported rule: at least show the first one
@@ -719,6 +737,18 @@ BEGIN:VEVENT\r\nUID:c\r\nSUMMARY:Gone\r\nSTATUS:CANCELLED\r\nDTSTART:20261118T12
             1,
             "stops at the window end"
         );
+        for freq in ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] {
+            assert_eq!(
+                dates(expand(
+                    &format!("FREQ={freq};INTERVAL=4000000000"),
+                    at("2026-03-01 08:00"),
+                    from,
+                    to
+                )),
+                ["03-01"],
+                "{freq} with a huge interval stops instead of overflowing"
+            );
+        }
     }
 
     #[test]

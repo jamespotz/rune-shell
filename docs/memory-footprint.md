@@ -35,6 +35,9 @@ was about 71 MiB, or 34%.
   A 4096×4096 RGBA notification previously required 64 MiB of pixel data; its
   retained 128×128 thumbnail requires 64 KiB. A square 4096px album image now
   reaches the renderer as at most 1 MiB of decoded pixels instead of 64 MiB.
+- Cap glibc malloc arenas at two (`limit_malloc_arenas` in `rune-shell`), once at
+  startup before the Tokio runtime and GPUI threads exist. A zero return only means
+  the limit was not applied and is logged.
 
 Large compressed raster files can still require transient full-size decode buffers.
 This pass bounds retained/rendered pixels, not every codec’s transient allocation.

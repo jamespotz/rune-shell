@@ -53,6 +53,7 @@ pub enum Msg {
 }
 
 /// What the launcher wants done after a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Launch(String),
     Copy(String),
@@ -63,7 +64,7 @@ pub enum Outcome {
     ClearClips,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Launcher {
     pub kind: Kind,
     query: String,

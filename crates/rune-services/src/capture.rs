@@ -152,7 +152,9 @@ pub async fn screenshot(
         return Err("grim failed".into());
     }
     if opts.copy {
-        let png = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+        let png = tokio::fs::read(&path)
+            .await
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         copy(&png, "image/png").await;
     }
     let body = if opts.copy {

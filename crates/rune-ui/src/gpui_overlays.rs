@@ -26,9 +26,7 @@ struct Swipe {
 
 impl Swipe {
     fn dismisses(&self) -> bool {
-        let millis = self.started.elapsed().as_secs_f32() * 1000.;
-        self.offset >= crate::notify::SWIPE_DISTANCE
-            || self.offset / millis.max(1.) >= crate::notify::SWIPE_VELOCITY
+        crate::notify::swipe_dismisses(self.offset, self.started.elapsed())
     }
 }
 impl Overlay {

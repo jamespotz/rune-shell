@@ -15,6 +15,7 @@ use rune_services::{
 use rune_ui::config::{Colors, Rgba, ThemeSource};
 use rune_ui::{Action, Config, Surface, UiEvent};
 use std::{
+    fmt::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -73,6 +74,7 @@ fn main() -> Result<()> {
 
 #[cfg(target_env = "gnu")]
 fn limit_malloc_arenas() {
+    // SAFETY: mallopt takes plain integers, touches no Rust-owned memory, and is locked internally by glibc.
     if unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) } == 0 {
         warn!("could not limit malloc arenas; memory use may be higher");
     }
@@ -300,7 +302,13 @@ fn daemon() -> Result<()> {
                 }
                 Action::Calendar(calendar) => {
                     let urls = calendar.urls;
-                    calendar_urls.send_if_modified(|u| std::mem::replace(u, urls.clone()) != urls);
+                    calendar_urls.send_if_modified(|u| {
+                        let changed = *u != urls;
+                        if changed {
+                            *u = urls;
+                        }
+                        changed
+                    });
                     remind_minutes.send_if_modified(|m| {
                         std::mem::replace(m, calendar.remind_minutes) != calendar.remind_minutes
                     });
@@ -385,6 +393,8 @@ fn daemon() -> Result<()> {
 
     let result = rune_ui::run(config, ui_events, actions, hyprland);
     ipc::remove_socket();
+    drop(_rt);
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
     Ok(result?)
 }
 
@@ -564,7 +574,7 @@ fn theme_worker(ui: UnboundedSender<UiEvent>) -> watch::Sender<Option<Config>> {
 fn apply_theme(mut config: Config) -> std::result::Result<(Config, String), String> {
     let t = &config.theme;
     let palette = match t.source {
-        ThemeSource::Preset => theme::preset_for(&t.preset, t.dark)
+        ThemeSource::Preset => theme::preset_for(&t.preset, theme::Appearance::from_dark(t.dark))
             .ok_or_else(|| format!("Unknown preset {:?}", t.preset))?,
         ThemeSource::Wallpaper => {
             let path = Some(PathBuf::from(&config.wallpaper.current))
@@ -575,7 +585,7 @@ fn apply_theme(mut config: Config) -> std::result::Result<(Config, String), Stri
             theme::from_seed(
                 seed,
                 Variant::from_id(&t.scheme).unwrap_or(Variant::TonalSpot),
-                t.dark,
+                theme::Appearance::from_dark(t.dark),
             )
         }
     };
@@ -601,19 +611,22 @@ fn apply_theme(mut config: Config) -> std::result::Result<(Config, String), Stri
         let mut backup =
             Backup::open_default().map_err(|e| format!("Cannot open the theme backup: {e}"))?;
         let report = export::apply(&apps, &palette, &home, &mut backup);
-        let failed: Vec<&String> = report.iter().filter(|r| !r.ends_with(": done")).collect();
-        status += &if failed.is_empty() {
-            format!(" to the shell and {} app(s)", apps.len())
+        let (mut failed, mut notes) = (Vec::new(), Vec::new());
+        for outcome in &report {
+            match outcome {
+                export::Outcome::Failed(message) => failed.push(message.as_str()),
+                export::Outcome::Note(message) => notes.push(message.as_str()),
+                export::Outcome::Done => {}
+            }
+        }
+        if failed.is_empty() {
+            let _ = write!(status, " to the shell and {} app(s)", apps.len());
         } else {
-            format!(
-                "; problems: {}",
-                failed
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        };
+            let _ = write!(status, "; problems: {}", failed.join("; "));
+        }
+        if !notes.is_empty() {
+            let _ = write!(status, "; {}", notes.join("; "));
+        }
     }
     Ok((config, status))
 }

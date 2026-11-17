@@ -6,6 +6,7 @@
 use super::{Palette, Rgb, backup::Backup};
 use serde_json::json;
 use std::{
+    fmt::Write,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -274,8 +275,17 @@ pub fn plan(app: App, p: &Palette, home: &Path, read: &dyn Fn(&Path) -> String) 
     }
 }
 
-/// Applies `apps`, backing up every file first. Returns a summary line per app.
-pub fn apply(apps: &[App], p: &Palette, home: &Path, backup: &mut Backup) -> Vec<String> {
+/// How applying one app's theme went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    /// Written, but the user has to act before it shows.
+    Note(String),
+    Failed(String),
+}
+
+/// Applies `apps`, backing up every file first. Returns one outcome per app, plus failed preferences.
+pub fn apply(apps: &[App], p: &Palette, home: &Path, backup: &mut Backup) -> Vec<Outcome> {
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let mut report = Vec::new();
     for &app in apps {
@@ -286,16 +296,16 @@ pub fn apply(apps: &[App], p: &Palette, home: &Path, backup: &mut Backup) -> Vec
             .try_for_each(|(path, text)| backup.write(path, text).map(drop));
         match result {
             Ok(()) => {
-                for c in &plan.reload {
-                    let _ = Command::new(&c[0]).args(&c[1..]).status(); // fine if the app isn't running
+                for (program, args) in plan.reload.iter().filter_map(|c| c.split_first()) {
+                    let _ = Command::new(program).args(args).status(); // fine if the app isn't running
                 }
                 let note = match app {
                     App::Vivaldi => vivaldi_folder_note(home, &read),
                     _ => None,
                 };
-                report.push(note.unwrap_or_else(|| format!("{}: done", app.label())));
+                report.push(note.map_or(Outcome::Done, Outcome::Note));
             }
-            Err(e) => report.push(format!("{}: {e}", app.label())),
+            Err(e) => report.push(Outcome::Failed(format!("{}: {e}", app.label()))),
         }
     }
     if apps
@@ -304,7 +314,7 @@ pub fn apply(apps: &[App], p: &Palette, home: &Path, backup: &mut Backup) -> Vec
     {
         let scheme = if p.dark { "'prefer-dark'" } else { "'default'" };
         if let Err(e) = backup.set_gsetting("org.gnome.desktop.interface", "color-scheme", scheme) {
-            report.push(format!("color scheme preference: {e}"));
+            report.push(Outcome::Failed(format!("color scheme preference: {e}")));
         }
     }
     if apps.contains(&App::Gtk4) || apps.contains(&App::Gtk3) {
@@ -545,7 +555,7 @@ fn kitty(p: &Palette) -> String {
         p.bg_dim.hex()
     );
     for (i, c) in p.term.iter().enumerate() {
-        s += &format!("color{i} {}\n", c.hex());
+        let _ = writeln!(s, "color{i} {}", c.hex());
     }
     s
 }
@@ -553,7 +563,7 @@ fn kitty(p: &Palette) -> String {
 fn ghostty(p: &Palette) -> String {
     let mut s = format!("# {HEADER}\n");
     for (i, c) in p.term.iter().enumerate() {
-        s += &format!("palette = {i}={}\n", c.hex());
+        let _ = writeln!(s, "palette = {i}={}", c.hex());
     }
     s + &format!(
         "background = {}\nforeground = {}\ncursor-color = {}\ncursor-text = {}\nselection-background = {}\nselection-foreground = {}\n",
@@ -581,7 +591,7 @@ fn btop(p: &Palette) -> String {
         p.outline.hex()
     );
     for b in ["cpu_box", "mem_box", "net_box", "proc_box"] {
-        s += &format!("theme[{b}]=\"{}\"\n", p.outline.hex());
+        let _ = writeln!(s, "theme[{b}]=\"{}\"", p.outline.hex());
     }
     for k in [
         "temp",
@@ -593,7 +603,10 @@ fn btop(p: &Palette) -> String {
         "download",
         "upload",
     ] {
-        s += &format!("theme[{k}_start]=\"{g}\"\ntheme[{k}_mid]=\"{y}\"\ntheme[{k}_end]=\"{r}\"\n");
+        let _ = writeln!(
+            s,
+            "theme[{k}_start]=\"{g}\"\ntheme[{k}_mid]=\"{y}\"\ntheme[{k}_end]=\"{r}\""
+        );
     }
     s
 }
@@ -705,10 +718,10 @@ fn nvim(p: &Palette) -> String {
     ] {
         let (group, opts) = line.split_once(" = ").unwrap_or_default();
         let group = group.trim_start_matches("[\"").trim_end_matches("\"]");
-        s += &format!("hl(\"{group}\", {opts})\n");
+        let _ = writeln!(s, "hl(\"{group}\", {opts})");
     }
     for (i, t) in p.term.iter().enumerate() {
-        s += &format!("vim.g.terminal_color_{i} = \"{}\"\n", t.hex());
+        let _ = writeln!(s, "vim.g.terminal_color_{i} = \"{}\"", t.hex());
     }
     s
 }
@@ -868,7 +881,7 @@ fn gtk(p: &Palette) -> String {
         ("insensitive_fg_color", p.outline),
         ("borders", p.outline),
     ] {
-        s += &format!("@define-color {name} {};\n", c.hex());
+        let _ = writeln!(s, "@define-color {name} {};", c.hex());
     }
     s
 }
@@ -1028,7 +1041,7 @@ fn vivaldi(p: &Palette) -> String {
         ("colorAccentFg", p.fg),
         ("colorErrorBg", p.error),
     ] {
-        s += &format!("  --{name}: {} !important;\n", c.hex());
+        let _ = writeln!(s, "  --{name}: {} !important;", c.hex());
     }
     s + "}\n"
 }

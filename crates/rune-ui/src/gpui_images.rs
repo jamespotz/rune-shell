@@ -253,11 +253,12 @@ fn thumbnail(
         Ok(render(image::load_from_memory(bytes)?, edge))
     } else {
         let parsed = svg.parse_svg(bytes)?;
+        let edge_pixels = i32::try_from(edge).unwrap_or(i32::MAX);
         svg.render_parsed(
             &parsed,
             gpui::SvgSize::Size(gpui::size(
-                gpui::DevicePixels(edge as i32),
-                gpui::DevicePixels(edge as i32),
+                gpui::DevicePixels(edge_pixels),
+                gpui::DevicePixels(edge_pixels),
             )),
         )
         .map_err(Into::into)

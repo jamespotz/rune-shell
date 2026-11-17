@@ -603,7 +603,7 @@ pub enum Reply {
 }
 
 /// Carries out [`Command`]s; holds what stays alive while a feature is on.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Controls {
     conn: Option<Connection>,
     hypr: Option<crate::hyprland::Hyprland>,
@@ -687,7 +687,10 @@ impl Controls {
                         .spawn()
                         .map(|child| *held = Some(child))
                         .map(|()| true)
-                        .map_err(|_| "Install hyprsunset".to_owned())
+                        .map_err(|e| match e.kind() {
+                            std::io::ErrorKind::NotFound => "Install hyprsunset".to_owned(),
+                            _ => format!("cannot run hyprsunset: {e}"),
+                        })
                 } else {
                     Ok(false)
                 };

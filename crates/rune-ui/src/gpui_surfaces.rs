@@ -19,9 +19,10 @@ pub(crate) fn options(
         Surface::Bar(_) => (
             Layer::Top,
             Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
-            Some(px(
-                (dimensions.1 as i32 + margin.map_or(0, |(_, _, gap, _)| gap.max(0))) as f32,
-            )),
+            Some(px(i32::try_from(dimensions.1)
+                .unwrap_or(i32::MAX)
+                .saturating_add(margin.map_or(0, |(_, _, gap, _)| gap.max(0)))
+                as f32)),
             KeyboardInteractivity::None,
         ),
         Surface::Catcher => (Layer::Top, Anchor::all(), None, KeyboardInteractivity::None),

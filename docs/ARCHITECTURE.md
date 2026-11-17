@@ -8,6 +8,14 @@ snapshots through watch channels; the forwarder sends each snapshot to
 that channel without polling. User actions return through `mpsc<Action>` to the
 daemon. CLI commands and configuration hot reload use the same event path.
 
+`rune-shell quit` returns only after the daemon process has exited, so
+`rune-shell quit && rune-shell` restarts safely. The daemon answers `ok` and then
+leaks that connection's write half instead of dropping it. The kernel closes it at
+process exit, after the control socket is removed and every D-Bus name is
+released, and only then does the client read EOF. Shutdown waits at most one
+second for blocking tasks, such as reapers for launched apps, before the process
+exits. The client gives up after ten seconds.
+
 `rune-ui/src/state.rs` holds service snapshots. `App` owns transitions, settings
 drafts, launcher matching, panel placement and animation state. `surfaces.rs`
 records desired window specifications. The GPUI backend reconciles those specs

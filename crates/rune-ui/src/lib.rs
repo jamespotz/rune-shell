@@ -981,7 +981,7 @@ impl App {
             tasks.push(self.close_panel()); // its monitor was unplugged
         }
         let h = self.config.bar.height + self.config.bar.margin_top;
-        let gap = self.config.bar.gap as i32;
+        let gap = i32::try_from(self.config.bar.gap).unwrap_or(i32::MAX);
         for name in wanted {
             let output_option = if name.is_empty() {
                 OutputOption::Active
@@ -1187,7 +1187,9 @@ impl App {
             return self.surfaces.resize(&Surface::Popups, (width, height));
         }
         self.popup_size = height;
-        let top = self.config.bar.height as i32 + 8;
+        let top = i32::try_from(self.config.bar.height)
+            .unwrap_or(i32::MAX)
+            .saturating_add(8);
         self.surfaces.open(
             Surface::Popups,
             WindowSpec {
@@ -1203,7 +1205,10 @@ impl App {
     fn animate_toasts(&mut self, popups: &[Notification]) {
         let now = self.instant;
         let duration = self.config.animations.duration();
-        let swiped = self.swiped.take();
+        let swiped = self.swiped;
+        if swiped.is_some_and(|(id, _)| !popups.iter().any(|p| p.id == id)) {
+            self.swiped = None;
+        }
         for (slot, n) in self
             .snapshot
             .notif
@@ -1423,7 +1428,12 @@ mod tests {
         app.update(shown(vec![toast(2), toast(1)]));
         assert_eq!(app.toast_motion.len(), 2);
         app.update(Message::NotifSwipe(2, 60.));
-        app.update(shown(vec![toast(1)]));
+        app.update(shown(vec![toast(3), toast(2), toast(1)]));
+        assert!(
+            app.toast_leave.is_empty(),
+            "a new toast must not consume the swipe"
+        );
+        app.update(shown(vec![toast(3), toast(1)]));
         let [leaving] = app.toast_leave.as_slice() else {
             panic!("one toast should be leaving");
         };

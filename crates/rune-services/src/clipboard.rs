@@ -109,6 +109,7 @@ pub enum Reply {
 }
 
 /// Clipboard history with times and favorites.
+#[derive(Debug)]
 pub struct Clipboard<T> {
     tools: T,
     /// `state.json` and favorite files.
@@ -150,7 +151,7 @@ impl<T: Tools> Clipboard<T> {
     pub async fn sync(&self) -> Result<(), String> {
         let history = self.tools.list().await?;
         let _guard = self.lock.lock().await;
-        self.stamp(&history)?;
+        self.stamp(&history).await?;
         Ok(())
     }
 
@@ -159,10 +160,10 @@ impl<T: Tools> Clipboard<T> {
         let history = self.tools.list().await?;
         let store = {
             let _guard = self.lock.lock().await;
-            self.stamp(&history)?
+            self.stamp(&history).await?
         };
         let ids: HashSet<String> = history.iter().map(|(id, _)| id.to_string()).collect();
-        prune_cache(&self.cache, &ids);
+        prune_cache(&self.cache, &ids).await;
 
         let mut entries: Vec<Entry> = store
             .favorites
@@ -201,9 +202,12 @@ impl<T: Tools> Clipboard<T> {
         let data = match id {
             Id::History(id) => self.tools.decode(id).await?,
             Id::Favorite(key) => {
-                let store = self.load()?;
+                let store = self.load().await?;
                 let fav = find(&store, key).ok_or("that favorite is gone")?;
-                std::fs::read(self.data.join(fav.file())).map_err(|e| e.to_string())?
+                let path = self.data.join(fav.file());
+                tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| io_error(&path, &e))?
             }
         };
         self.tools.set(data).await
@@ -214,7 +218,7 @@ impl<T: Tools> Clipboard<T> {
         match id {
             Id::Favorite(key) => {
                 let _guard = self.lock.lock().await;
-                let mut store = self.load()?;
+                let mut store = self.load().await?;
                 let Some(at) = store
                     .favorites
                     .iter()
@@ -223,8 +227,8 @@ impl<T: Tools> Clipboard<T> {
                     return Ok(()); // already gone
                 };
                 let fav = store.favorites.remove(at);
-                self.save(&store)?;
-                let _ = std::fs::remove_file(self.data.join(fav.file()));
+                self.save(&store).await?;
+                let _ = tokio::fs::remove_file(self.data.join(fav.file())).await;
             }
             Id::History(source) => {
                 // Its preview comes from cliphist, never from the caller.
@@ -236,7 +240,7 @@ impl<T: Tools> Clipboard<T> {
                     .ok_or("that entry left the history")?;
                 let bytes = self.tools.decode(source).await?;
                 let _guard = self.lock.lock().await;
-                let mut store = self.load()?;
+                let mut store = self.load().await?;
                 let key = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis())
@@ -247,10 +251,15 @@ impl<T: Tools> Clipboard<T> {
                     source: source.to_string(),
                     preview,
                 };
-                std::fs::create_dir_all(&self.data).map_err(|e| e.to_string())?;
-                std::fs::write(self.data.join(fav.file()), bytes).map_err(|e| e.to_string())?;
+                tokio::fs::create_dir_all(&self.data)
+                    .await
+                    .map_err(|e| io_error(&self.data, &e))?;
+                let path = self.data.join(fav.file());
+                tokio::fs::write(&path, bytes)
+                    .await
+                    .map_err(|e| io_error(&path, &e))?;
                 store.favorites.insert(0, fav);
-                self.save(&store)?;
+                self.save(&store).await?;
             }
         }
         Ok(())
@@ -260,16 +269,16 @@ impl<T: Tools> Clipboard<T> {
     pub async fn clear(&self) -> Result<(), String> {
         self.tools.wipe().await?;
         let _guard = self.lock.lock().await;
-        let mut store = self.load()?;
+        let mut store = self.load().await?;
         store.seen.clear();
-        self.save(&store)?;
-        let _ = std::fs::remove_dir_all(&self.cache);
+        self.save(&store).await?;
+        let _ = tokio::fs::remove_dir_all(&self.cache).await;
         Ok(())
     }
 
     /// Stamps new ids with now and drops vanished ones. Caller holds the lock.
-    fn stamp(&self, history: &[(u64, String)]) -> Result<Store, String> {
-        let mut store = self.load()?;
+    async fn stamp(&self, history: &[(u64, String)]) -> Result<Store, String> {
+        let mut store = self.load().await?;
         let ids: HashSet<String> = history.iter().map(|(id, _)| id.to_string()).collect();
         let before = store.seen.len();
         store.seen.retain(|id, _| ids.contains(id));
@@ -282,40 +291,49 @@ impl<T: Tools> Clipboard<T> {
             }
         }
         if changed {
-            self.save(&store)?;
+            self.save(&store).await?;
         }
         Ok(store)
     }
 
-    fn load(&self) -> Result<Store, String> {
-        match std::fs::read_to_string(self.data.join("state.json")) {
+    async fn load(&self) -> Result<Store, String> {
+        let path = self.data.join("state.json");
+        match tokio::fs::read_to_string(&path).await {
             Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
                 warn!("clipboard state is corrupt, starting over: {e}");
                 Store::default()
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(io_error(&path, &e)),
         }
     }
 
-    fn save(&self, store: &Store) -> Result<(), String> {
-        std::fs::create_dir_all(&self.data).map_err(|e| e.to_string())?;
-        let json = serde_json::to_string(store).map_err(|e| e.to_string())?;
+    async fn save(&self, store: &Store) -> Result<(), String> {
+        tokio::fs::create_dir_all(&self.data)
+            .await
+            .map_err(|e| io_error(&self.data, &e))?;
+        let json = serde_json::to_string(store)
+            .map_err(|e| format!("cannot encode the clipboard state: {e}"))?;
         // Write then rename, so a crash never leaves half a file (and lost favorites).
         let tmp = self.data.join("state.json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-        std::fs::rename(tmp, self.data.join("state.json")).map_err(|e| e.to_string())
+        tokio::fs::write(&tmp, json)
+            .await
+            .map_err(|e| io_error(&tmp, &e))?;
+        let path = self.data.join("state.json");
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| io_error(&path, &e))
     }
 
     /// The decoded image for history entry `id`, cached on disk.
     async fn thumbnail(&self, id: u64, ext: &str) -> Option<PathBuf> {
         let path = self.cache.join(format!("{id}.{ext}"));
-        if path.exists() {
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Some(path);
         }
         let bytes = self.tools.decode(id).await.ok()?;
-        std::fs::create_dir_all(&self.cache).ok()?;
-        std::fs::write(&path, bytes).ok()?;
+        tokio::fs::create_dir_all(&self.cache).await.ok()?;
+        tokio::fs::write(&path, bytes).await.ok()?;
         Some(path)
     }
 }
@@ -325,26 +343,30 @@ fn find(store: &Store, key: u64) -> Option<&Favorite> {
 }
 
 /// Drops cached images whose entries left the history.
-fn prune_cache(cache: &Path, ids: &HashSet<String>) {
-    let Ok(dir) = std::fs::read_dir(cache) else {
+async fn prune_cache(cache: &Path, ids: &HashSet<String>) {
+    let Ok(mut dir) = tokio::fs::read_dir(cache).await else {
         return;
     };
-    for file in dir.flatten() {
-        let id = file
-            .path()
+    while let Ok(Some(file)) = dir.next_entry().await {
+        let path = file.path();
+        let known = path
             .file_stem()
             .and_then(|s| s.to_str())
-            .map(str::to_owned);
-        if !id.is_some_and(|id| ids.contains(&id)) {
-            let _ = std::fs::remove_file(file.path());
+            .is_some_and(|id| ids.contains(id));
+        if !known {
+            let _ = tokio::fs::remove_file(path).await;
         }
     }
+}
+
+fn io_error(path: &Path, error: &std::io::Error) -> String {
+    format!("{}: {error}", path.display())
 }
 
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// File extension for an image entry we can show, from cliphist's preview
@@ -368,6 +390,7 @@ fn title(preview: &str) -> String {
 }
 
 /// The real tools: `cliphist` and `wl-copy`.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Cliphist;
 
 impl Tools for Cliphist {
@@ -391,13 +414,19 @@ impl Tools for Cliphist {
             stdin
                 .write_all(id.to_string().as_bytes())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("cannot write to cliphist: {e}"))?;
         }
-        Ok(child
+        let out = child
             .wait_with_output()
             .await
-            .map_err(|e| e.to_string())?
-            .stdout)
+            .map_err(|e| format!("cliphist decode failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("cliphist decode failed ({})", out.status));
+        }
+        if out.stdout.is_empty() {
+            return Err("cliphist decoded an empty entry".into());
+        }
+        Ok(out.stdout)
     }
 
     async fn wipe(&self) -> Result<(), String> {
@@ -419,10 +448,20 @@ impl Tools for Cliphist {
             .spawn()
             .map_err(|e| format!("cannot run wl-copy: {e}"))?;
         if let Some(mut stdin) = wl.stdin.take() {
-            stdin.write_all(&data).await.map_err(|e| e.to_string())?;
+            stdin
+                .write_all(&data)
+                .await
+                .map_err(|e| format!("cannot write to wl-copy: {e}"))?;
         }
-        wl.wait().await.map_err(|e| e.to_string())?;
-        Ok(())
+        let status = wl
+            .wait()
+            .await
+            .map_err(|e| format!("wl-copy failed: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("wl-copy failed ({status})"))
+        }
     }
 }
 

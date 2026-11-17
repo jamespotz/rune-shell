@@ -223,7 +223,7 @@ pub enum Msg {
     RemoveLink(usize),
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct State {
     page: Page,
     drafts: HashMap<Field, String>,
@@ -249,8 +249,12 @@ pub struct State {
     pub(crate) page_search: String,
 }
 
-static PRESETS: LazyLock<[Vec<Palette>; 2]> =
-    LazyLock::new(|| [theme::presets_for(false), theme::presets_for(true)]);
+static PRESETS: LazyLock<[Vec<Palette>; 2]> = LazyLock::new(|| {
+    [
+        theme::presets_for(theme::Appearance::Light),
+        theme::presets_for(theme::Appearance::Dark),
+    ]
+});
 
 impl State {
     /// Applies `msg` to `config`; returns daemon work it needs.

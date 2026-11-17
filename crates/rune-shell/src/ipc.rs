@@ -24,14 +24,19 @@ fn socket_path() -> Result<PathBuf> {
     Ok(PathBuf::from(dir).join("rune-shell.sock"))
 }
 
-/// Client side: sends `cmd` and returns the reply.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Client side: sends `cmd` and returns the reply. `quit` returns once the daemon has exited.
 pub fn send(cmd: &str) -> Result<String> {
     let mut stream = std::os::unix::net::UnixStream::connect(socket_path()?)
         .context("rune-shell is not running")?;
+    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
     writeln!(stream, "{cmd}")?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut reply = String::new();
-    stream.read_to_string(&mut reply)?;
+    stream
+        .read_to_string(&mut reply)
+        .with_context(|| format!("rune-shell did not finish `{cmd}` in time"))?;
     Ok(reply.trim_end().to_owned())
 }
 
@@ -88,8 +93,13 @@ async fn handle(
     if line.trim().is_empty() {
         return Ok(()); // a liveness probe from `bind`, not a command
     }
+    let quitting = line.trim() == "quit";
     let reply = command(line.trim(), config, ui, actions);
-    write.write_all(reply.as_bytes()).await
+    write.write_all(reply.as_bytes()).await?;
+    if quitting && reply == "ok" {
+        std::mem::forget(write);
+    }
+    Ok(())
 }
 
 fn command(

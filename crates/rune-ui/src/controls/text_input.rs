@@ -11,7 +11,7 @@ use gpui::{
     SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
     point, prelude::*, px, relative, rgba, size,
 };
-use unicode_segmentation::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
     text_input,

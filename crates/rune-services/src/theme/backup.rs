@@ -26,6 +26,7 @@ enum Entry {
 }
 
 /// The backup store, normally `$XDG_STATE_HOME/rune-shell/theme-backup`.
+#[derive(Debug)]
 pub struct Backup {
     dir: PathBuf,
     entries: Vec<Entry>,

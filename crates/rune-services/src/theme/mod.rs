@@ -166,8 +166,27 @@ impl Variant {
     }
 }
 
+/// Light or dark appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Appearance {
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// The appearance described by a stored `dark` flag, as in config files and palettes.
+    pub fn from_dark(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+
+    pub fn is_dark(self) -> bool {
+        self == Self::Dark
+    }
+}
+
 /// Builds a Material You palette from a seed color.
-pub fn from_seed(seed: Rgb, variant: Variant, dark: bool) -> Palette {
+pub fn from_seed(seed: Rgb, variant: Variant, appearance: Appearance) -> Palette {
+    let dark = appearance.is_dark();
     let s = Scheme::from(variant.scheme(Hct::new(seed.to_m()), dark));
     let c = Rgb::from_m;
     // Terminal hues stay recognisable (red is red) but lean towards the theme.
@@ -240,28 +259,27 @@ pub fn presets() -> Vec<Palette> {
 }
 
 /// Built-in palettes in the requested appearance, in selector order.
-pub fn presets_for(dark: bool) -> Vec<Palette> {
+pub fn presets_for(appearance: Appearance) -> Vec<Palette> {
     PRESETS
         .iter()
-        .filter_map(|row| preset_for(row.0, dark))
+        .filter_map(|row| preset_for(row.0, appearance))
         .collect()
 }
 
 /// A preset in the requested appearance. Catppuccin flavours switch between
 /// Mocha and Latte; other presets regenerate their palette from their accent.
-pub fn preset_for(name: &str, dark: bool) -> Option<Palette> {
+pub fn preset_for(name: &str, appearance: Appearance) -> Option<Palette> {
     let palette = preset_named(name)?;
-    if palette.dark == dark {
+    if Appearance::from_dark(palette.dark) == appearance {
         return Some(palette);
     }
     let mut flipped = if name.starts_with("Catppuccin") {
-        preset_named(if dark {
-            "Catppuccin Mocha"
-        } else {
-            "Catppuccin Latte"
+        preset_named(match appearance {
+            Appearance::Dark => "Catppuccin Mocha",
+            Appearance::Light => "Catppuccin Latte",
         })?
     } else {
-        from_seed(palette.primary, Variant::TonalSpot, dark)
+        from_seed(palette.primary, Variant::TonalSpot, appearance)
     };
     flipped.name = palette.name;
     Some(flipped)
@@ -464,8 +482,8 @@ mod tests {
     #[test]
     fn generates_material_schemes() {
         let seed = Rgb::parse("#6750a4").unwrap();
-        let dark = from_seed(seed, Variant::TonalSpot, true);
-        let light = from_seed(seed, Variant::TonalSpot, false);
+        let dark = from_seed(seed, Variant::TonalSpot, Appearance::Dark);
+        let light = from_seed(seed, Variant::TonalSpot, Appearance::Light);
         let luma = |c: Rgb| c.0.iter().map(|v| u32::from(*v)).sum::<u32>();
         assert!(
             luma(dark.bg) < luma(dark.fg),
@@ -473,8 +491,8 @@ mod tests {
         );
         assert!(luma(light.bg) > luma(light.fg));
         assert_ne!(
-            from_seed(seed, Variant::Vibrant, true).primary,
-            from_seed(seed, Variant::Monochrome, true).primary
+            from_seed(seed, Variant::Vibrant, Appearance::Dark).primary,
+            from_seed(seed, Variant::Monochrome, Appearance::Dark).primary
         );
         let red = dark.term[1].0;
         assert!(
@@ -492,12 +510,12 @@ mod tests {
 
     #[test]
     fn presets_follow_the_requested_appearance() {
-        for dark in [true, false] {
-            let palettes = presets_for(dark);
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let palettes = presets_for(appearance);
             assert_eq!(palettes.len(), 11);
-            assert!(palettes.iter().all(|p| p.dark == dark));
+            assert!(palettes.iter().all(|p| p.dark == appearance.is_dark()));
         }
-        let latte = preset_for("Catppuccin Mocha", false).unwrap();
+        let latte = preset_for("Catppuccin Mocha", Appearance::Light).unwrap();
         assert_eq!(latte.name, "Catppuccin Mocha");
         assert_eq!(latte.bg, preset_named("Catppuccin Latte").unwrap().bg);
     }
