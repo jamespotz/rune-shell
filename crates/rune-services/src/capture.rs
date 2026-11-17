@@ -381,7 +381,12 @@ mod tests {
 
     #[test]
     fn target_words_round_trip() {
-        for t in [Target::Screen, Target::All, Target::Window, Target::Selection] {
+        for t in [
+            Target::Screen,
+            Target::All,
+            Target::Window,
+            Target::Selection,
+        ] {
             assert_eq!(Target::from_word(t.word()), Some(t));
         }
     }

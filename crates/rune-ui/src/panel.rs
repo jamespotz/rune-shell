@@ -17,6 +17,7 @@ pub enum Panel {
     Calendar,
     Quick,
     Power,
+    Capture,
     Wifi,
     Bluetooth,
     Sound,

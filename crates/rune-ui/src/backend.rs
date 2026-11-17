@@ -16,6 +16,7 @@ pub(crate) struct Effects<T> {
 enum Effect {
     Copy(String),
     Quit,
+    Later(std::time::Duration, Message),
 }
 impl<T> Effects<T> {
     pub fn none() -> Self {
@@ -40,6 +41,13 @@ impl<T> Effects<T> {
     pub fn quit() -> Self {
         Self {
             commands: vec![Effect::Quit],
+            marker: PhantomData,
+        }
+    }
+    /// Delivers `message` after `after`, from a GPUI timer.
+    pub fn later(after: std::time::Duration, message: Message) -> Self {
+        Self {
+            commands: vec![Effect::Later(after, message)],
             marker: PhantomData,
         }
     }
@@ -76,6 +84,14 @@ fn dispatch(shell: Entity<Shell>, backend: Shared, message: Message, cx: &mut gp
         match effect {
             Effect::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
             Effect::Quit => cx.quit(),
+            Effect::Later(after, message) => {
+                let (shell, backend) = (shell.clone(), backend.clone());
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(after).await;
+                    cx.update(|cx| dispatch(shell, backend, message, cx));
+                })
+                .detach();
+            }
         }
     }
     reconcile(shell, backend, cx);

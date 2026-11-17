@@ -39,6 +39,7 @@ mod tray;
 mod weather;
 
 use backend::Effects;
+use capture_panel::CaptureMode;
 use chrono::{Datelike, Local};
 pub use config::Config;
 use launcher::{Kind, Launcher, Outcome};
@@ -115,6 +116,12 @@ pub(crate) enum Message {
     QuickVolume(f32),
     QuickBrightness(f32),
     QuickScreenshot,
+    /// Switch the capture panel's mode; `Text` starts OCR at once.
+    CaptureMode(CaptureMode),
+    /// A capture panel tile: close the panel, then capture.
+    Capture(CaptureMode, capture::Target),
+    /// Runs the capture once the panel is gone.
+    RunCapture(CaptureMode, capture::Target),
     /// Move the calendar by this many months.
     CalMonth(i32),
     CalDay(chrono::NaiveDate),
@@ -181,6 +188,8 @@ pub(crate) struct App {
     pub cal_month: chrono::NaiveDate,
     pub cal_day: chrono::NaiveDate,
     pub game_mode: bool,
+    /// The capture panel's mode, kept for this session.
+    pub capture_mode: CaptureMode,
     /// Do-not-disturb before game mode turned it on.
     dnd_before_game: Option<bool>,
     pub tray_images: HashMap<String, Image>,
@@ -228,6 +237,7 @@ impl App {
             cal_month: Local::now().date_naive().with_day(1).unwrap_or_default(),
             cal_day: Local::now().date_naive(),
             game_mode: false,
+            capture_mode: CaptureMode::default(),
             dnd_before_game: None,
             tray_images: HashMap::new(),
             tray_menu_for: None,
@@ -575,12 +585,32 @@ impl App {
                 )));
                 Effects::none()
             }
-            Message::QuickScreenshot => {
-                self.send(Action::Screenshot(
-                    capture::Target::Selection,
-                    capture_options(&self.config),
-                ));
-                self.close_panel()
+            Message::QuickScreenshot => self.update(Message::Capture(
+                CaptureMode::Screenshot,
+                capture::Target::Selection,
+            )),
+            Message::CaptureMode(CaptureMode::Text) => self.update(Message::Capture(
+                CaptureMode::Text,
+                capture::Target::Selection,
+            )),
+            Message::CaptureMode(mode) => {
+                self.capture_mode = mode;
+                Effects::none()
+            }
+            Message::Capture(mode, target) => self.close_panel().chain(Effects::later(
+                capture_panel::SETTLE,
+                Message::RunCapture(mode, target),
+            )),
+            Message::RunCapture(mode, target) => {
+                let opts = capture_options(&self.config);
+                self.send(match mode {
+                    CaptureMode::Screenshot => Action::Screenshot(target, opts),
+                    CaptureMode::Record => {
+                        Action::Record(capture::RecordCommand::Start(target, opts))
+                    }
+                    CaptureMode::Text => Action::Ocr(opts),
+                });
+                Effects::none()
             }
             Message::Ui(UiEvent::Network(n)) => {
                 // Joining or leaving changes the list's "Connected" marks.
@@ -1133,7 +1163,8 @@ impl App {
             | Panel::Quick
             | Panel::Bluetooth
             | Panel::Sound
-            | Panel::Battery => {}
+            | Panel::Battery
+            | Panel::Capture => {}
         }
         Effects::none()
     }
@@ -1448,6 +1479,60 @@ mod tests {
         let (_, events) = tokio::sync::mpsc::unbounded_channel();
         let (app, _) = App::new(Config::default(), events, actions, false);
         (app, received)
+    }
+
+    #[test]
+    fn panel_capture_waits_for_the_panel_to_close() {
+        let (mut app, mut rx) = test_app();
+        app.update(Message::Toggle(Panel::Capture));
+        assert_eq!(app.panels.current(), Some(Panel::Capture));
+        app.update(Message::Capture(
+            CaptureMode::Screenshot,
+            capture::Target::Screen,
+        ));
+        assert_eq!(app.panels.current(), None);
+        let early: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !early.iter().any(|a| matches!(
+                a,
+                Action::Screenshot(..) | Action::Record(_) | Action::Ocr(_)
+            )),
+            "{early:?}"
+        );
+        app.update(Message::RunCapture(
+            CaptureMode::Screenshot,
+            capture::Target::Screen,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::Screenshot(capture::Target::Screen, _))
+        ));
+        assert_eq!(app.panels.current(), None);
+    }
+
+    #[test]
+    fn text_mode_starts_ocr_and_keeps_the_previous_mode() {
+        let (mut app, _rx) = test_app();
+        app.update(Message::CaptureMode(CaptureMode::Record));
+        assert_eq!(app.capture_mode, CaptureMode::Record);
+        app.update(Message::CaptureMode(CaptureMode::Text));
+        assert_eq!(app.capture_mode, CaptureMode::Record);
+    }
+
+    #[test]
+    fn record_run_starts_not_toggles() {
+        let (mut app, mut rx) = test_app();
+        app.update(Message::RunCapture(
+            CaptureMode::Record,
+            capture::Target::Window,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::Record(capture::RecordCommand::Start(
+                capture::Target::Window,
+                _
+            )))
+        ));
     }
 
     #[test]

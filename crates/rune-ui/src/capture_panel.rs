@@ -49,8 +49,11 @@ pub fn shortcut(mode: CaptureMode, target: Target) -> Option<&'static str> {
     SHORTCUTS.iter().find_map(|(keys, args)| {
         let matches = match mode {
             CaptureMode::Text => *args == verb,
-            _ => args.strip_prefix(verb).and_then(|rest| rest.strip_prefix(' '))
-                == Some(target.word()),
+            _ => {
+                args.strip_prefix(verb)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    == Some(target.word())
+            }
         };
         matches.then_some(*keys)
     })
