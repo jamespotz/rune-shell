@@ -27,6 +27,8 @@ pub struct Device {
     pub description: String,
     pub muted: bool,
     pub default: bool,
+    /// Highest channel volume in percent, when reported by the audio server.
+    pub volume: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -47,6 +49,7 @@ pub enum DeviceCommand {
     /// Make this output (`true`) or input the default.
     SetDefault(bool, String),
     ToggleMicMute,
+    SetMicVolume(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +214,8 @@ fn parse_devices(json: &str, default: &str) -> Vec<Device> {
         description: String,
         mute: bool,
         #[serde(default)]
+        volume: HashMap<String, serde_json::Value>,
+        #[serde(default)]
         properties: HashMap<String, serde_json::Value>,
     }
     let nodes: Vec<Node> = serde_json::from_str(json).unwrap_or_default();
@@ -218,6 +223,19 @@ fn parse_devices(json: &str, default: &str) -> Vec<Device> {
         .into_iter()
         .filter(|n| n.properties.get("device.class").and_then(|v| v.as_str()) != Some("monitor"))
         .map(|n| Device {
+            volume: n
+                .volume
+                .values()
+                .filter_map(|channel| {
+                    channel
+                        .get("value_percent")?
+                        .as_str()?
+                        .strip_suffix('%')?
+                        .trim()
+                        .parse::<u16>()
+                        .ok()
+                })
+                .max(),
             default: n.name == default,
             name: n.name,
             description: n.description,
@@ -227,21 +245,25 @@ fn parse_devices(json: &str, default: &str) -> Vec<Device> {
 }
 
 pub async fn device_command(cmd: DeviceCommand) -> Result<(), String> {
+    let percent;
     let args = match &cmd {
         DeviceCommand::SetDefault(true, name) => vec!["set-default-sink", name.as_str()],
         DeviceCommand::SetDefault(false, name) => vec!["set-default-source", name.as_str()],
+        DeviceCommand::SetMicVolume(value) => {
+            percent = format!("{}%", value.min(&100));
+            vec!["set-source-volume", "@DEFAULT_SOURCE@", percent.as_str()]
+        }
         DeviceCommand::ToggleMicMute => vec!["set-source-mute", "@DEFAULT_SOURCE@", "toggle"],
     };
-    let ok = Process::new("pactl")
+    let status = Process::new("pactl")
         .args(&args)
         .status()
         .await
-        .map_err(|e| format!("cannot run pactl: {e}"))?
-        .success();
-    if ok {
+        .map_err(|e| format!("cannot run pactl {args:?}: {e}"))?;
+    if status.success() {
         Ok(())
     } else {
-        Err("pactl failed".into())
+        Err(format!("pactl {args:?} failed with {status}"))
     }
 }
 
@@ -383,6 +405,19 @@ mod tests {
         assert!(!changes_devices("Event 'change' on sink #54"));
         assert!(!changes_devices("Event 'new' on sink-input #91"));
         assert!(!changes_devices("Event 'change' on source-output #3"));
+    }
+
+    #[test]
+    fn microphone_volume_reads_channels_and_rejects_hostile_values() {
+        let devices = parse_devices(
+            r#"[
+            {"name":"mic","description":"Mic","mute":false,"volume":{"left":{"value_percent":"42%"},"right":{"value_percent":"60%"}}},
+            {"name":"bad","description":"Bad","mute":false,"volume":{"mono":{"value_percent":"999999999999999%"}}}
+        ]"#,
+            "mic",
+        );
+        assert_eq!(devices[0].volume, Some(60));
+        assert_eq!(devices[1].volume, None);
     }
 
     #[test]

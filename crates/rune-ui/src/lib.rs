@@ -114,6 +114,7 @@ pub(crate) enum Message {
     PowerProfileNext,
     GameModeToggle,
     QuickVolume(f32),
+    QuickMicVolume(f32),
     QuickBrightness(f32),
     QuickScreenshot,
     /// Switch the capture panel's mode; `Text` starts OCR at once.
@@ -573,6 +574,17 @@ impl App {
                 Effects::none()
             }
             Message::GameModeToggle => self.set_game_mode(!self.game_mode),
+            Message::QuickMicVolume(value) => {
+                if value.is_finite() {
+                    let percent = format!("{:.0}", value.clamp(0., 100.));
+                    if let Ok(percent) = percent.parse::<u8>() {
+                        self.send(Action::Audio(audio::Command::Device(
+                            audio::DeviceCommand::SetMicVolume(percent),
+                        )));
+                    }
+                }
+                Effects::none()
+            }
             Message::QuickVolume(v) => {
                 self.send(Action::Audio(audio::Command::Volume(audio::Change::Set(
                     v.round() as u8,
@@ -1479,6 +1491,29 @@ mod tests {
         let (_, events) = tokio::sync::mpsc::unbounded_channel();
         let (app, _) = App::new(Config::default(), events, actions, false);
         (app, received)
+    }
+
+    #[test]
+    fn microphone_slider_routes_bounded_values_and_ignores_invalid_input() {
+        let (mut app, mut rx) = test_app();
+        while rx.try_recv().is_ok() {}
+        app.update(Message::QuickMicVolume(140.));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::Audio(audio::Command::Device(
+                audio::DeviceCommand::SetMicVolume(100)
+            )))
+        ));
+        app.update(Message::QuickMicVolume(-10.));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::Audio(audio::Command::Device(
+                audio::DeviceCommand::SetMicVolume(0)
+            )))
+        ));
+        app.update(Message::QuickMicVolume(f32::NAN));
+        app.update(Message::QuickMicVolume(f32::INFINITY));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

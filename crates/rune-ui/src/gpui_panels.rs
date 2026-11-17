@@ -23,6 +23,7 @@ pub(crate) struct PanelView {
     dispatch: Dispatch,
     focus: FocusHandle,
     volume: Entity<Slider>,
+    mic_volume: Entity<Slider>,
     brightness: Entity<Slider>,
     seek: Entity<Slider>,
     images: Images,
@@ -42,11 +43,13 @@ impl PanelView {
             .detach();
         let accent = color(shell.read(cx).config.colors.accent);
         let volume = cx.new(|_| Slider::new((0., 100.), 0., accent));
+        let mic_volume = cx.new(|_| Slider::new((0., 100.), 0., accent));
         let brightness = cx.new(|_| Slider::new((0., 100.), 0., accent));
         let seek = cx.new(|_| Slider::new((0., 1.), 0., accent));
         let mut subscriptions = vec![cx.observe(&shell, |_, _, cx| cx.notify())];
         for (slider, change, release) in [
             (&volume, Message::QuickVolume as fn(f32) -> Message, None),
+            (&mic_volume, Message::QuickMicVolume, None),
             (&brightness, Message::QuickBrightness, None),
             (&seek, Message::SeekDrag, Some(Message::SeekCommit)),
         ] {
@@ -73,6 +76,7 @@ impl PanelView {
             dispatch,
             focus,
             volume,
+            mic_volume,
             brightness,
             seek,
             images,
@@ -120,6 +124,25 @@ impl Render for PanelView {
         self.volume.update(cx, |slider, _| {
             slider.sync((0., 100.), volume, accent);
             slider.set_pill(Some(volume_pill));
+        });
+        let mic = shell.read(cx).snapshot.audio.mic();
+        let mic_value = mic
+            .and_then(|device| device.volume)
+            .map_or(0., |v| f32::from(v.min(100)));
+        let mic_pill = crate::controls::slider::Pill {
+            glyph: if mic.is_some_and(|device| device.muted) {
+                "mic_off"
+            } else {
+                "mic"
+            }
+            .into(),
+            font: shell.read(cx).config.bar.icon_font.clone().into(),
+            fill: color(shell.read(cx).config.colors.foreground),
+            ink: color(shell.read(cx).config.colors.background),
+        };
+        self.mic_volume.update(cx, |slider, _| {
+            slider.sync((0., 100.), mic_value, accent);
+            slider.set_pill(Some(mic_pill));
         });
         self.brightness.update(cx, |slider, _| {
             slider.sync((0., 100.), brightness, accent);
@@ -206,6 +229,17 @@ impl PanelView {
             body = body.child(div().px(px(6.)).pb(px(4.)).child(self.volume.clone()));
         } else {
             body = body.child(unavailable(app, "Volume"));
+        }
+        if app
+            .snapshot
+            .audio
+            .mic()
+            .and_then(|device| device.volume)
+            .is_some()
+        {
+            body = body
+                .child(section_label(c, "Microphone"))
+                .child(div().px(px(6.)).pb(px(4.)).child(self.mic_volume.clone()));
         }
         if !app.snapshot.audio.outputs.is_empty() {
             body = body.child(section_label(c, "Output"));
@@ -356,12 +390,10 @@ impl PanelView {
             Ok(false) => "Off".into(),
             Err(error) => error.clone(),
         };
-        let connectivity = module(c)
+        let connectivity = column()
             .flex_1()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(quick_tile(
+            .gap(px(8.))
+            .child(module(c).child(quick_tile(
                 app,
                 "wifi",
                 "Wi-Fi",
@@ -377,8 +409,8 @@ impl PanelView {
                 wifi,
                 s.network.as_ref().map(|_| Message::WifiToggle(!wifi)),
                 dispatch,
-            ))
-            .child(quick_tile(
+            )))
+            .child(module(c).child(quick_tile(
                 app,
                 "bluetooth",
                 "Bluetooth",
@@ -395,8 +427,8 @@ impl PanelView {
                 s.bt.powered,
                 s.bt.available.then_some(Message::BtPower(!s.bt.powered)),
                 dispatch,
-            ))
-            .child(quick_tile(
+            )))
+            .child(module(c).child(quick_tile(
                 app,
                 "sports_esports",
                 "Game Mode",
@@ -404,7 +436,7 @@ impl PanelView {
                 app.game_mode,
                 Some(Message::GameModeToggle),
                 dispatch,
-            ));
+            )));
         let modes = column()
             .flex_1()
             .gap(px(8.))
@@ -532,6 +564,19 @@ impl PanelView {
                             .child("Sound"),
                     )
                     .child(self.volume.clone()),
+            );
+        }
+        if s.audio.mic().and_then(|device| device.volume).is_some() {
+            body = body.child(
+                module(c)
+                    .child(
+                        div()
+                            .px(px(2.))
+                            .pb(px(6.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Microphone"),
+                    )
+                    .child(self.mic_volume.clone()),
             );
         }
         if let Some(media) = &s.media {
@@ -1821,8 +1866,20 @@ pub(crate) mod tests {
             .push(rune_services::audio::Device {
                 name: "test-sink".into(),
                 description: "Test Speakers".into(),
+                volume: Some(50),
                 muted: false,
                 default: true,
+            });
+        shell
+            .snapshot
+            .audio
+            .inputs
+            .push(rune_services::audio::Device {
+                name: "test-mic".into(),
+                description: "Test Microphone".into(),
+                muted: false,
+                default: true,
+                volume: Some(65),
             });
         shell
             .settings_ui

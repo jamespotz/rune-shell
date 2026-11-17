@@ -360,6 +360,62 @@ impl SettingsView {
             )
             .into_any_element()
     }
+    fn audio_volume(
+        &mut self,
+        c: &Config,
+        microphone: bool,
+        value: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = if microphone {
+            "mic-volume"
+        } else {
+            "sound-volume"
+        };
+        let value = f32::from(value.min(100));
+        let entity = if let Some(entity) = self.sliders.get(key) {
+            entity.clone()
+        } else {
+            let entity = cx.new(|_| Slider::new((0., 100.), value, color(c.colors.accent)));
+            let dispatch = self.dispatch.clone();
+            cx.subscribe_in(&entity, window, move |_, _, event, window, cx| {
+                if let SliderEvent::Change(value) = event {
+                    let message = if microphone {
+                        crate::Message::QuickMicVolume(*value)
+                    } else {
+                        crate::Message::QuickVolume(*value)
+                    };
+                    dispatch(message, window, cx);
+                }
+            })
+            .detach();
+            self.sliders.insert(key.into(), entity.clone());
+            entity
+        };
+        entity.update(cx, |slider, _| {
+            slider.sync((0., 100.), value, color(c.colors.accent));
+            slider.set_pill(Some(crate::controls::slider::Pill {
+                glyph: if microphone { "mic" } else { "volume_up" }.into(),
+                font: self.icon_font.clone(),
+                fill: color(c.colors.foreground),
+                ink: color(c.colors.background),
+            }));
+        });
+        column()
+            .w_full()
+            .gap(px(6.))
+            .child(label_block(
+                &c.colors,
+                if microphone {
+                    "Microphone volume"
+                } else {
+                    "Sound volume"
+                },
+            ))
+            .child(entity)
+            .into_any_element()
+    }
     fn number(
         &mut self,
         c: &Config,
@@ -540,6 +596,7 @@ impl Render for SettingsView {
         let app = self.shell.read(cx);
         let c = app.config.clone();
         let s = app.settings_ui.clone();
+        let output_volume = app.snapshot.volume.map(|volume| volume.percent);
         self.colors = c.colors;
         if self.icon_font.as_ref() != c.bar.icon_font {
             self.icon_font = c.bar.icon_font.clone().into();
@@ -1461,6 +1518,14 @@ impl Render for SettingsView {
                             crate::gpui_widgets::muted(&c, "No devices found.").into_any_element(),
                         );
                     }
+                    let volume = if output {
+                        output_volume
+                    } else {
+                        s.audio.mic().and_then(|mic| mic.volume)
+                    };
+                    if let Some(volume) = volume {
+                        rows.insert(0, self.audio_volume(&c, !output, volume, window, cx));
+                    }
                     if !output && let Some(mic) = s.audio.mic() {
                         rows.push(self.toggle(
                             "mute-mic",
@@ -1969,6 +2034,7 @@ mod tests {
                                     let device = rune_services::audio::Device {
                                         name: "test".into(),
                                         description: "Test audio device".into(),
+                                        volume: Some(50),
                                         muted: false,
                                         default: true,
                                     };
