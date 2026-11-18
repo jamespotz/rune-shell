@@ -37,6 +37,7 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
         Widget::Media => Panel::Media,
         Widget::Power => Panel::Power,
         Widget::Capture => Panel::Capture,
+        Widget::Stats => Panel::System,
         _ => return None,
     })
 }
@@ -75,6 +76,7 @@ mod tests {
     fn capture_widget_opens_capture_panel_and_is_found_in_any_section() {
         use crate::{Panel, config::Widget};
         assert_eq!(widget_panel(Widget::Capture), Some(Panel::Capture));
+        assert_eq!(widget_panel(Widget::Stats), Some(Panel::System));
         let mut bar = Config::default().bar;
         assert!(!bar_has(&bar, Widget::Capture));
         bar.center.push(Widget::Capture);

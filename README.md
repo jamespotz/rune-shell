@@ -14,9 +14,9 @@ expands into a **keybind cheat sheet** listing your Hyprland binds and their des
 - Pick a preset palette (Catppuccin, Gruvbox, Nord, Tokyo Night, Rosé Pine, Dracula, Everforest)
   or generate one from the wallpaper (Material You: tonal spot, vibrant, expressive, fruit salad,
   content, fidelity, rainbow, neutral, monochrome; light or dark).
-- Choose which apps follow the theme: kitty, Ghostty, btop, Yazi, Neovim (`:colorscheme rune`),
-  Zed, VS Code, Kiro, GTK 3, GTK 4/libadwaita, Qt (qt5ct/qt6ct), KDE. Running kitty, Ghostty and
-  GTK apps refresh live.
+- Choose which apps follow the theme: kitty, Ghostty, btop, Yazi, Neovim,
+  Zed, VS Code, Kiro, GTK 3, GTK 4/libadwaita, Qt (qt5ct/qt6ct), KDE. Running kitty, Ghostty,
+  Neovim and GTK apps refresh live.
 - Before changing any file Rune backs it up (contents, symlinks, settings); "Restore original app
   themes" or `rune-shell restore-themes` puts everything back exactly. Symlinked configs (e.g. into
   a dotfiles repo) are replaced, never written through.
@@ -69,7 +69,8 @@ Whereby and Jitsi links. Recurring events, exceptions and time zones are handled
 
 **Volume, network, battery and OSD**: the `volume` widget (click to mute, scroll to change),
 `network` (Wi-Fi signal or wired; click for networks), `battery` (hidden without one) and
-`stats` (CPU %, memory %, CPU temperature). `rune-shell volume
+`stats` (CPU %, memory %, CPU temperature; click or `rune-shell toggle system` for live CPU, GPU,
+memory and network graphs; NVIDIA needs `nvidia-smi`, AMD reads sysfs). `rune-shell volume
 up|down|mute|set N` and `rune-shell brightness up|down|set N` show an on-screen popup; bind your
 media keys to them.
 

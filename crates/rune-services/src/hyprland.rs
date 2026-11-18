@@ -89,6 +89,9 @@ pub struct HyprState {
     pub workspaces: Vec<Workspace>,
     /// Workspace ids holding a window that asked for attention.
     pub urgent: HashSet<i32>,
+    /// Config reloads seen on this connection. A reload drops every runtime
+    /// rule, so a change means they must be applied again.
+    pub reloads: u32,
 }
 
 impl HyprState {
@@ -257,22 +260,29 @@ impl Hyprland {
         let stream = UnixStream::connect(self.dir.join(".socket2.sock")).await?;
         let mut lines = BufReader::new(stream).lines();
         let mut urgent = HashSet::new();
-        self.publish(tx, &mut urgent).await?;
+        let mut reloads = 0;
+        self.publish(tx, &mut urgent, reloads).await?;
         while let Some(line) = lines.next_line().await? {
-            self.apply(&line, &mut urgent).await?;
+            reloads = reloads.wrapping_add(self.apply(&line, &mut urgent).await?);
             // One focus change emits several events; refresh once per burst.
             while let Ok(next) = timeout(Duration::from_millis(5), lines.next_line()).await {
                 match next? {
-                    Some(line) => self.apply(&line, &mut urgent).await?,
+                    Some(line) => {
+                        reloads = reloads.wrapping_add(self.apply(&line, &mut urgent).await?);
+                    }
                     None => return Ok(()),
                 }
             }
-            self.publish(tx, &mut urgent).await?;
+            self.publish(tx, &mut urgent, reloads).await?;
         }
         Ok(())
     }
 
-    async fn apply(&self, line: &str, urgent: &mut HashSet<i32>) -> Result<(), Error> {
+    /// Folds one event into `urgent`; returns 1 for a config reload, else 0.
+    async fn apply(&self, line: &str, urgent: &mut HashSet<i32>) -> Result<u32, Error> {
+        if let Some(("configreloaded", _)) = parse_event(line) {
+            return Ok(1);
+        }
         if let Some(("urgent", addr)) = parse_event(line) {
             let clients: Vec<Client> = self.query("clients").await?;
             let addr = addr.trim_start_matches("0x");
@@ -283,13 +293,14 @@ impl Hyprland {
                 urgent.insert(c.workspace.id);
             }
         }
-        Ok(())
+        Ok(0)
     }
 
     async fn publish(
         &self,
         tx: &watch::Sender<HyprState>,
         urgent: &mut HashSet<i32>,
+        reloads: u32,
     ) -> Result<(), Error> {
         let (monitors, mut workspaces) = tokio::try_join!(
             self.query::<Vec<Monitor>>("monitors"),
@@ -302,6 +313,7 @@ impl Hyprland {
             monitors,
             workspaces,
             urgent: urgent.clone(),
+            reloads,
         };
         tx.send_if_modified(|current| {
             let changed = *current != state;

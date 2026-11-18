@@ -10,7 +10,7 @@ use gpui::{AnimationExt, AnyElement, Div, MouseButton, Stateful, div, img, prelu
 static PIXEL_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) fn set_look(look: crate::config::Look, font: crate::config::PixelFont) {
     let value = match (look, font) {
-        (crate::config::Look::Glass, _) => 0,
+        (crate::config::Look::Smooth, _) => 0,
         (crate::config::Look::Pixel, crate::config::PixelFont::Tiny5) => 1,
         (crate::config::Look::Pixel, crate::config::PixelFont::Monocraft) => 2,
     };
@@ -459,16 +459,15 @@ pub(crate) fn bar_widget(
             .into_any_element()
         }
         Widget::Stats => {
-            let stats = app.snapshot.stats?;
+            let stats = app.snapshot.stats.as_ref()?;
             let content = |name: &str, label: String| row().child(glyph(name)).child(label);
             let mut items = row()
-                .px(px(8.))
                 .child(content("memory", format!("{}%", stats.cpu)))
                 .child(content("memory_alt", format!("{}%", stats.ram)));
             if let Some(temp) = stats.temp {
                 items = items.child(content("thermostat", format!("{temp}°")));
             }
-            items.into_any_element()
+            bar_button(app, widget, id, items, toggle(Panel::System), dispatch).into_any_element()
         }
         Widget::Bluetooth => {
             let bt = &app.snapshot.bt;

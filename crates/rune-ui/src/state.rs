@@ -27,6 +27,8 @@ pub(crate) struct Snapshot {
     pub keep_awake: Result<bool, String>,
     pub power_profile: Option<PowerProfile>,
     pub stats: Option<rune_services::stats::Stats>,
+    /// Recent samples, oldest first, at most [`STATS_HISTORY`].
+    pub stats_history: std::collections::VecDeque<rune_services::stats::Stats>,
     pub network: Option<Network>,
     pub battery: Option<Battery>,
     pub brightness: Option<u8>,
@@ -51,10 +53,26 @@ impl Default for Snapshot {
             keep_awake: Ok(false),
             power_profile: None,
             stats: None,
+            stats_history: std::collections::VecDeque::with_capacity(STATS_HISTORY),
             network: None,
             battery: None,
             brightness: None,
             calendar: cal::State::default(),
         }
+    }
+}
+
+/// Samples kept for the system panel's graphs (two minutes at the service's rate).
+pub(crate) const STATS_HISTORY: usize = 60;
+
+impl Snapshot {
+    pub(crate) fn record_stats(&mut self, stats: Option<rune_services::stats::Stats>) {
+        if let Some(sample) = &stats {
+            if self.stats_history.len() >= STATS_HISTORY {
+                self.stats_history.pop_front();
+            }
+            self.stats_history.push_back(sample.clone());
+        }
+        self.stats = stats;
     }
 }

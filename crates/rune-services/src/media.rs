@@ -25,7 +25,6 @@ trait Player {
     fn play_pause(&self) -> zbus::Result<()>;
     fn next(&self) -> zbus::Result<()>;
     fn previous(&self) -> zbus::Result<()>;
-    fn stop(&self) -> zbus::Result<()>;
     fn set_position(
         &self,
         track_id: &zbus::zvariant::ObjectPath<'_>,
@@ -94,7 +93,6 @@ pub enum Control {
     PlayPause,
     Next,
     Previous,
-    Stop,
     /// Jump to this position in the current track.
     Seek(Duration),
 }
@@ -119,7 +117,6 @@ impl MediaHandle {
             Control::PlayPause => p.play_pause().await,
             Control::Next => p.next().await,
             Control::Previous => p.previous().await,
-            Control::Stop => p.stop().await,
             Control::Seek(to) => {
                 // SetPosition needs the current track's id, so a stale seek can't move the next song.
                 let track = self

@@ -22,10 +22,11 @@ pub enum Panel {
     Bluetooth,
     Sound,
     Battery,
+    System,
 }
 
 /// Panels reachable from the CLI (`rune-shell toggle <name>`).
-const NAMED: [(&str, Panel); 14] = [
+const NAMED: [(&str, Panel); 15] = [
     ("launcher", Panel::Launcher(Kind::Apps)),
     ("keybinds", Panel::Launcher(Kind::Keybinds)),
     ("clipboard", Panel::Launcher(Kind::Clipboard)),
@@ -40,6 +41,7 @@ const NAMED: [(&str, Panel); 14] = [
     ("bluetooth", Panel::Bluetooth),
     ("sound", Panel::Sound),
     ("battery", Panel::Battery),
+    ("system", Panel::System),
 ];
 
 impl Panel {

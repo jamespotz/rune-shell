@@ -80,7 +80,7 @@ impl App {
             App::Ghostty => "Ghostty",
             App::Btop => "btop",
             App::Yazi => "Yazi",
-            App::Neovim => "Neovim (:colorscheme rune)",
+            App::Neovim => "Neovim",
             App::Zed => "Zed",
             App::VsCode => "VS Code",
             App::Kiro => "Kiro",
@@ -158,8 +158,14 @@ pub fn plan(app: App, p: &Palette, home: &Path, read: &dyn Fn(&Path) -> String) 
             reload: Vec::new(),
         },
         App::Neovim => Plan {
-            files: vec![file("nvim/colors/rune.lua", nvim(p))],
-            reload: Vec::new(),
+            files: vec![
+                file("nvim/colors/rune.lua", nvim(p)),
+                file(
+                    "nvim/plugin/rune.lua",
+                    NVIM_LOADER.replace("{HEADER}", HEADER),
+                ),
+            ],
+            reload: Vec::new(), // the loader watches colors/ in every running instance
         },
         App::Zed => {
             let settings = cfg.join("zed/settings.json");
@@ -650,6 +656,28 @@ fn yazi(p: &Palette) -> String {
         fg(a)
     )
 }
+
+/// Neovim sources `plugin/` itself: apply the scheme after the user's own
+/// colorscheme setup (LazyVim, base16…), then re-apply whenever Rune replaces it.
+/// The folder is watched, not the file, because the file is replaced by rename.
+const NVIM_LOADER: &str = r#"-- {HEADER}
+local function apply()
+  pcall(vim.cmd.colorscheme, "rune")
+end
+if vim.v.vim_did_enter == 1 then
+  apply()
+else
+  vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = apply })
+end
+local watcher = (vim.uv or vim.loop).new_fs_event()
+if watcher then
+  watcher:start(vim.fn.stdpath("config") .. "/colors", {}, vim.schedule_wrap(function(err, name)
+    if not err and name == "rune.lua" then
+      apply()
+    end
+  end))
+end
+"#;
 
 fn nvim(p: &Palette) -> String {
     let c = |r: Rgb| format!("\"{}\"", r.hex());
@@ -1181,6 +1209,25 @@ mod tests {
             set_line("", "theme = rune", |l| key_is(l, "theme", '=')),
             "theme = rune\n"
         );
+    }
+
+    #[test]
+    fn neovim_selects_the_scheme_and_reloads_it_live() {
+        let p = preset_named("Catppuccin Mocha").unwrap();
+        let plan = plan(App::Neovim, &p, Path::new("/home/u"), &|_| String::new());
+        let paths: Vec<_> = plan.files.iter().map(|(path, _)| path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                Path::new("/home/u/.config/nvim/colors/rune.lua"),
+                Path::new("/home/u/.config/nvim/plugin/rune.lua"),
+            ]
+        );
+        let loader = &plan.files[1].1;
+        // After the user's own colorscheme setup, and again whenever the scheme file is replaced.
+        assert!(loader.contains("VimEnter"));
+        assert!(loader.contains("new_fs_event"));
+        assert!(loader.contains("name == \"rune.lua\""));
     }
 
     #[test]

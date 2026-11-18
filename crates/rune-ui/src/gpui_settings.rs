@@ -1128,9 +1128,9 @@ impl Render for SettingsView {
                         "look",
                         vec![
                             (
-                                "Glass".into(),
-                                c.bar.look == crate::config::Look::Glass,
-                                Msg::Look(crate::config::Look::Glass),
+                                "Smooth".into(),
+                                c.bar.look == crate::config::Look::Smooth,
+                                Msg::Look(crate::config::Look::Smooth),
                             ),
                             (
                                 "Pixel".into(),

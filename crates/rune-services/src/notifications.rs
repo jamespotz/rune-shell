@@ -87,7 +87,8 @@ pub enum Command {
     Hover(bool),
     /// New popup timing and history size (the config changed).
     SetOptions(Options),
-    /// Show a notification raised by the shell itself.
+    /// Show a notification raised by the shell itself (event reminders); its
+    /// popup stays until the user closes or dismisses it.
     Post(Notification),
 }
 
@@ -135,6 +136,11 @@ impl Inner {
             }
         }
         id
+    }
+
+    /// Adds a shell notification that never times out.
+    fn post(&mut self, n: Notification, now: Instant) -> u32 {
+        self.add(n, 0, 0, now)
     }
 
     /// Removes expired popups; returns their ids.
@@ -387,7 +393,7 @@ pub async fn spawn(
                             i.state.history.truncate(options.history);
                         }
                         Command::Post(n) => {
-                            i.add(n, 0, -1, Instant::now());
+                            i.post(n, Instant::now());
                         }
                     }
                     tx.send_replace(i.state.clone());
@@ -554,6 +560,15 @@ mod tests {
         assert_eq!(i.expire(t0 + Duration::from_secs(6)), [a]);
         assert_eq!(i.state.popups.len(), 1, "critical stays");
         assert_eq!(i.state.history.len(), 2);
+    }
+
+    #[test]
+    fn posted_reminders_stay_until_dismissed() {
+        let mut i = inner();
+        let t = Instant::now();
+        let id = i.post(note(Urgency::Normal), t);
+        assert!(i.expire(t + Duration::from_secs(24 * 3600)).is_empty());
+        assert!(i.state.popups.iter().any(|p| p.id == id));
     }
 
     #[test]

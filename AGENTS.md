@@ -41,6 +41,7 @@
 
 - Follow the apple-design principles for immediate press feedback, continuous direct manipulation, interruptible motion, predictable spatial relationships, and clear hierarchy.
 - Preserve pointer position and velocity when retargeting interactive motion. Use restrained, critically damped springs by default; reserve overshoot for momentum-driven gestures.
+- Every feature ships in both looks, `smooth` and `pixel` (`bar.look`). Style through the look helpers in `gpui_widgets` (`corner`, `fill`, `frame`, `heading`, `text_font`, `pixel_look`), and inspect the running UI in each look.
 - Respect reduced motion, user colors, fonts, and accessibility preferences. Maintain legible contrast, visible focus, and keyboard escape/navigation paths.
 - Use native GPUI builder patterns, not CSS. The current icon system uses the configured Material Symbols font plus indexed application/tray images. Reuse it rather than assuming an assets crate or SVG directory exists.
 - Keep decoded image bounds and shared-cache retirement intact. Avoid full-resolution images for icons and thumbnails.

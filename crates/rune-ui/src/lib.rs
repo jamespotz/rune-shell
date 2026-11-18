@@ -35,6 +35,7 @@ mod state;
 mod status;
 mod surface;
 mod surfaces;
+mod system_panel;
 mod tray;
 mod weather;
 
@@ -298,6 +299,9 @@ impl App {
         }
         match message {
             Message::Ui(UiEvent::Hypr(state)) => {
+                if state.reloads != self.snapshot.hypr.reloads && !self.game_mode {
+                    self.reapply_hypr_rules();
+                }
                 self.snapshot.hypr = state;
                 self.instant = Instant::now();
                 self.animate_pills();
@@ -657,7 +661,7 @@ impl App {
                 Effects::none()
             }
             Message::Ui(UiEvent::Stats(s)) => {
-                self.snapshot.stats = s;
+                self.snapshot.record_stats(s);
                 Effects::none()
             }
             Message::Ui(UiEvent::Battery(b)) => {
@@ -1196,6 +1200,7 @@ impl App {
             | Panel::Bluetooth
             | Panel::Sound
             | Panel::Battery
+            | Panel::System
             | Panel::Capture => {}
         }
         Effects::none()
@@ -1373,15 +1378,21 @@ impl App {
                 .unwrap_or(self.config.notifications.dnd);
             self.send(Action::Notif(notifications::Command::SetDnd(dnd)));
             // Leaving game mode reloads Hyprland's config, which drops runtime rules.
-            if self.config.bar.blur {
-                self.send(Action::Blur(true));
-            }
-            if self.config.bar.look == config::Look::Pixel {
-                self.send(Action::Hypr(hyprland::Command::SquareCorners(true)));
-            }
-            self.send_border_colors(&self.config.colors);
+            self.reapply_hypr_rules();
         }
         Effects::none()
+    }
+
+    /// Applies blur, square corners and border colours again after Hyprland
+    /// reloaded its config (which resets everything set at runtime).
+    fn reapply_hypr_rules(&self) {
+        if self.config.bar.blur {
+            self.send(Action::Blur(true));
+        }
+        if self.config.bar.look == config::Look::Pixel {
+            self.send(Action::Hypr(hyprland::Command::SquareCorners(true)));
+        }
+        self.send_border_colors(&self.config.colors);
     }
 
     /// Opens settings (if closed) on `page`.
@@ -1636,6 +1647,28 @@ mod tests {
             app.surfaces.desired[&Surface::Bar(String::new())].size,
             Some((0, 38))
         );
+    }
+
+    #[test]
+    fn hyprland_reload_restores_square_corners_and_rules() {
+        let (mut app, mut received) = test_app();
+        let mut config = app.config.clone();
+        config.bar.look = config::Look::Pixel;
+        config.bar.blur = true;
+        let _ = app.set_config(config);
+        while received.try_recv().is_ok() {}
+        let mut state = app.snapshot.hypr.clone();
+        state.reloads += 1;
+        app.update(Message::Ui(UiEvent::Hypr(state.clone())));
+        let mut sent = Vec::new();
+        while let Ok(action) = received.try_recv() {
+            sent.push(action);
+        }
+        assert!(sent.contains(&Action::Hypr(hyprland::Command::SquareCorners(true))));
+        assert!(sent.contains(&Action::Blur(true)));
+        // Ordinary workspace/monitor updates must not resend them.
+        app.update(Message::Ui(UiEvent::Hypr(state)));
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

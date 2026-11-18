@@ -164,7 +164,7 @@ pub struct BarConfig {
     pub font_size: f32,
     /// Blur what's behind the notch and panels (visible when `colors.background` has transparency).
     pub blur: bool,
-    /// Overall look: `glass` (rounded, translucent) or `pixel` (square frames, pixel font).
+    /// Overall look: `smooth` (rounded, soft) or `pixel` (square frames, pixel font).
     pub look: Look,
     /// Font used everywhere in the pixel look: `tiny5` or `monocraft`.
     pub pixel_font: PixelFont,
@@ -192,7 +192,7 @@ impl Default for BarConfig {
             font_size: 13.0,
             icon_font: "Material Symbols Rounded".into(),
             blur: false,
-            look: Look::Glass,
+            look: Look::Smooth,
             pixel_font: PixelFont::Tiny5,
             outputs: Vec::new(),
             left: vec![Widget::Workspaces],
@@ -394,8 +394,10 @@ impl Default for LauncherConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Look {
+    /// Rounded corners, the configured font and soft fills; translucent when `blur` is on.
     #[default]
-    Glass,
+    #[serde(alias = "glass")]
+    Smooth,
     Pixel,
 }
 
@@ -594,8 +596,14 @@ mod tests {
     }
 
     #[test]
-    fn look_parses_and_defaults_to_glass() {
-        assert_eq!(Config::default().bar.look, Look::Glass);
+    fn look_parses_and_defaults_to_smooth() {
+        assert_eq!(Config::default().bar.look, Look::Smooth);
+        let c = Config::parse("[bar]\nlook = \"glass\"").unwrap();
+        assert_eq!(
+            c.bar.look,
+            Look::Smooth,
+            "configs written before the rename still load"
+        );
         let c = Config::parse("[bar]\nlook = \"pixel\"").unwrap();
         assert_eq!(c.bar.look, Look::Pixel);
         assert_eq!(c.bar.pixel_font, PixelFont::Tiny5);

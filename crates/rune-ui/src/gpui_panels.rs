@@ -173,6 +173,7 @@ impl Render for PanelView {
             Panel::Bluetooth => bluetooth(app, &self.dispatch),
             Panel::Sound => self.sound(app),
             Panel::Battery => battery(app, &self.dispatch),
+            Panel::System => system(app),
             Panel::Launcher(_) => div().into_any_element(),
         };
         let dispatch = self.dispatch.clone();
@@ -187,6 +188,7 @@ impl Render for PanelView {
             Panel::TrayMenu => crate::tray::MENU_W,
             Panel::Wifi | Panel::Bluetooth | Panel::Sound | Panel::Launcher(_) => DROPDOWN_W,
             Panel::Battery => 260.,
+            Panel::System => crate::system_panel::SYSTEM_W,
         } + 2. * PANEL_PAD;
         let content =
             crate::gpui_widgets::surface(&app.config, crate::gpui_widgets::Material::Popover, 14.)
@@ -283,18 +285,21 @@ impl PanelView {
             .and_then(|bytes| self.images.encoded("media", bytes));
         let picture = match picture {
             Some(source) => img(source)
-                .size(px(56.))
-                .rounded(crate::gpui_widgets::corner(8.))
+                .size(px(ART))
+                .object_fit(gpui::ObjectFit::Cover)
+                .rounded(crate::gpui_widgets::corner(10.))
                 .into_any_element(),
-            None => status_circle(c, "music_note", false, 56.).into_any_element(),
+            None => status_circle(c, "music_note", false, ART).into_any_element(),
         };
+        let muted = color(c.colors.muted);
         let info = column()
-            .gap_0()
+            .gap(px(2.))
             .flex_1()
             .min_w_0()
             .child(
-                div()
+                crate::gpui_widgets::heading(div())
                     .truncate()
+                    .text_size(px(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(if media.title.is_empty() {
                         media.identity.clone()
@@ -315,69 +320,65 @@ impl PanelView {
             )
             .child(
                 row()
-                    .gap(px(4.))
+                    .justify_between()
                     .pt(px(4.))
-                    .text_size(px(11.))
-                    .text_color(color(c.colors.muted))
-                    .child(icon(c, "headphones", 12.))
-                    .child(media.identity.clone()),
+                    .child(
+                        row()
+                            .gap(px(4.))
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(icon(c, "headphones", 12.))
+                            .child(div().truncate().child(media.identity.clone())),
+                    )
+                    .child(visualizer(app, 10, 3., 14.)),
             );
-        let mut body = column()
-            .w(px(300.))
-            .gap(px(8.))
-            .child(row().gap(px(12.)).p(px(4.)).child(picture).child(info));
+        let mut body = column().w(px(300.)).gap(px(12.)).p(px(4.)).child(
+            row()
+                .gap(px(12.))
+                .child(crate::gpui_widgets::frame(div().flex_none().child(picture)))
+                .child(info),
+        );
         if let Some(length) = media.length {
             let elapsed = std::time::Duration::from_secs_f32(position.max(0.));
             body = body.child(
-                column()
-                    .gap(px(2.))
-                    .px(px(4.))
-                    .child(self.seek.clone())
-                    .child(
-                        row()
-                            .justify_between()
-                            .text_size(px(11.))
-                            .text_color(color(c.colors.muted))
-                            .child(crate::media::clock(elapsed))
-                            .child(format!(
-                                "-{}",
-                                crate::media::clock(length.saturating_sub(elapsed))
-                            )),
-                    ),
+                column().gap(px(2.)).child(self.seek.clone()).child(
+                    row()
+                        .justify_between()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(crate::media::clock(elapsed))
+                        .child(format!(
+                            "-{}",
+                            crate::media::clock(length.saturating_sub(elapsed))
+                        )),
+                ),
             );
         }
-        let mut controls = row().justify_center().gap(px(20.));
-        for (glyph, size, control) in [
-            ("fast_rewind", 26., Control::Previous),
-            (
-                if media.status == Status::Playing {
-                    "pause"
-                } else {
-                    "play_arrow"
-                },
-                32.,
-                Control::PlayPause,
-            ),
-            ("fast_forward", 26., Control::Next),
-            ("stop", 20., Control::Stop),
-        ] {
-            controls = controls.child(glyph_button(
-                app,
-                &format!("media:{glyph}"),
-                glyph,
-                size,
-                Message::MediaControl(control),
-                &self.dispatch,
-            ));
-        }
-        body.child(controls)
-            .child(row().justify_center().child(visualizer(
-                app,
-                rune_services::visualizer::BARS,
-                4.,
-                24.,
-            )))
-            .into_any_element()
+        let playing = media.status == Status::Playing;
+        body.child(
+            row()
+                .justify_center()
+                .gap(px(28.))
+                .child(glyph_button(
+                    app,
+                    "media:previous",
+                    "skip_previous",
+                    28.,
+                    Message::MediaControl(Control::Previous),
+                    &self.dispatch,
+                ))
+                .child(play_button(app, playing, &self.dispatch))
+                .child(glyph_button(
+                    app,
+                    "media:next",
+                    "skip_next",
+                    28.,
+                    Message::MediaControl(Control::Next),
+                    &self.dispatch,
+                )),
+        )
+        .into_any_element()
     }
     fn quick(&mut self, app: &Shell) -> AnyElement {
         let s = &app.snapshot;
@@ -686,6 +687,38 @@ fn quick_tile(
     }
 }
 
+/// The media panel's primary control: a filled disc in the smooth look, a framed accent block in pixel.
+fn play_button(app: &Shell, playing: bool, dispatch: &Dispatch) -> AnyElement {
+    let c = &app.config;
+    let (fill, ink) = if crate::gpui_widgets::pixel_look() {
+        (color(c.colors.accent), color(c.colors.on_accent))
+    } else {
+        (color(c.colors.foreground), color(c.colors.background))
+    };
+    crate::gpui_widgets::frame(div())
+        .child(clickable(
+            div()
+                .id("media:play-pause")
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(PLAY))
+                .rounded(crate::gpui_widgets::corner(PLAY / 2.))
+                .bg(fill)
+                .text_color(ink)
+                .hover(|style| style.opacity(0.9))
+                .active(|style| style.opacity(0.7))
+                .cursor_pointer()
+                .child(icon(c, if playing { "pause" } else { "play_arrow" }, 30.)),
+            Message::MediaControl(Control::PlayPause),
+            dispatch,
+        ))
+        .into_any_element()
+}
+
+const ART: f32 = 72.;
+const PLAY: f32 = 48.;
+
 fn glyph_button(
     app: &Shell,
     id: &str,
@@ -894,6 +927,234 @@ fn bluetooth(app: &Shell, dispatch: &Dispatch) -> AnyElement {
         }
     }
     body.child(link).into_any_element()
+}
+
+fn system(app: &Shell) -> AnyElement {
+    use crate::system_panel::{net_scale, percent, rate, series, size, uptime};
+    let title = column().gap(px(2.));
+    let Some(stats) = &app.snapshot.stats else {
+        return title
+            .child(title_row(app, "System", None))
+            .child(unavailable(app, "System Stats"))
+            .into_any_element();
+    };
+    let history = &app.snapshot.stats_history;
+    let join = |parts: &[Option<String>]| {
+        parts
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let cpu = stat_card(
+        app,
+        "system-cpu",
+        ("memory", "CPU"),
+        format!("{}%", stats.cpu),
+        series(history, |s| percent(s.cpu)),
+        [
+            stats.cpu_name.as_deref().unwrap_or("Processor").to_owned(),
+            join(&[
+                Some(format!("{} threads", stats.threads)),
+                stats
+                    .mhz
+                    .map(|mhz| format!("{:.1} GHz", f64::from(mhz) / 1000.)),
+                stats.temp.map(|t| format!("{t}°C")),
+            ]),
+            format!(
+                "Load {:.2} · {:.2} · {:.2}",
+                stats.load[0], stats.load[1], stats.load[2]
+            ),
+        ],
+    );
+    let gpu = match &stats.gpu {
+        Some(gpu) => stat_card(
+            app,
+            "system-gpu",
+            ("developer_board", "GPU"),
+            format!("{}%", gpu.busy),
+            series(history, |s| s.gpu.as_ref().map_or(0., |g| percent(g.busy))),
+            [
+                gpu.name.as_deref().unwrap_or("Graphics").to_owned(),
+                join(&[
+                    gpu.temp.map(|t| format!("{t}°C")),
+                    gpu.watts.map(|w| format!("{w:.0} W")),
+                ]),
+                gpu.vram.map_or_else(String::new, |v| {
+                    format!("VRAM {} / {}", size(v.used), size(v.total))
+                }),
+            ],
+        ),
+        None => stat_card(
+            app,
+            "system-gpu",
+            ("developer_board", "GPU"),
+            "—".to_owned(),
+            series(&std::collections::VecDeque::new(), |_| 0.),
+            ["No supported GPU".to_owned(), String::new(), String::new()],
+        ),
+    };
+    let memory = stat_card(
+        app,
+        "system-memory",
+        ("memory_alt", "Memory"),
+        format!("{}%", stats.ram),
+        series(history, |s| percent(s.ram)),
+        [
+            format!("{} / {}", size(stats.mem.used), size(stats.mem.total)),
+            if stats.swap.total > 0 {
+                format!(
+                    "Swap {} / {}",
+                    size(stats.swap.used),
+                    size(stats.swap.total)
+                )
+            } else {
+                "No swap".to_owned()
+            },
+            String::new(),
+        ],
+    );
+    let scale = net_scale(history);
+    let network = stat_card(
+        app,
+        "system-network",
+        ("swap_vert", "Network"),
+        format!("↓ {}", rate(stats.net_down)),
+        series(history, |s| s.net_down as f32 / scale),
+        [
+            format!("↑ {}", rate(stats.net_up)),
+            format!("Peak {}", rate(scale as u64)),
+            String::new(),
+        ],
+    );
+    let pair = |a, b| div().flex().gap(px(8.)).child(a).child(b);
+    title
+        .child(title_row(
+            app,
+            "System",
+            Some(
+                div()
+                    .text_color(color(app.config.colors.muted))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .child(format!("Up {}", uptime(stats.uptime)))
+                    .into_any_element(),
+            ),
+        ))
+        .child(
+            column()
+                .gap(px(8.))
+                .child(pair(cpu, gpu))
+                .child(pair(memory, network)),
+        )
+        .into_any_element()
+}
+
+/// A metric tile: icon, label and current value over its live graph.
+fn stat_card(
+    app: &Shell,
+    id: &'static str,
+    (glyph, label): (&str, &str),
+    value: String,
+    graph: crate::system_panel::Series,
+    details: [String; 3],
+) -> gpui::Stateful<gpui::Div> {
+    let c = &app.config;
+    module(c)
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            row()
+                .justify_between()
+                .child(
+                    row()
+                        .gap(px(4.))
+                        .text_color(color(c.colors.muted))
+                        .child(icon(c, glyph, 14.))
+                        .child(
+                            crate::gpui_widgets::heading(div())
+                                .text_size(px(11.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(label.to_owned()),
+                        ),
+                )
+                .child(
+                    crate::gpui_widgets::heading(div())
+                        .text_size(px(15.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(value),
+                ),
+        )
+        .child(stat_graph(app, graph))
+        .children(details.into_iter().filter(|d| !d.is_empty()).map(|detail| {
+            crate::gpui_widgets::muted(c, detail)
+                .text_size(px(11.))
+                .truncate()
+        }))
+}
+
+/// History bars, newest on the right: soft fading bars for smooth, a lit block grid for pixel.
+fn stat_graph(app: &Shell, (values, len): crate::system_panel::Series) -> impl IntoElement {
+    let accent = color(app.config.colors.accent);
+    let track = color(app.config.colors.foreground).opacity(0.06);
+    let pixel = crate::gpui_widgets::pixel_look();
+    gpui::canvas(
+        |bounds, _, _| bounds,
+        move |_, bounds, window, _| {
+            let count = values.len();
+            let slot = bounds.size.width / count as f32;
+            let height = bounds.size.height;
+            let start = count.saturating_sub(len);
+            if !pixel {
+                window.paint_quad(gpui::fill(bounds, track).corner_radii(px(6.)));
+            }
+            let blocks = if pixel {
+                (height / slot).floor().max(1.)
+            } else {
+                1.
+            };
+            for column in 0..count {
+                let left = bounds.left() + slot * column as f32;
+                let sample = column.checked_sub(start).and_then(|index| {
+                    values
+                        .get(index)
+                        .filter(|_| index < len)
+                        .map(|v| (index, *v))
+                });
+                if pixel {
+                    let cell = (slot - px(1.)).max(px(1.));
+                    let lit = sample.map_or(0., |(_, value)| (value * blocks).round());
+                    for block in 0..blocks as u32 {
+                        let top = bounds.bottom() - slot * (block + 1) as f32;
+                        let fill = if (block as f32) < lit { accent } else { track };
+                        window.paint_quad(gpui::fill(
+                            gpui::Bounds::new(gpui::point(left, top), gpui::size(cell, cell)),
+                            fill,
+                        ));
+                    }
+                } else if let Some((index, value)) = sample {
+                    let bar = (height * value).max(px(1.5));
+                    let age = (index + 1) as f32 / len as f32;
+                    window.paint_quad(
+                        gpui::fill(
+                            gpui::Bounds::new(
+                                gpui::point(left, bounds.bottom() - bar),
+                                gpui::size((slot - px(1.)).max(px(1.)), bar),
+                            ),
+                            accent.opacity(0.25 + 0.65 * age),
+                        )
+                        .corner_radii(px(1.)),
+                    );
+                }
+            }
+        },
+    )
+    .w_full()
+    .h(px(42.))
 }
 
 fn battery(app: &Shell, dispatch: &Dispatch) -> AnyElement {
@@ -1822,11 +2083,37 @@ pub(crate) mod tests {
             read_at: Instant::now(),
             track_id: None,
         });
-        shell.snapshot.stats = Some(rune_services::stats::Stats {
-            cpu: 24,
-            ram: 50,
-            temp: Some(52),
-        });
+        for cpu in [10, 40, 24] {
+            shell
+                .snapshot
+                .record_stats(Some(rune_services::stats::Stats {
+                    cpu,
+                    ram: 50,
+                    temp: Some(52),
+                    cpu_name: Some("Test CPU".into()),
+                    threads: 8,
+                    mhz: Some(3200),
+                    load: [0.5, 0.4, 0.3],
+                    mem: rune_services::stats::Usage {
+                        used: 8 << 20,
+                        total: 16 << 20,
+                    },
+                    swap: rune_services::stats::Usage::default(),
+                    gpu: Some(rune_services::stats::Gpu {
+                        name: Some("Test GPU".into()),
+                        busy: cpu / 2,
+                        temp: Some(48),
+                        vram: Some(rune_services::stats::Usage {
+                            used: 2 << 20,
+                            total: 12 << 20,
+                        }),
+                        watts: Some(40.),
+                    }),
+                    net_down: 1_500_000,
+                    net_up: 20_000,
+                    uptime: Duration::from_secs(3 * 3600 + 120),
+                }));
+        }
         shell.snapshot.battery = Some(rune_services::system::Battery {
             percent: 70.,
             charging: false,
@@ -2022,6 +2309,7 @@ pub(crate) mod tests {
                 "sound",
                 "battery",
                 "capture",
+                "system",
                 "empty-media",
                 "empty-weather",
                 "empty-calendar",
@@ -2031,6 +2319,7 @@ pub(crate) mod tests {
                 "empty-bluetooth",
                 "empty-sound",
                 "empty-battery",
+                "empty-system",
             ] {
                 std::thread::sleep(Duration::from_millis(150));
                 tx.send(crate::UiEvent::Status(panel.into())).unwrap();
@@ -2062,6 +2351,7 @@ pub(crate) mod tests {
                     shell.snapshot.network = None;
                     shell.snapshot.bt.available = false;
                     shell.snapshot.battery = None;
+                    shell.snapshot.record_stats(None);
                     shell.snapshot.volume = None;
                     shell.snapshot.audio.outputs.clear();
                 }
@@ -2094,7 +2384,7 @@ pub(crate) mod tests {
             },
         );
         sender.join().unwrap();
-        assert_eq!(rendered.get(), 21);
+        assert_eq!(rendered.get(), 23);
     }
 }
 
