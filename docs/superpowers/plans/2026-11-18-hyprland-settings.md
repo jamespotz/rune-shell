@@ -1,6 +1,6 @@
 # Hyprland Settings Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status updated 2026-11-19:** Tasks 0–7 are implemented for the current scope. Displays is deferred. Documentation, automated checks and native UI checks pass; the live reload-replay check and real-dotfile setup/save check remain open under Task 9. Checked items below describe the implementation as shipped in the working tree, including departures from the original proposed API. Changes are uncommitted.
 
 **Goal:** A Hyprland group in Rune Settings (Windows, Effects, Input, Window Motion, Displays, Review changes) based on hyprmod 0.6.0. Edits apply live. **Save** writes `~/.config/hypr/modules/rune.lua`, which `hyprland.lua` loads last with `require("modules.rune")`. Both the `smooth` and `pixel` looks are supported.
 
@@ -32,7 +32,7 @@ Checked on this machine (Hyprland 0.57.2) by setting values to what they already
 
 ## Decisions (where Rune differs from hyprmod)
 
-1. **Rune never parses Lua.** Owned values are stored in Rune's config under `[hyprland]`, and `rune.lua` is created from them each time. hyprmod round-trips its overlay through a Lua subprocess. Rune doesn't need that, because the header of `rune.lua` says the file is generated.
+1. **Rune generates its overlay from stored state.** Owned values live under `[hyprland]` in Rune's config. Rune does not execute Lua or parse its generated overlay back into settings. A bounded read-only scan of literal user definitions supplies source labels and curve baselines; it does not evaluate arbitrary Lua.
 2. **Keys come only from a fixed schema in Rust.** User input is only ever a *value*, which is clamped or chosen from a list. Strings go through the existing `lua_string`, and curve names must match `^[A-Za-z][A-Za-z0-9_]{0,31}$`. Nothing the user types can change the Lua that Rune generates.
 3. **Your dotfiles are only ever read.** The one write outside `rune.lua` is the one-time `require` line, and it is shown as a diff before the user agrees.
 4. **Theme-owned and unknown keys are read-only.** Border colours belong to the theme service (`Command::BorderColors`). Fork-only keys such as `decoration.blur.variant = "heat_shimmer"` are never emitted.
@@ -56,82 +56,90 @@ Checked on this machine (Hyprland 0.57.2) by setting values to what they already
 
 ---
 
-### Task 0: Mockup approval ✅ built
+### Task 0: Mockup approval (complete)
 
-- [ ] The user picks the layout and copy in both looks. Only the decisions carry over to Task 6.
+- [x] Adopt the approved mockup layout and copy for both looks. Later Window Motion changes are recorded under Task 7.
 
-### Task 1: Schema
+### Task 1: Schema (complete)
 
-**Files:** create `crates/rune-services/src/hyprland_config.rs` (file ownership and Lua output form their own boundary) and register it in `lib.rs`.
+**Files:** `crates/rune-services/src/hyprland_config.rs`, `crates/rune-services/src/lib.rs`.
 
-- [ ] Add `pub struct OptionSpec { key: &'static str /* "general.gaps_in" */, kind: Kind, page: HyprPage, label: &'static str }` and `enum Kind { Int{min,max}, Float{min,max,step}, Bool, Choice(&'static [&'static str]), Sides{max} }`.
-- [ ] Add `pub const OPTIONS: &[OptionSpec]` with about 25 rows, exactly the rows in the mockup: layout, scrolling column width and follow-focus, gaps in and out, border size, resize on border, rounding, both opacities, blur on/size/passes/vibrancy, shadow on/range, repeat delay and rate, numlock, kb_layout.
-- [ ] Test: keys are unique, every `min < max`, and the IPC form (`key.replace('.', ':')`) round-trips.
+- [x] Define `OptionSpec`, `Kind` and `Section` for typed settings grouped by page.
+- [x] Define `OPTIONS` for layout, scrolling, gaps, borders, rounding, opacity, blur, shadows and keyboard settings. Informational options are read-only.
+- [x] Test unique keys, valid ranges and positive steps with `schema_is_consistent`; test IPC option decoding with `parses_getoption_replies`.
 
-### Task 2: Stored state in Rune's config
+### Task 2: Stored state in Rune's config (complete for current scope)
 
-**Files:** `crates/rune-ui/src/config.rs`
+**Files:** `crates/rune-ui/src/config.rs`, `crates/rune-services/src/hyprland_config.rs`.
 
-- [ ] Add a `[hyprland]` section with `options: BTreeMap<String, Value>`, `curves: Vec<Spring { name, mass, stiffness, dampening }>`, `animations: Vec<Leaf { leaf, spring, speed, style, enabled }>` and `monitor: Option<MonitorSpec>`.
-- [ ] Add `fn sanitize(&mut self)`. It drops keys missing from `OPTIONS`, clamps numbers, rejects non-finite floats, limits strings to 64 bytes and checks them against `Choice`, checks curve names against the regex, and allows at most 32 curves and 64 leaves.
-- [ ] Write a failing hostile-input test first, covering the cases in review focus 3.
+- [x] Store `[hyprland]` as `Overrides`, with `BTreeMap`s for options, named curves and animation leaves. `Curve` supports springs and bezier control points; the untagged encoding preserves existing spring settings.
+- [x] Sanitize against the fixed schema, clamp numbers, reject non-finite values and unsafe names/styles, limit stored curves to 32, and accept only known animation leaves. Choice strings must match an allowed value. Monitor state is deferred with Task 8.
+- [x] Cover hostile keys, strings, names, non-finite numbers and oversized numeric values with `hostile_config_is_dropped_or_clamped` and bezier validation tests.
 
-### Task 3: Lua output
+### Task 3: Lua output (complete for current scope)
 
-**Files:** `hyprland_config.rs`
+**Files:** `crates/rune-services/src/hyprland_config.rs`.
 
-- [ ] Add `pub fn render(state: &HyprState) -> String`. It writes the header comment, then a single `hl.config({ … })` with nested tables in sorted key order (`Sides` is written as `{ top=, right=, bottom=, left= }`), then `hl.curve` calls, then `hl.animation` calls, then `hl.monitor` if present.
-- [ ] Add `pub fn live_snippet(changed: &HyprState) -> String`. It uses the same output as `render`, and the result goes to `Hyprland::eval`.
-- [ ] Golden test against the "Review changes" output in the mockup. A test that the output is the same on every run. A test that values are escaped, with `kb_layout = "us\"); os.execute(\"x"` passing through `lua_string`.
+- [x] Implement `Overrides::render()` for the generated file header, nested `hl.config` tables in sorted order, curve definitions and animation leaves. Monitor output is deferred with Task 8.
+- [x] Implement `Overrides::preview()` and `Overrides::lua()` for live snippets. Previewed animation leaves include their curve dependencies, and referenced bezier presets are emitted automatically.
+- [x] Test exact nested Lua output with `renders_nested_lua`, hostile-input rejection, live-baseline merging and bezier dependency emission. Keyboard layout is informational, so Rune does not emit arbitrary `kb_layout` strings.
 
-### Task 4: Setup and save
+### Task 4: Setup and save (complete; real-dotfile check remains in Task 9)
 
-**Files:** `hyprland_config.rs`
+**Files:** `crates/rune-services/src/hyprland_config.rs`.
 
-- [ ] `fn hypr_dir()` returns `$XDG_CONFIG_HOME/hypr`, or `~/.config/hypr` if that variable is unset or empty.
-- [ ] `fn is_set_up(text) -> bool` matches the regex `^\s*require\s*\(\s*["']modules\.rune["']\s*\)` per line. Commented-out lines don't match.
-- [ ] `async fn setup()` canonicalizes `hyprland.lua`, copies it once to `hyprland.lua.rune-bak`, appends the comment and the `require` line, and writes atomically into the canonical directory. It creates an empty `modules/rune.lua` first, so the `require` never fails.
-- [ ] `async fn save(state)` canonicalizes `modules/` and writes `render(state)` atomically. Hyprland's autoreload then picks the file up.
-- [ ] Tests use a tempdir containing a symlinked `hypr/` and `modules/` dir: links are preserved, the line is added only once, a commented line is ignored, and a missing `hyprland.lua` returns an error naming the path.
+- [x] Resolve the Hyprland directory from nonempty `XDG_CONFIG_HOME`, falling back to `~/.config/hypr`.
+- [x] Detect the require line with `requires_rune()`, ignoring commented-out lines.
+- [x] Resolve symlinks, back up `hyprland.lua`, create a missing `modules/rune.lua`, and append the managed require line atomically. Repeated setup is idempotent.
+- [x] Save the generated overlay atomically through the resolved path. The service explicitly reloads Hyprland after saving, then reads a new snapshot.
+- [x] Verify symlink preservation, backup contents, idempotent setup and emitted overlay contents in temporary directories. Test require-line detection and errors naming a missing config path.
 
-### Task 5: Service and live preview
+### Task 5: Service and live preview (implemented)
 
-**Files:** `crates/rune-services/src/hyprland.rs`, `crates/rune-ui/src/backend.rs`
+**Files:** `crates/rune-services/src/hyprland_config.rs`, `crates/rune-services/src/hyprland.rs`, `crates/rune-shell/src/main.rs`, `crates/rune-ui/src/lib.rs`, `crates/rune-ui/src/protocol.rs`.
 
-- [ ] Add `Hyprland::option(key) -> Result<Value>` (`j/getoption`, parsing the `int`, `float`, `css` and `str` variants) and `Hyprland::animations()` (`j/animations`).
-- [ ] Add `Command::Snapshot`, which replies with the live baseline for every `OPTIONS` key plus the animations. It runs once when a Hyprland page opens and again after a reload.
-- [ ] Add `Command::Preview` fed by a `watch::Sender<String>` snippet. The service evals only the latest value. A rejected reply goes back to the UI as an error toast that includes the reply text.
-- [ ] Re-apply after a reload: `game_mode(false)` and `square_corners(false)` call `reload`, then eval the current dirty snippet. Failing test first.
-- [ ] While square corners is on, the Rounding row is read-only, with the note "Square corners is on".
-- [ ] Discard runs `reload`, then `Snapshot`.
+- [x] Read option values and animations in `Hyprland::settings_snapshot()` using `j/getoption` and `j/animations`. Merge IPC bezier values with literal dotfile curve definitions and source labels.
+- [x] Route snapshot/setup/save/discard requests through the service action channel. Read snapshots when opening Hyprland settings and after setup, save or discard.
+- [x] Coalesce preview snippets through `spawn_preview()` and a `watch` channel. Surface rejected IPC replies in the settings error status.
+- [x] Reapply the current touched preview when a compositor reload is observed outside game mode. Preview merging and model edits are tested; live replay across game-mode and square-corner reloads remains a Task 9 verification item.
+- [x] Make rounding read-only in the pixel look, with an explanation that the look keeps window corners square.
+- [x] Discard unsaved edits by reloading and reading a fresh snapshot.
 
-### Task 6: Pages (Windows, Effects, Input, Review)
+### Task 6: Pages (complete for current scope)
 
-**Files:** `crates/rune-ui/src/settings.rs`, `gpui_settings.rs`
+**Files:** `crates/rune-ui/src/settings.rs`, `crates/rune-ui/src/gpui_settings.rs`.
 
-- [ ] Add `Page::{HyprWindows, HyprEffects, HyprInput, HyprMotion, HyprDisplays, HyprReview}` as a fourth `GROUPS` entry with the tints from the mockup. Update the `Page::ALL` test.
-- [ ] Build rows generically from `OPTIONS`, using the existing `hero`, `group`, `flag!`, `number!` and segmented controls. Add a source chip ("Dotfiles" or "Rune"), a dirty dot and a revert button. Add a `Sides` control with four number fields.
-- [x] The source chip shows the file that sets the value (`modules/general.lua`), found by scanning `hyprland.lua` and its `require`s in load order. Only literal assignments count, so a keybind changing the layout at runtime isn't mistaken for the source.
-- [ ] Add a pending bar with Live, the change count, Review, Discard and Save. Save is disabled until setup is done.
-- [ ] Add the setup card with the diff preview, an **Add to hyprland.lua** button and **Not now**.
-- [ ] The Review page shows `render(state)`, with lines from dirty keys highlighted.
-- [ ] Check both looks against the mockup in the running UI, plus keyboard focus and reduced motion.
+- [x] Add Windows, Effects, Input, Window Motion and Review pages to the Hyprland group. Displays is deferred with Task 8.
+- [x] Build option rows from `OPTIONS`, with source chips, dirty indicators, revert actions and four-sided gap fields.
+- [x] Show the file that sets a value, found by a bounded read-only scan of `hyprland.lua` and its requires in load order. Only literal assignments count.
+- [x] Add the pending bar with Live, change count, Review, Discard and Save. Save is disabled until setup is complete.
+- [x] Add the setup card, proposed diff, Add to hyprland.lua action and Not now option.
+- [x] Show generated Lua on Review, with pending output highlighted.
+- [x] Inspect the running UI in smooth and pixel looks. The native all-pages test checks focus, Escape and validated text edits. Previews respect reduced motion.
 
-### Task 7: Window Motion
+### Task 7: Window Motion (complete, including subsequent curve editor work)
 
-- [ ] Show curve tiles drawn with a `canvas` that samples the spring step response. The pixel look snaps the curve to 3 px. Add stiffness and damping sliders.
-- [ ] Add a preview box that animates on click using the shell's existing spring code, if there is any. It jumps straight to the end when reduced motion is on.
-- [ ] Add animation rows: leaf, then a spring picker, speed and an enabled toggle. Seed them from `j/animations`, removing the `spring:` prefix.
+- [x] Draw spring response tiles with a canvas, including 3 px snapping in the pixel look, and provide stiffness and damping sliders.
+- [x] Add a replayable spring preview using GPUI spring animation, settling immediately under reduced motion.
+- [x] Seed animation rows from `j/animations`, with curve, speed and enabled controls. Curve references retain the `spring:` prefix internally.
+- [x] Add all 19 hyprmod bezier presets, native default/linear choices, named custom bezier and spring curves, validated names and bounded control points.
+- [x] Add draggable bezier handles, X1/Y1/X2/Y2 fields, preset loading, rename/delete actions and dotfile-curve revert. Rename/delete rewrites animation references; deleted names stay hidden from stale live snapshots. Built-in presets cannot be overwritten.
+- [x] Keep the preset popup's scrolling inside the menu, including at either end. A native regression test verifies list scrolling, selection, dismissal and independent page scrolling in both looks.
+- [x] Use two columns for the bezier editor: graph on the left, coordinates/presets/actions on the right. Keep a full-width preview below, sharing the spring preview's box, frame, gradient, pixel styling and replay behavior.
+- [x] Test curve validation, Lua dependencies, lifecycle operations, stale snapshot handling, unique preset choices and sequential coordinate edits. Inspect the two-column layout in both looks.
 
 ### Task 8: Displays (deferred)
 
-> Deferred during implementation. `j/monitors` reports the live `vrr` state, not the per-monitor setting (your config says `vrr = 3`, the reply says `false`), and doesn't report bit depth or colour mode in config form. A Rune `hl.monitor` override would silently reset whichever of those it didn't know. Revisit if Hyprland exposes the monitor rule over IPC.
+> `j/monitors` reports live VRR state rather than the per-monitor setting, and does not report bit depth or colour mode in config form. An incomplete `hl.monitor` override could reset settings Rune cannot preserve. Revisit when the monitor rule can be recovered reliably. Displays is outside the completed scope above.
 
+- [ ] Add a monitor card with mode, scale, VRR and 10-bit settings.
+- [ ] Apply monitor changes with a 15 s confirmation countdown, rolling back on timeout or Escape.
 
-- [ ] Add a monitor card (DP-1 from `j/monitors`) with mode, scale, VRR and 10-bit settings.
-- [ ] Apply with `eval hl.monitor{…}`, then show a 15 s "Keep these display settings?" countdown that rolls back to the earlier values on timeout or Escape. The timer uses `cx.background_executor().timer`.
+### Task 9: Docs and verification (partially complete)
 
-### Task 9: Docs and verification
-
-- [ ] Explain the overlay design in `docs/ARCHITECTURE.md`: why Rune never parses Lua, and why writes follow symlinks.
-- [ ] Do a manual check on DP-1: change gaps, check them live, save, check that `modules/rune.lua` loads after an autoreload, check that `git -C ~/dotfiles status` shows only `hyprland.lua` (the one line) and `modules/rune.lua`, then revert a key and save again.
+- [x] Document overlay generation, literal source scanning, service boundaries, symlink-safe writes and named curves in `docs/ARCHITECTURE.md`.
+- [x] Run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and `cargo doc --workspace --no-deps`. Latest implementation verification on 2026-11-19 passed all four.
+- [x] Run native GPUI tests individually: all pages and validated edits, plus preset-menu scrolling in smooth and pixel looks. Inspect the curve editor layout in both looks. Temporary screenshot tests were removed.
+- [x] Read the running Hyprland snapshot successfully with the read-only integration test.
+- [ ] Verify unsaved preview replay live across game-mode and square-corner reloads. Existing tests cover preview/model behavior and restoration of shell rules, but do not prove this full compositor path.
+- [ ] Perform the real DP-1 setup/save/reload/revert check: change gaps, verify the live result, save, confirm overlay loading and the expected dotfile diff, then revert a key and save again. This check has not been performed because it writes to the user's dotfiles. Temporary-directory file tests pass; the user's Hyprland files and installed binary have been left untouched.
