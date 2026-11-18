@@ -28,7 +28,7 @@ pub(crate) struct SettingsView {
     hypr_stage: usize,
     hypr_new_curve: bool,
     hypr_new_spring: bool,
-    hypr_drag: Option<(String, usize, gpui::Point<gpui::Pixels>)>,
+    hypr_drag: Option<(String, usize, gpui::Point<gpui::Pixels>, BezierView)>,
     /// The open dropdown on the Hyprland pages.
     hypr_select: Option<String>,
     /// "Not now" on the setup card.
@@ -1647,27 +1647,23 @@ impl SettingsView {
                 .border_1()
                 .border_color(gpui::rgba(0xffffff1f))
             })
-            .when(pixel, |card| card.border_2().border_color(accent));
-        let card = crate::gpui_widgets::fill(
-            card,
-            if pixel {
-                accent.opacity(0.14)
-            } else {
-                gpui::rgba(0)
-            },
-        )
-        .child(
-            crate::gpui_widgets::heading(div())
-                .text_size(px(14.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("Let Rune manage Hyprland settings"),
-        )
-        .child(
-            div()
-                .text_size(px(12.5))
-                .text_color(color(c.colors.muted))
-                .child(text),
-        );
+            .when(pixel, |card| {
+                card.bg(accent.opacity(0.14))
+                    .border_2()
+                    .border_color(accent)
+            })
+            .child(
+                crate::gpui_widgets::heading(div())
+                    .text_size(px(14.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Let Rune manage Hyprland settings"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(color(c.colors.muted))
+                    .child(text),
+            );
         if live.setup != Setup::NotAdded {
             items.push(card.into_any_element());
             return items;
@@ -2076,10 +2072,14 @@ impl SettingsView {
         let moving = name.to_owned();
         let dispatch = self.dispatch.clone();
         let entity = cx.entity();
+        let view = match &self.hypr_drag {
+            Some((dragged, _, _, view)) if dragged == name => *view,
+            _ => BezierView::fit(bezier),
+        };
         div()
             .id(format!("bezier-canvas:{name}"))
-            .w_full()
-            .h(px(220.))
+            .size(px(BEZIER_SIZE))
+            .flex_none()
             .relative()
             .rounded(crate::gpui_widgets::corner(7.))
             .bg(gpui::rgba(0x00000038))
@@ -2095,7 +2095,7 @@ impl SettingsView {
                     .into_iter()
                     .enumerate()
                     {
-                        let handle = bezier_screen(b, x, y);
+                        let handle = bezier_screen(b, view, x, y);
                         let dx = f32::from(event.position.x - handle.x);
                         let dy = f32::from(event.position.y - handle.y);
                         let distance = dx * dx + dy * dy;
@@ -2104,7 +2104,7 @@ impl SettingsView {
                         }
                     }
                     if let Some((i, _, offset)) = closest {
-                        this.hypr_drag = Some((target.clone(), i, offset));
+                        this.hypr_drag = Some((target.clone(), i, offset, view));
                         cx.notify();
                     }
                 }),
@@ -2117,24 +2117,30 @@ impl SettingsView {
                     },
                     move |_, b, window, _| {
                         let dot = if pixel { 3. } else { 2. };
-                        let origin = bezier_screen(b, 0., 0.);
-                        let target = bezier_screen(b, 1., 1.);
-                        for y in [origin.y, target.y] {
+                        let origin = bezier_screen(b, view, 0., 0.);
+                        let target = bezier_screen(b, view, 1., 1.);
+                        for step in 0..=BEZIER_GRID {
+                            let t = f64::from(step) / f64::from(BEZIER_GRID);
+                            let tone = if step == 0 || step == BEZIER_GRID {
+                                ink.opacity(0.3)
+                            } else {
+                                ink.opacity(0.1)
+                            };
+                            let y = bezier_screen(b, view, 0., t).y;
                             window.paint_quad(gpui::fill(
                                 gpui::Bounds::new(
                                     gpui::point(origin.x, y),
                                     gpui::size(target.x - origin.x, px(1.)),
                                 ),
-                                ink.opacity(0.15),
+                                tone,
                             ));
-                        }
-                        for x in [origin.x, target.x] {
+                            let x = bezier_screen(b, view, t, 0.).x;
                             window.paint_quad(gpui::fill(
                                 gpui::Bounds::new(
                                     gpui::point(x, target.y),
                                     gpui::size(px(1.), origin.y - target.y),
                                 ),
-                                ink.opacity(0.15),
+                                tone,
                             ));
                         }
                         for p in [origin, target] {
@@ -2148,7 +2154,7 @@ impl SettingsView {
                         }
                         for i in 0..=160 {
                             let (x, y) = bezier.position(f64::from(i) / 160.);
-                            let p = bezier_screen(b, x, y);
+                            let p = bezier_screen(b, view, x, y);
                             let p = if pixel {
                                 gpui::point(
                                     px((f32::from(p.x) / 3.).round() * 3.),
@@ -2170,6 +2176,7 @@ impl SettingsView {
                                 let t = f64::from(i) / 40.;
                                 let p = bezier_screen(
                                     b,
+                                    view,
                                     start.0 + (end.0 - start.0) * t,
                                     start.1 + (end.1 - start.1) * t,
                                 );
@@ -2178,7 +2185,7 @@ impl SettingsView {
                                     ink.opacity(0.4),
                                 ));
                             }
-                            let p = bezier_screen(b, end.0, end.1);
+                            let p = bezier_screen(b, view, end.0, end.1);
                             window.paint_quad(gpui::fill(
                                 gpui::Bounds::new(
                                     p - gpui::point(px(6.), px(6.)),
@@ -2196,28 +2203,26 @@ impl SettingsView {
                                     return;
                                 }
                                 moved.update(cx, |this, cx| {
-                                    if let Some((name, index, offset)) = &this.hypr_drag
-                                        && name == &target
+                                    if let Some((name, index, offset, drag_view)) =
+                                        &mut this.hypr_drag
+                                        && *name == target
                                     {
-                                        let p = event.position - *offset;
-                                        let width = f64::from(f32::from(b.size.width)) - 32.;
-                                        let height = f64::from(f32::from(b.size.height)) - 24.;
-                                        if width <= 0. || height <= 0. {
+                                        let Some((x, y)) =
+                                            bezier_point(b, view, event.position - *offset)
+                                        else {
                                             return;
-                                        }
+                                        };
                                         let mut points = bezier.points;
-                                        if let Some(x) = points.get_mut(index.saturating_mul(2)) {
-                                            *x = (f64::from(f32::from(p.x - b.left())) - 16.)
-                                                / width;
+                                        let first = index.saturating_mul(2);
+                                        if let Some(slot) = points.get_mut(first) {
+                                            *slot = x;
                                         }
-                                        if let Some(y) = points
-                                            .get_mut(index.saturating_mul(2).saturating_add(1))
+                                        if let Some(slot) = points.get_mut(first.saturating_add(1))
                                         {
-                                            *y = 3.
-                                                - (f64::from(f32::from(p.y - b.top())) - 12.)
-                                                    / height
-                                                    * 5.;
+                                            *slot = y;
                                         }
+                                        *drag_view =
+                                            drag_view.union(BezierView::fit(Bezier { points }));
                                         dispatch(
                                             crate::Message::Settings(Msg::Hypr(
                                                 HyprEdit::BezierPoints(name.clone(), points),
@@ -2599,11 +2604,67 @@ fn curve_button(
         .child(label.into())
 }
 
-fn bezier_screen(bounds: gpui::Bounds<gpui::Pixels>, x: f64, y: f64) -> gpui::Point<gpui::Pixels> {
+const BEZIER_SIZE: f32 = 280.;
+const BEZIER_PAD: f32 = 20.;
+const BEZIER_GRID: u8 = 4;
+
+/// The vertical range of curve space shown by the editor; x always spans 0–1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BezierView {
+    low: f64,
+    high: f64,
+}
+
+impl BezierView {
+    /// The unit square plus both handles. A bezier stays inside its control points' hull,
+    /// so the whole curve fits too.
+    fn fit(bezier: Bezier) -> Self {
+        let [_, y1, _, y2] = bezier.points.map(|v| v.clamp(-2., 3.));
+        Self {
+            low: 0_f64.min(y1).min(y2),
+            high: 1_f64.max(y1).max(y2),
+        }
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            low: self.low.min(other.low),
+            high: self.high.max(other.high),
+        }
+    }
+
+    /// Pixels per curve unit, or `None` while the editor has no usable size.
+    fn scale(self, bounds: gpui::Bounds<gpui::Pixels>) -> Option<f32> {
+        let side = f32::from(bounds.size.width.min(bounds.size.height)) - 2. * BEZIER_PAD;
+        let span = (self.high - self.low) as f32;
+        (side > 0. && span > 0.).then(|| side / span)
+    }
+}
+
+/// Maps curve space to the editor: (0, 0) bottom-left of the unit grid, (1, 1) top-right.
+fn bezier_screen(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    view: BezierView,
+    x: f64,
+    y: f64,
+) -> gpui::Point<gpui::Pixels> {
+    let scale = view.scale(bounds).unwrap_or(0.);
     gpui::point(
-        bounds.left() + px(16. + x as f32 * (f32::from(bounds.size.width) - 32.)),
-        bounds.top() + px(12. + (3. - y as f32) / 5. * (f32::from(bounds.size.height) - 24.)),
+        bounds.center().x + px((x as f32 - 0.5) * scale),
+        bounds.bottom() - px(BEZIER_PAD + (y - view.low) as f32 * scale),
     )
+}
+
+/// Inverse of [`bezier_screen`].
+fn bezier_point(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    view: BezierView,
+    point: gpui::Point<gpui::Pixels>,
+) -> Option<(f64, f64)> {
+    let scale = view.scale(bounds)?;
+    let x = f32::from(point.x - bounds.center().x) / scale + 0.5;
+    let y = (f32::from(bounds.bottom() - point.y) - BEZIER_PAD) / scale;
+    Some((f64::from(x), f64::from(y) + view.low))
 }
 
 /// A spring's step response over 0.8 s. The pixel look draws it on a 3 px grid.
@@ -3924,6 +3985,38 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bezier_editor_fits_overshooting_handles_inside_the_box() {
+        let bounds = gpui::Bounds::new(
+            gpui::point(px(10.), px(20.)),
+            gpui::size(px(BEZIER_SIZE), px(BEZIER_SIZE)),
+        );
+        let plain = BezierView::fit(Bezier {
+            points: [0.25, 0.1, 0.25, 1.],
+        });
+        assert_eq!(
+            bezier_screen(bounds, plain, 0., 0.),
+            gpui::point(px(10. + BEZIER_PAD), px(20. + BEZIER_SIZE - BEZIER_PAD))
+        );
+        assert_eq!(
+            bezier_screen(bounds, plain, 1., 1.),
+            gpui::point(px(10. + BEZIER_SIZE - BEZIER_PAD), px(20. + BEZIER_PAD))
+        );
+        let back = Bezier {
+            points: [0.3, 2.5, 0.6, -0.8],
+        };
+        let view = BezierView::fit(back);
+        for i in 0..=64 {
+            let (x, y) = back.position(f64::from(i) / 64.);
+            let p = bezier_screen(bounds, view, x, y);
+            assert!(bounds.contains(&p), "{p:?} escapes {bounds:?}");
+        }
+        let (x, y) = bezier_point(bounds, view, bezier_screen(bounds, view, 0.25, -0.2)).unwrap();
+        assert!((x - 0.25).abs() < 1e-4 && (y + 0.2).abs() < 1e-4);
+        assert!(bezier_point(gpui::Bounds::default(), view, bounds.origin).is_none());
+    }
+
     struct DropdownScrollFixture {
         settings: Entity<SettingsView>,
         page_scroll: gpui::ScrollHandle,
