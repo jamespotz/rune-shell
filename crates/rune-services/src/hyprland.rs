@@ -16,7 +16,7 @@ use tokio::{
 use tracing::{info, warn};
 
 /// Requests for Hyprland.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// Switch the focused monitor to this workspace.
     Focus(i32),
@@ -27,12 +27,16 @@ pub enum Command {
     BorderColors([u8; 4], [u8; 4]),
     /// Fetch the keybinds.
     Binds,
+    /// Settings page work; answered with [`Reply::Settings`].
+    Settings(crate::hyprland_config::Settings),
 }
 
 /// What [`Hyprland::handle`] reports back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     Binds(Vec<Bind>),
+    /// The fresh snapshot after a settings request, or why it failed.
+    Settings(Result<Box<crate::hyprland_config::Snapshot>, String>),
 }
 
 /// Errors from talking to Hyprland.
@@ -46,6 +50,11 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("Hyprland rejected the request: {0}")]
     Rejected(String),
+    #[error("{}: {source}", path.display())]
+    File {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// One entry of `hyprctl -j workspaces`.
@@ -161,6 +170,16 @@ impl Hyprland {
             }
             Command::Binds => {
                 reply(Reply::Binds(self.binds().await?));
+                Ok(())
+            }
+            Command::Settings(request) => {
+                // Failures are shown on the settings page, so they're replied, not returned.
+                reply(Reply::Settings(
+                    self.settings(request)
+                        .await
+                        .map(Box::new)
+                        .map_err(|e| e.to_string()),
+                ));
                 Ok(())
             }
         }

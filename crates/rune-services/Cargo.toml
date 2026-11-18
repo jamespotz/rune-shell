@@ -17,6 +17,7 @@ tracing = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+toml = "1"
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

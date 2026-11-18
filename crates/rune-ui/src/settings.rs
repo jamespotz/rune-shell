@@ -5,6 +5,10 @@ use crate::config::{Config, Rgba, ThemeSource, Widget, valid_clock_format};
 use rune_services::{
     audio::{DeviceCommand, Devices},
     bluetooth::{Command as BtCommand, State as BtState},
+    hyprland_config::{
+        self, Bezier, Curve, Leaf, Overrides, Settings as HyprSettings, Snapshot, Spring, Touched,
+        Value,
+    },
     system::{Network, WifiNetwork},
     theme::{self, Palette, Variant, export::App as ThemeApp},
     wallpaper::Wallpaper,
@@ -28,11 +32,16 @@ pub enum Page {
     Capture,
     Launcher,
     Animations,
+    HyprWindows,
+    HyprEffects,
+    HyprInput,
+    HyprMotion,
+    HyprReview,
 }
 
 impl Page {
     #[cfg(test)]
-    const ALL: [Page; 13] = [
+    const ALL: [Page; 18] = [
         Page::Appearance,
         Page::Theme,
         Page::Wallpaper,
@@ -46,19 +55,58 @@ impl Page {
         Page::Capture,
         Page::Launcher,
         Page::Animations,
+        Page::HyprWindows,
+        Page::HyprEffects,
+        Page::HyprInput,
+        Page::HyprMotion,
+        Page::HyprReview,
     ];
 
-    const GROUPS: [&'static [Page]; 3] = [
-        &[Page::Wifi, Page::Bluetooth, Page::Sound, Page::Equalizer],
-        &[
-            Page::Appearance,
-            Page::Theme,
-            Page::Wallpaper,
-            Page::Bar,
-            Page::Animations,
-        ],
-        &[Page::Launcher, Page::Calendar, Page::Weather, Page::Capture],
+    const GROUPS: [(&'static str, &'static [Page]); 4] = [
+        (
+            "Connections",
+            &[Page::Wifi, Page::Bluetooth, Page::Sound, Page::Equalizer],
+        ),
+        (
+            "Rune",
+            &[
+                Page::Appearance,
+                Page::Theme,
+                Page::Wallpaper,
+                Page::Bar,
+                Page::Animations,
+            ],
+        ),
+        (
+            "Apps",
+            &[Page::Launcher, Page::Calendar, Page::Weather, Page::Capture],
+        ),
+        (
+            "Hyprland",
+            &[
+                Page::HyprWindows,
+                Page::HyprEffects,
+                Page::HyprInput,
+                Page::HyprMotion,
+                Page::HyprReview,
+            ],
+        ),
     ];
+
+    /// Pages that edit Hyprland's own settings.
+    pub fn is_hypr(self) -> bool {
+        self.section().is_some() || matches!(self, Page::HyprMotion | Page::HyprReview)
+    }
+
+    /// Which [`hyprland_config::OPTIONS`] this page shows.
+    pub fn section(self) -> Option<hyprland_config::Section> {
+        match self {
+            Page::HyprWindows => Some(hyprland_config::Section::Windows),
+            Page::HyprEffects => Some(hyprland_config::Section::Effects),
+            Page::HyprInput => Some(hyprland_config::Section::Input),
+            _ => None,
+        }
+    }
 
     fn tint(self) -> u32 {
         match self {
@@ -74,6 +122,11 @@ impl Page {
             Page::Calendar => 0xff453aff,
             Page::Weather => 0x64d2ffff,
             Page::Capture => 0xff9f0aff,
+            Page::HyprWindows => 0x5e5ce6ff,
+            Page::HyprEffects => 0xbf5af2ff,
+            Page::HyprInput => 0x8e8e93ff,
+            Page::HyprMotion => 0xff9f0aff,
+            Page::HyprReview => 0x636366ff,
         }
     }
 
@@ -92,22 +145,31 @@ impl Page {
             Page::Bar => ("toolbar", "Menu Bar"),
             Page::Launcher => ("search", "Launcher"),
             Page::Animations => ("animation", "Animations"),
+            Page::HyprWindows => ("space_dashboard", "Windows"),
+            Page::HyprEffects => ("blur_on", "Effects"),
+            Page::HyprInput => ("keyboard", "Input"),
+            Page::HyprMotion => ("motion_mode", "Window Motion"),
+            Page::HyprReview => ("difference", "Review Changes"),
         }
     }
 }
 
-pub fn visible_groups(query: &str) -> Vec<Vec<Page>> {
+/// Sidebar groups as `(title, pages)`, keeping pages whose name matches `query`.
+/// A query matching a group's title keeps the whole group.
+pub fn visible_groups(query: &str) -> Vec<(&'static str, Vec<Page>)> {
     let query = query.trim().to_lowercase();
     Page::GROUPS
         .iter()
-        .map(|group| {
-            group
+        .map(|&(title, group)| {
+            let whole = title.to_lowercase().contains(&query);
+            let pages = group
                 .iter()
                 .copied()
-                .filter(|page| page.label().1.to_lowercase().contains(&query))
-                .collect::<Vec<_>>()
+                .filter(|page| whole || page.label().1.to_lowercase().contains(&query))
+                .collect::<Vec<_>>();
+            (title, pages)
         })
-        .filter(|group| !group.is_empty())
+        .filter(|(_, pages)| !pages.is_empty())
         .collect()
 }
 
@@ -178,6 +240,420 @@ pub enum Request {
     WifiConnect(WifiNetwork, Option<String>),
     /// Delete a saved profile.
     WifiForget(String),
+    Hypr(HyprSettings),
+    /// Lua that previews the unsaved Hyprland settings.
+    HyprPreview(String),
+}
+
+/// An edit on the Hyprland pages. Option keys are [`hyprland_config::OPTIONS`] keys.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HyprEdit {
+    Num(&'static str, f32),
+    /// One side (top, right, bottom, left) of a sides option.
+    Side(&'static str, usize, f32),
+    Set(&'static str, Value),
+    /// Drop Rune's override and go back to the dotfile value.
+    Revert(&'static str),
+    Stiffness(String, f32),
+    Dampening(String, f32),
+    CurveRevert(String),
+    CurveCreate(String, Curve),
+    CurveRename(String, String),
+    CurveDelete(String),
+    BezierPoints(String, [f64; 4]),
+    BezierCoordinate(String, usize, f64),
+    LeafEnabled(String, bool),
+    LeafSpeed(String, f32),
+    LeafCurve(String, String),
+    LeafRevert(String),
+    Save,
+    Discard,
+    Setup,
+    /// Text typed in the Input page's repeat test field.
+    TestText(String),
+}
+
+/// Hyprland settings being edited: the draft over the live compositor values.
+#[derive(Debug, Clone, Default)]
+pub struct HyprUi {
+    /// `None` until the first snapshot arrives.
+    pub live: Option<Snapshot>,
+    /// What `rune.lua` will contain once saved; starts as `config.hyprland`.
+    pub draft: Overrides,
+    pub touched: Touched,
+    /// The last failure, shown on the Hyprland pages.
+    pub status: String,
+    /// A save, setup or discard is running.
+    pub busy: bool,
+    /// The Input page's test field.
+    pub test_text: String,
+    removed_curves: std::collections::BTreeSet<String>,
+    loaded: bool,
+}
+
+impl HyprUi {
+    pub fn option(&self, key: &str) -> Option<&Value> {
+        self.draft
+            .options
+            .get(key)
+            .or_else(|| self.live.as_ref()?.options.get(key))
+    }
+
+    pub fn curve(&self, name: &str) -> Option<Spring> {
+        if self.removed_curves.contains(name) {
+            return None;
+        }
+        self.draft
+            .curves
+            .get(name)
+            .or_else(|| self.live.as_ref()?.curves.get(name))
+            .copied()
+            .and_then(Curve::spring)
+    }
+
+    pub fn bezier(&self, name: &str) -> Option<Bezier> {
+        if self.removed_curves.contains(name) {
+            return None;
+        }
+        match self
+            .draft
+            .curves
+            .get(name)
+            .or_else(|| self.live.as_ref()?.curves.get(name))
+        {
+            Some(Curve::Bezier(b)) => Some(*b),
+            _ => hyprland_config::bezier_preset(name),
+        }
+    }
+
+    pub fn curve_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.draft.curves.keys().cloned().collect();
+        if let Some(live) = &self.live {
+            names.extend(live.curves.keys().cloned());
+        }
+        names.retain(|n| !self.removed_curves.contains(n));
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn animation_curves(&self) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .springs()
+            .into_iter()
+            .filter(|n| self.curve(n).is_some())
+            .map(|n| format!("spring:{n}"))
+            .collect();
+        names.extend(
+            self.curve_names().into_iter().filter(|n| {
+                self.bezier(n).is_some() && hyprland_config::bezier_preset(n).is_none()
+            }),
+        );
+        for name in ["default", "linear"]
+            .into_iter()
+            .chain(hyprland_config::BEZIER_PRESETS.iter().map(|(n, _)| *n))
+        {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+        names
+    }
+
+    fn set_bezier(&mut self, name: String, bezier: Bezier) -> Option<()> {
+        if !hyprland_config::valid_name(&name)
+            || hyprland_config::bezier_preset(&name).is_some()
+            || matches!(name.as_str(), "default" | "linear")
+            || self.bezier(&name).is_none()
+            || (!self.draft.curves.contains_key(&name) && self.draft.curves.len() >= 32)
+        {
+            return None;
+        }
+        self.draft
+            .curves
+            .insert(name.clone(), Curve::Bezier(bezier.sanitized()?));
+        self.touched.curves.insert(name);
+        Some(())
+    }
+
+    pub fn custom_curve(&self, name: &str) -> bool {
+        self.draft.curves.contains_key(name)
+            && !self
+                .live
+                .as_ref()
+                .is_some_and(|live| live.sources.curves.contains_key(name))
+    }
+
+    fn available_curve_name(&mut self, name: &str) -> bool {
+        if !hyprland_config::valid_name(name) {
+            self.status =
+                "Use a letter, then letters, digits or underscores, up to 32 characters.".into();
+            return false;
+        }
+        if matches!(name, "default" | "linear")
+            || hyprland_config::bezier_preset(name).is_some()
+            || self.curve_names().iter().any(|n| n == name)
+        {
+            self.status = "That curve name is already in use.".into();
+            return false;
+        }
+        self.status.clear();
+        true
+    }
+
+    fn replace_curve_references(&mut self, old: &str, new: &str) {
+        for name in hyprland_config::LEAVES {
+            if let Some(mut leaf) = self.leaf(name).cloned()
+                && leaf.curve == old
+            {
+                leaf.curve = new.to_owned();
+                self.set_leaf((*name).to_owned(), leaf);
+            }
+        }
+    }
+
+    pub fn leaf(&self, name: &str) -> Option<&Leaf> {
+        self.draft
+            .animations
+            .get(name)
+            .or_else(|| self.live.as_ref()?.leaves.get(name))
+    }
+
+    /// Spring names that animations can use.
+    pub fn springs(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.draft.curves.keys().cloned().collect();
+        if let Some(live) = &self.live {
+            names.extend(live.curves.keys().cloned());
+            names.extend(
+                live.leaves
+                    .values()
+                    .filter_map(|l| l.curve.strip_prefix("spring:").map(str::to_owned)),
+            );
+        }
+        names.retain(|n| !self.removed_curves.contains(n));
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn is_dirty(&self, saved: &Overrides) -> bool {
+        self.loaded && &self.draft != saved
+    }
+
+    /// How many options, curves and animations differ from what's saved.
+    pub fn changes(&self, saved: &Overrides) -> usize {
+        fn differ<V: PartialEq>(
+            a: &std::collections::BTreeMap<String, V>,
+            b: &std::collections::BTreeMap<String, V>,
+        ) -> usize {
+            let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            keys.into_iter().filter(|k| a.get(*k) != b.get(*k)).count()
+        }
+        if !self.loaded {
+            return 0;
+        }
+        differ(&self.draft.options, &saved.options)
+            + differ(&self.draft.curves, &saved.curves)
+            + differ(&self.draft.animations, &saved.animations)
+    }
+
+    /// Whether `page` shows an unsaved change.
+    pub fn page_dirty(&self, page: Page, saved: &Overrides) -> bool {
+        if !self.loaded {
+            return false;
+        }
+        match page.section() {
+            Some(section) => hyprland_config::OPTIONS
+                .iter()
+                .filter(|o| o.section == section)
+                .any(|o| self.draft.options.get(o.key) != saved.options.get(o.key)),
+            None if page == Page::HyprMotion => {
+                self.draft.curves != saved.curves || self.draft.animations != saved.animations
+            }
+            None => false,
+        }
+    }
+
+    /// Applies a snapshot or failure from the daemon.
+    pub fn received(&mut self, result: Result<Box<Snapshot>, String>) {
+        self.busy = false;
+        match result {
+            Ok(snapshot) => {
+                self.live = Some(*snapshot);
+                self.status.clear();
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    /// Lua re-applying every unsaved edit, e.g. after a reload dropped them.
+    pub fn preview(&self) -> Option<String> {
+        let live = self.live.as_ref()?;
+        let lua = self.draft.preview(live, &self.touched).lua();
+        (!lua.is_empty()).then_some(lua)
+    }
+
+    fn edit(&mut self, saved: &Overrides, edit: HyprEdit) -> Option<Request> {
+        match edit {
+            HyprEdit::Num(key, v) => {
+                self.set(key, Value::Float(f64::from(v)));
+            }
+            HyprEdit::Side(key, side, v) => {
+                let Some(Value::Sides(mut sides)) = self.option(key).cloned() else {
+                    return None;
+                };
+                // Float-to-int `as` saturates (NaN becomes 0); the schema clamps the rest.
+                *sides.get_mut(side)? = v.round().clamp(0., 1000.) as i64;
+                self.set(key, Value::Sides(sides));
+            }
+            HyprEdit::Set(key, v) => self.set(key, v),
+            HyprEdit::Revert(key) => {
+                self.draft.options.remove(key);
+                self.touched.options.insert(key.to_owned());
+            }
+            HyprEdit::Stiffness(name, v) => {
+                let mut spring = self.curve(&name)?;
+                spring.stiffness = f64::from(v);
+                self.set_curve(name, spring);
+            }
+            HyprEdit::Dampening(name, v) => {
+                let mut spring = self.curve(&name)?;
+                spring.dampening = f64::from(v);
+                self.set_curve(name, spring);
+            }
+            HyprEdit::CurveCreate(name, curve) => {
+                if !self.available_curve_name(&name) {
+                    return None;
+                }
+                if self.draft.curves.len() >= 32 {
+                    self.status = "A maximum of 32 custom curves is supported.".into();
+                    return None;
+                }
+                let mut one = Overrides::default();
+                one.curves.insert(name.clone(), curve);
+                one.sanitize();
+                let curve = one.curves.remove(&name)?;
+                self.removed_curves.remove(&name);
+                self.draft.curves.insert(name.clone(), curve);
+                self.touched.curves.insert(name);
+            }
+            HyprEdit::BezierCoordinate(name, index, value) => {
+                let mut bezier = self.bezier(&name)?;
+                *bezier.points.get_mut(index)? = value;
+                self.set_bezier(name, bezier)?;
+            }
+            HyprEdit::BezierPoints(name, points) => {
+                self.set_bezier(name, Bezier { points })?;
+            }
+            HyprEdit::CurveRename(old, new) => {
+                if old == new {
+                    return None;
+                }
+                if !self.custom_curve(&old) || !self.available_curve_name(&new) {
+                    return None;
+                }
+                let curve = self.draft.curves.remove(&old)?;
+                let (old_ref, new_ref) = match curve {
+                    Curve::Spring(_) => (format!("spring:{old}"), format!("spring:{new}")),
+                    Curve::Bezier(_) => (old.clone(), new.clone()),
+                };
+                self.draft.curves.insert(new.clone(), curve);
+                self.removed_curves.remove(&new);
+                self.removed_curves.insert(old.clone());
+                self.touched.curves.insert(new);
+                self.touched.curves.insert(old);
+                self.replace_curve_references(&old_ref, &new_ref);
+            }
+            HyprEdit::CurveDelete(name) => {
+                if !self.custom_curve(&name) {
+                    return None;
+                }
+                let curve = self.draft.curves.remove(&name)?;
+                let reference = match curve {
+                    Curve::Spring(_) => format!("spring:{name}"),
+                    Curve::Bezier(_) => name.clone(),
+                };
+                self.touched.curves.insert(name.clone());
+                self.removed_curves.insert(name);
+                self.replace_curve_references(&reference, "default");
+            }
+            HyprEdit::CurveRevert(name) => {
+                self.draft.curves.remove(&name);
+                self.touched.curves.insert(name);
+            }
+            HyprEdit::LeafEnabled(name, on) => {
+                let mut leaf = self.leaf(&name)?.clone();
+                leaf.enabled = on;
+                self.set_leaf(name, leaf);
+            }
+            HyprEdit::LeafSpeed(name, v) => {
+                let mut leaf = self.leaf(&name)?.clone();
+                leaf.speed = f64::from(v);
+                self.set_leaf(name, leaf);
+            }
+            HyprEdit::LeafCurve(name, spring) => {
+                let mut leaf = self.leaf(&name)?.clone();
+                leaf.curve = spring;
+                self.set_leaf(name, leaf);
+            }
+            HyprEdit::LeafRevert(name) => {
+                self.draft.animations.remove(&name);
+                self.touched.leaves.insert(name);
+            }
+            HyprEdit::Save => {
+                self.busy = true;
+                self.touched = Touched::default();
+                return Some(Request::Hypr(HyprSettings::Save(Box::new(
+                    self.draft.clone(),
+                ))));
+            }
+            HyprEdit::Discard => {
+                self.busy = true;
+                self.draft = saved.clone();
+                self.removed_curves.clear();
+                self.touched = Touched::default();
+                return Some(Request::Hypr(HyprSettings::Discard));
+            }
+            HyprEdit::TestText(text) => {
+                self.test_text = text;
+                return None;
+            }
+            HyprEdit::Setup => {
+                self.busy = true;
+                return Some(Request::Hypr(HyprSettings::Setup(Box::new(saved.clone()))));
+            }
+        }
+        self.preview().map(Request::HyprPreview)
+    }
+
+    fn set(&mut self, key: &'static str, value: Value) {
+        if let Some(v) = hyprland_config::spec(key).and_then(|s| s.clamp(value)) {
+            self.draft.options.insert(key.to_owned(), v);
+            self.touched.options.insert(key.to_owned());
+        }
+    }
+
+    fn set_curve(&mut self, name: String, spring: Spring) {
+        let mut one = Overrides::default();
+        one.curves.insert(name.clone(), Curve::Spring(spring));
+        one.sanitize();
+        if let Some(s) = one.curves.remove(&name) {
+            self.draft.curves.insert(name.clone(), s);
+            self.touched.curves.insert(name);
+        }
+    }
+
+    fn set_leaf(&mut self, name: String, leaf: Leaf) {
+        let mut one = Overrides::default();
+        one.animations.insert(name.clone(), leaf);
+        one.sanitize();
+        if let Some(l) = one.animations.remove(&name) {
+            self.draft.animations.insert(name.clone(), l);
+            self.touched.leaves.insert(name);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +750,7 @@ pub enum Msg {
     NewLink(String),
     AddLink,
     RemoveLink(usize),
+    Hypr(HyprEdit),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -300,6 +777,7 @@ pub struct State {
     new_link: String,
     pub cal_errors: Vec<String>,
     pub(crate) page_search: String,
+    pub hypr: HyprUi,
 }
 
 static PRESETS: LazyLock<[Vec<Palette>; 2]> = LazyLock::new(|| {
@@ -315,7 +793,15 @@ impl State {
         match msg {
             Msg::Page(page) => {
                 let left_bluetooth = self.page == Page::Bluetooth && page != Page::Bluetooth;
+                let entered_hypr = page.is_hypr() && !self.page.is_hypr();
                 self.page = page;
+                if entered_hypr && !self.hypr.busy {
+                    if !self.hypr.loaded {
+                        self.hypr.draft = config.hyprland.clone();
+                        self.hypr.loaded = true;
+                    }
+                    return Some(Request::Hypr(HyprSettings::Snapshot));
+                }
                 if page == Page::Wallpaper && self.wallpapers.is_empty() {
                     return Some(Request::LoadWallpapers);
                 }
@@ -489,6 +975,12 @@ impl State {
             }
             Msg::EqBand(..) => {}
             Msg::EqReset => config.equalizer.bands = [0.; 10],
+            Msg::Hypr(edit) => {
+                if edit == HyprEdit::Save {
+                    config.hyprland = self.hypr.draft.clone();
+                }
+                return self.hypr.edit(&config.hyprland, edit);
+            }
         }
         None
     }
@@ -606,17 +1098,24 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     #[test]
     fn page_search_filters_groups() {
-        assert_eq!(visible_groups("").len(), 3);
-        assert_eq!(visible_groups("").iter().map(Vec::len).sum::<usize>(), 13);
-        assert_eq!(visible_groups("wi"), [vec![Page::Wifi]]);
-        assert_eq!(visible_groups("SOUND"), [vec![Page::Sound]]);
-        assert_eq!(visible_groups("equal"), [vec![Page::Equalizer]]);
+        let pages =
+            |q: &str| -> Vec<Vec<Page>> { visible_groups(q).into_iter().map(|(_, p)| p).collect() };
+        assert_eq!(visible_groups("").len(), 4);
+        assert_eq!(pages("").iter().map(Vec::len).sum::<usize>(), 18);
+        assert_eq!(pages("motion"), [vec![Page::HyprMotion]]);
+        assert_eq!(pages("wi-"), [vec![Page::Wifi]]);
+        assert_eq!(pages("SOUND"), [vec![Page::Sound]]);
+        assert_eq!(pages("equal"), [vec![Page::Equalizer]]);
+        assert_eq!(pages("hyprland").concat().len(), 5);
         assert!(visible_groups("zzz").is_empty());
         let mut config = Config::default();
         let mut state = State::default();
         state.update(&mut config, Msg::PageSearch("menu".into()));
         assert_eq!(state.page_search, "menu");
-        assert_eq!(visible_groups(&state.page_search), [vec![Page::Bar]]);
+        assert_eq!(
+            visible_groups(&state.page_search),
+            [("Rune", vec![Page::Bar])]
+        );
     }
 
     use super::*;
@@ -875,6 +1374,282 @@ mod tests {
         assert_eq!(config.equalizer.bands[1], 0.);
         state.update(&mut config, Msg::EqReset);
         assert_eq!(config.equalizer.bands, PRESETS[0].gains);
+    }
+
+    #[test]
+    fn animation_curve_choices_are_unique_with_live_presets() {
+        let mut live = Snapshot::default();
+        live.curves.insert(
+            "ease".into(),
+            Curve::Bezier(hyprland_config::bezier_preset("ease").unwrap()),
+        );
+        let ui = HyprUi {
+            live: Some(live),
+            ..HyprUi::default()
+        };
+        let choices = ui.animation_curves();
+        assert_eq!(choices.iter().filter(|n| n.as_str() == "ease").count(), 1);
+        assert!(choices.contains(&"linear".into()));
+    }
+
+    #[test]
+    fn deleted_and_renamed_live_custom_curves_leave_effective_choices() {
+        let curve = Curve::Bezier(Bezier {
+            points: [0., 0., 1., 1.],
+        });
+        let mut ui = HyprUi::default();
+        ui.draft.curves.insert("custom1".into(), curve);
+        let mut live = Snapshot::default();
+        live.curves.insert("custom1".into(), curve);
+        ui.live = Some(live);
+        ui.edit(
+            &Overrides::default(),
+            HyprEdit::CurveRename("custom1".into(), "newName".into()),
+        );
+        assert!(!ui.curve_names().contains(&"custom1".into()));
+        assert!(ui.bezier("custom1").is_none());
+        ui.edit(
+            &Overrides::default(),
+            HyprEdit::CurveDelete("newName".into()),
+        );
+        assert!(ui.curve_names().is_empty());
+    }
+
+    #[test]
+    fn builtin_presets_cannot_be_overwritten_by_point_edits() {
+        let mut ui = HyprUi::default();
+        ui.edit(
+            &Overrides::default(),
+            HyprEdit::BezierPoints("ease".into(), [0., 0., 1., 1.]),
+        );
+        assert!(ui.draft.curves.is_empty());
+        ui.edit(
+            &Overrides::default(),
+            HyprEdit::BezierCoordinate("ease".into(), 0, 0.8),
+        );
+        assert!(ui.draft.curves.is_empty());
+    }
+
+    #[test]
+    fn saved_custom_bezier_remains_deletable_after_compositor_reports_it() {
+        let curve = Curve::Bezier(Bezier {
+            points: [0., 0., 1., 1.],
+        });
+        let mut ui = HyprUi::default();
+        ui.draft.curves.insert("custom1".into(), curve);
+        let mut live = Snapshot::default();
+        live.curves.insert("custom1".into(), curve);
+        ui.live = Some(live);
+        assert!(ui.custom_curve("custom1"));
+        ui.edit(
+            &Overrides::default(),
+            HyprEdit::CurveDelete("custom1".into()),
+        );
+        assert!(ui.draft.curves.is_empty());
+    }
+
+    #[test]
+    fn bezier_coordinate_edits_preserve_the_other_coordinates() {
+        let mut ui = HyprUi::default();
+        let saved = Overrides::default();
+        ui.edit(
+            &saved,
+            HyprEdit::CurveCreate(
+                "custom1".into(),
+                Curve::Bezier(Bezier {
+                    points: [0., 0., 1., 1.],
+                }),
+            ),
+        );
+        ui.edit(&saved, HyprEdit::BezierCoordinate("custom1".into(), 0, 0.3));
+        ui.edit(
+            &saved,
+            HyprEdit::BezierCoordinate("custom1".into(), 1, -0.5),
+        );
+        ui.edit(&saved, HyprEdit::BezierCoordinate("custom1".into(), 99, 5.));
+        assert_eq!(ui.bezier("custom1").unwrap().points, [0.3, -0.5, 1., 1.]);
+    }
+
+    #[test]
+    fn custom_curve_lifecycle_rewires_animation_references() {
+        let mut ui = HyprUi {
+            live: Some(hypr_snapshot()),
+            ..HyprUi::default()
+        };
+        let saved = Overrides::default();
+        let curve = Curve::Bezier(Bezier {
+            points: [0.3, 0., 0.6, 1.],
+        });
+        ui.edit(&saved, HyprEdit::CurveCreate("custom1".into(), curve));
+        assert_eq!(ui.draft.curves.get("custom1"), Some(&curve));
+        ui.edit(
+            &saved,
+            HyprEdit::LeafCurve("windowsMove".into(), "custom1".into()),
+        );
+        ui.edit(
+            &saved,
+            HyprEdit::CurveRename("custom1".into(), "gentle".into()),
+        );
+        assert_eq!(ui.leaf("windowsMove").unwrap().curve, "gentle");
+        assert!(!ui.draft.curves.contains_key("custom1"));
+        ui.edit(&saved, HyprEdit::CurveDelete("gentle".into()));
+        assert_eq!(ui.leaf("windowsMove").unwrap().curve, "default");
+        assert!(ui.draft.curves.is_empty());
+    }
+
+    #[test]
+    fn custom_curve_names_cannot_replace_existing_or_reserved_curves() {
+        let mut ui = HyprUi {
+            live: Some(hypr_snapshot()),
+            ..HyprUi::default()
+        };
+        let saved = Overrides::default();
+        for name in [
+            "default",
+            "linear",
+            "easeOut",
+            "stripGlide",
+            "bad\"name",
+            "",
+        ] {
+            ui.edit(
+                &saved,
+                HyprEdit::CurveCreate(
+                    name.into(),
+                    Curve::Bezier(Bezier {
+                        points: [0., 0., 1., 1.],
+                    }),
+                ),
+            );
+            assert!(ui.draft.curves.is_empty(), "{name}");
+            assert!(!ui.status.is_empty());
+        }
+    }
+
+    fn hypr_snapshot() -> Snapshot {
+        let mut live = Snapshot::default();
+        live.options.insert("general.gaps_in".into(), Value::Int(5));
+        live.options
+            .insert("general.gaps_out".into(), Value::Sides([0, 16, 16, 16]));
+        live.curves.insert(
+            "stripGlide".into(),
+            Curve::Spring(Spring {
+                mass: 1.,
+                stiffness: 150.,
+                dampening: 25.,
+            }),
+        );
+        live.leaves.insert(
+            "windowsMove".into(),
+            Leaf {
+                enabled: true,
+                speed: 5.,
+                curve: "spring:stripGlide".into(),
+                style: String::new(),
+            },
+        );
+        live.setup = hyprland_config::Setup::Added;
+        live
+    }
+
+    #[test]
+    fn hyprland_edits_preview_save_and_discard() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        config
+            .hyprland
+            .options
+            .insert("general.border_size".into(), Value::Int(3));
+        assert_eq!(
+            state.update(&mut config, Msg::Page(Page::HyprWindows)),
+            Some(Request::Hypr(HyprSettings::Snapshot))
+        );
+        assert_eq!(state.hypr.draft, config.hyprland);
+        // Moving between Hyprland pages doesn't refetch.
+        assert_eq!(
+            state.update(&mut config, Msg::Page(Page::HyprEffects)),
+            None
+        );
+        // No preview before the live values are known.
+        let edit = |key, v| Msg::Hypr(HyprEdit::Num(key, v));
+        assert_eq!(state.update(&mut config, edit("general.gaps_in", 9.)), None);
+        state.hypr.received(Ok(Box::new(hypr_snapshot())));
+
+        let Some(Request::HyprPreview(lua)) =
+            state.update(&mut config, edit("general.gaps_in", 1e9))
+        else {
+            panic!("expected a preview");
+        };
+        assert!(lua.contains("gaps_in = 40,"), "{lua}");
+        assert!(
+            !lua.contains("border_size"),
+            "untouched keys aren't re-sent: {lua}"
+        );
+        assert!(state.hypr.is_dirty(&config.hyprland));
+        assert_eq!(state.hypr.changes(&config.hyprland), 1);
+        assert!(state.hypr.page_dirty(Page::HyprWindows, &config.hyprland));
+        assert!(!state.hypr.page_dirty(Page::HyprEffects, &config.hyprland));
+
+        state.update(
+            &mut config,
+            Msg::Hypr(HyprEdit::Side("general.gaps_out", 0, 12.)),
+        );
+        assert_eq!(
+            state.hypr.option("general.gaps_out"),
+            Some(&Value::Sides([12, 16, 16, 16]))
+        );
+        // Hostile indices and values change nothing.
+        state.update(
+            &mut config,
+            Msg::Hypr(HyprEdit::Side("general.gaps_out", 9, 1.)),
+        );
+        state.update(&mut config, edit("general.gaps_in", f32::NAN));
+        assert_eq!(state.hypr.option("general.gaps_in"), Some(&Value::Int(40)));
+
+        let Some(Request::HyprPreview(lua)) = state.update(
+            &mut config,
+            Msg::Hypr(HyprEdit::Stiffness("stripGlide".into(), 300.)),
+        ) else {
+            panic!("expected a preview");
+        };
+        assert!(lua.contains("stiffness = 300.0"), "{lua}");
+        state.update(
+            &mut config,
+            Msg::Hypr(HyprEdit::LeafSpeed("windowsMove".into(), 2.)),
+        );
+        assert_eq!(state.hypr.leaf("windowsMove").map(|l| l.speed), Some(2.));
+
+        // Revert previews the value from before the edit.
+        let Some(Request::HyprPreview(lua)) =
+            state.update(&mut config, Msg::Hypr(HyprEdit::Revert("general.gaps_in")))
+        else {
+            panic!("expected a preview");
+        };
+        assert!(lua.contains("gaps_in = 5,"), "{lua}");
+
+        let saved = state.update(&mut config, Msg::Hypr(HyprEdit::Save));
+        assert_eq!(config.hyprland, state.hypr.draft);
+        assert_eq!(
+            saved,
+            Some(Request::Hypr(HyprSettings::Save(Box::new(
+                config.hyprland.clone()
+            ))))
+        );
+        assert!(state.hypr.touched.is_empty() && state.hypr.busy);
+        assert!(!state.hypr.is_dirty(&config.hyprland));
+
+        state.hypr.received(Ok(Box::new(hypr_snapshot())));
+        state.update(&mut config, edit("general.gaps_in", 20.));
+        assert_eq!(
+            state.update(&mut config, Msg::Hypr(HyprEdit::Discard)),
+            Some(Request::Hypr(HyprSettings::Discard))
+        );
+        assert_eq!(state.hypr.draft, config.hyprland);
+        state
+            .hypr
+            .received(Err("Hyprland rejected the request".into()));
+        assert!(!state.hypr.busy);
+        assert_eq!(state.hypr.status, "Hyprland rejected the request");
     }
 
     #[test]

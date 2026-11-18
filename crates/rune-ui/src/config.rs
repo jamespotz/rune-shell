@@ -33,6 +33,8 @@ pub struct Config {
     pub wallpaper: WallpaperConfig,
     pub equalizer: EqualizerConfig,
     pub colors: Colors,
+    /// Hyprland settings Rune writes to `~/.config/hypr/modules/rune.lua`.
+    pub hyprland: rune_services::hyprland_config::Overrides,
 }
 
 impl Config {
@@ -47,6 +49,7 @@ impl Config {
         }
         let bands = &mut config.equalizer.bands;
         *bands = bands.map(rune_services::equalizer::clamp_gain);
+        config.hyprland.sanitize();
         Ok(config)
     }
 

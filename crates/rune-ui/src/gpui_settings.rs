@@ -8,7 +8,9 @@ use crate::{
     gpui_notch::Dispatch,
     gpui_widgets::{button, color, column, row},
 };
-use gpui::{AnyElement, Context, Entity, Window, div, img, prelude::*, px};
+use gpui::{
+    AnimationExt, AnyElement, Context, Entity, Focusable, Window, div, img, prelude::*, px,
+};
 
 pub(crate) struct SettingsView {
     shell: Entity<crate::App>,
@@ -20,6 +22,17 @@ pub(crate) struct SettingsView {
     colors: crate::config::Colors,
     icon_font: gpui::SharedString,
     add_target: Section,
+    /// Spring selected on the Window Motion page.
+    hypr_curve: Option<String>,
+    /// Bumped to replay the spring preview.
+    hypr_stage: usize,
+    hypr_new_curve: bool,
+    hypr_new_spring: bool,
+    hypr_drag: Option<(String, usize, gpui::Point<gpui::Pixels>)>,
+    /// The open dropdown on the Hyprland pages.
+    hypr_select: Option<String>,
+    /// "Not now" on the setup card.
+    hypr_later: bool,
 }
 impl SettingsView {
     pub fn new(
@@ -38,6 +51,13 @@ impl SettingsView {
             colors,
             icon_font,
             add_target: Section::Right,
+            hypr_curve: None,
+            hypr_stage: 0,
+            hypr_new_curve: false,
+            hypr_new_spring: false,
+            hypr_drag: None,
+            hypr_select: None,
+            hypr_later: false,
             focus,
             page,
             shell,
@@ -1042,6 +1062,1588 @@ impl SettingsView {
             .into_any_element()
     }
 }
+/// Turns text typed in a number field into an edit, if it's valid.
+type FieldEdit = std::rc::Rc<dyn Fn(&str) -> Option<HyprEdit>>;
+/// Unsaved-change dot, from the mockup's `--warn`.
+const WARN: u32 = 0xffd60aff;
+/// Changed lines in Review Changes.
+const ADDED: u32 = 0x7ee787ff;
+impl SettingsView {
+    fn hypr_slider(
+        &mut self,
+        c: &Config,
+        id: String,
+        parameters: (f32, (f32, f32), f32, &str),
+        edit: impl Fn(f32) -> HyprEdit + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (value, range, step, unit) = parameters;
+        let entity = if let Some(entity) = self.sliders.get(&id) {
+            entity.update(cx, |s, _| s.sync(range, value, color(c.colors.accent)));
+            entity.clone()
+        } else {
+            let entity = cx.new(|_| Slider::new(range, value, color(c.colors.accent)));
+            let dispatch = self.dispatch.clone();
+            cx.subscribe_in(&entity, window, move |_, _, event, window, cx| {
+                if let SliderEvent::Change(value) = event {
+                    let snapped = (*value / step).round() * step;
+                    dispatch(
+                        crate::Message::Settings(Msg::Hypr(edit(snapped))),
+                        window,
+                        cx,
+                    )
+                }
+            })
+            .detach();
+            self.sliders.insert(id, entity.clone());
+            entity
+        };
+        let shown = if step >= 1. {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.2}")
+        };
+        row()
+            .flex_none()
+            .gap(px(10.))
+            .child(div().w(px(170.)).child(entity))
+            .child(
+                div()
+                    .min_w(px(46.))
+                    .text_right()
+                    .text_color(color(c.colors.muted))
+                    .child(if unit.is_empty() {
+                        shown
+                    } else {
+                        format!("{shown} {unit}")
+                    }),
+            )
+            .into_any_element()
+    }
+    /// A small text field holding a number; `edit` turns accepted text into an edit.
+    fn hypr_field(
+        &mut self,
+        id: String,
+        value: String,
+        edit: FieldEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some((last, entity)) = self.inputs.get_mut(&id) {
+            // Leave text being typed alone (e.g. "4." on the way to "4.5").
+            if !id.ends_with(":name")
+                && last != &value
+                && !entity.focus_handle(cx).is_focused(window)
+            {
+                entity.update(cx, |input, cx| input.sync(&value, "", cx));
+                *last = value.clone();
+            }
+        } else {
+            let entity = cx.new(|cx| {
+                let mut input = TextInput::new(&value, "", cx);
+                input.set_text_size(12.);
+                input
+            });
+            let dispatch = self.dispatch.clone();
+            let key = id.clone();
+            cx.subscribe_in(&entity, window, move |this, _, event, window, cx| {
+                if let InputEvent::Changed(text) = event {
+                    if let Some((last, _)) = this.inputs.get_mut(&key) {
+                        *last = text.clone();
+                    }
+                    if let Some(edit) = edit(text.trim()) {
+                        dispatch(crate::Message::Settings(Msg::Hypr(edit)), window, cx);
+                    }
+                }
+            })
+            .detach();
+            self.inputs.insert(id.clone(), (value, entity));
+        }
+        crate::gpui_widgets::frame(div())
+            .w(px(if id.ends_with(":name") { 180. } else { 52. }))
+            .flex_none()
+            .rounded(crate::gpui_widgets::corner(5.))
+            .bg(gpui::rgba(0xffffff14))
+            .children(self.inputs.get(&id).map(|(_, entity)| entity.clone()))
+            .into_any_element()
+    }
+    /// A dropdown: the current value, opening a list of `options` below it.
+    fn hypr_select(
+        &self,
+        c: &Config,
+        id: String,
+        current: &str,
+        options: Vec<(String, Msg)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.hypr_select.as_deref() == Some(id.as_str());
+        let toggle_id = id.clone();
+        let mut select = div()
+            .id(format!("{id}:select"))
+            .relative()
+            .flex_none()
+            .child(
+                crate::gpui_widgets::frame(row())
+                    .gap(px(4.))
+                    .min_w(px(96.))
+                    .justify_between()
+                    .pl(px(8.))
+                    .pr(px(4.))
+                    .py(px(3.))
+                    .rounded(crate::gpui_widgets::corner(5.))
+                    .bg(gpui::rgba(0xffffff14))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(gpui::rgba(0xffffff24)))
+                    .child(current.to_owned())
+                    .child(crate::gpui_widgets::icon(c, "expand_more", 16.).opacity(0.6)),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.hypr_select = if this.hypr_select.as_deref() == Some(toggle_id.as_str()) {
+                    None
+                } else {
+                    Some(toggle_id.clone())
+                };
+                cx.notify();
+            }));
+        if open {
+            let mut menu = crate::gpui_widgets::frame(column())
+                .id(format!("{id}:menu"))
+                .occlude()
+                .gap_0()
+                .p(px(4.))
+                .min_w(px(120.))
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .rounded(crate::gpui_widgets::corner(8.))
+                .bg(crate::gpui_widgets::material(
+                    c,
+                    crate::gpui_widgets::Material::Popover,
+                ))
+                .border_1()
+                .border_color(gpui::rgba(0xffffff26))
+                .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.hypr_select = None;
+                    cx.notify();
+                }));
+            for (label, msg) in options {
+                let selected = label == current;
+                let dispatch = self.dispatch.clone();
+                menu = menu.child(
+                    row()
+                        .id(format!("{id}:option:{label}"))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(crate::gpui_widgets::corner(5.))
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .when(selected, |item| {
+                            item.bg(color(c.colors.accent))
+                                .text_color(color(c.colors.on_accent))
+                        })
+                        .when(!selected, |item| {
+                            item.hover(|style| style.bg(gpui::rgba(0xffffff1a)))
+                        })
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.hypr_select = None;
+                            dispatch(crate::Message::Settings(msg.clone()), window, cx);
+                        })),
+                );
+            }
+            select = select.child(gpui::deferred(
+                gpui::anchored()
+                    .snap_to_window_with_margin(px(8.))
+                    .child(div().mt(px(28.)).child(menu)),
+            ));
+        }
+        select.into_any_element()
+    }
+    /// One Hyprland setting, laid out as in the mockup: unsaved dot, label, where the
+    /// value comes from, the control and a revert button.
+    fn hypr_row(
+        &self,
+        c: &Config,
+        id: &str,
+        label: &str,
+        state: (Option<&str>, bool, bool),
+        control: AnyElement,
+        revert: HyprEdit,
+    ) -> AnyElement {
+        let (source, owned, dirty) = state;
+        let (title, detail) = split_label(label);
+        let pixel = crate::gpui_widgets::pixel_look();
+        let chip = |text: &str| {
+            div()
+                .flex_none()
+                .px(px(7.))
+                .py(px(1.))
+                .rounded(crate::gpui_widgets::corner(9999.))
+                .text_size(px(10.5))
+                .whitespace_nowrap()
+                .map(|chip| match (owned, pixel) {
+                    (true, false) => chip
+                        .bg(color(c.colors.accent).opacity(0.2))
+                        .text_color(color(c.colors.accent)),
+                    (true, true) => chip
+                        .border_1()
+                        .border_color(color(c.colors.accent))
+                        .text_color(color(c.colors.accent)),
+                    (false, false) => chip
+                        .bg(gpui::rgba(0xffffff12))
+                        .text_color(color(c.colors.muted)),
+                    (false, true) => chip
+                        .border_1()
+                        .border_color(gpui::rgba(0xffffff2e))
+                        .text_color(color(c.colors.muted)),
+                })
+                .child(text.to_owned())
+        };
+        row()
+            .w_full()
+            .gap(px(10.))
+            .child(
+                div()
+                    .size(px(7.))
+                    .flex_none()
+                    .rounded(crate::gpui_widgets::corner(9999.))
+                    .when(dirty, |dot| dot.bg(gpui::rgba(WARN))),
+            )
+            .child(
+                column()
+                    .gap_0()
+                    .flex_1()
+                    .min_w_0()
+                    .child(title.to_owned())
+                    .children(detail.map(|detail| {
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(color(c.colors.muted))
+                            .child(detail.to_owned())
+                    })),
+            )
+            .children(if owned {
+                Some(chip("Rune"))
+            } else {
+                source.map(chip)
+            })
+            .child(control)
+            .child(if owned {
+                self.glyph(format!("{id}:revert"), "undo", Msg::Hypr(revert), false)
+            } else {
+                div().size(px(26.)).flex_none().into_any_element()
+            })
+            .into_any_element()
+    }
+    /// A read-only row with a lock, dimmed as in the mockup.
+    fn hypr_locked(&self, c: &Config, label: &str) -> AnyElement {
+        let (title, detail) = split_label(label);
+        row()
+            .w_full()
+            .gap(px(10.))
+            .opacity(0.6)
+            .child(div().size(px(7.)).flex_none())
+            .child(
+                column()
+                    .gap_0()
+                    .flex_1()
+                    .min_w_0()
+                    .child(title.to_owned())
+                    .children(detail.map(|detail| {
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(color(c.colors.muted))
+                            .child(detail.to_owned())
+                    })),
+            )
+            .child(crate::gpui_widgets::icon(c, "lock", 15.).text_color(color(c.colors.muted)))
+            .into_any_element()
+    }
+    fn hypr_option(
+        &mut self,
+        c: &Config,
+        hypr: &HyprUi,
+        spec: &'static hyprland_config::OptionSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use hyprland_config::Kind;
+        let key = spec.key;
+        let value = hypr.option(key).cloned()?;
+        let id = format!("hypr-opt:{key}");
+        let source = hypr
+            .live
+            .as_ref()
+            .and_then(|l| l.sources.options.get(key))
+            .map_or("Default", String::as_str);
+        if let (Kind::Info, Value::Text(text)) = (spec.kind, &value) {
+            let file = source.rsplit('/').next().unwrap_or(source);
+            return Some(self.hypr_locked(
+                c,
+                &format!(
+                    "{}: {text} (Your Hyprland build adds this option and Rune doesn't know it, so it is left in {file} as is)",
+                    spec.label
+                ),
+            ));
+        }
+        if key == "decoration.rounding" && c.bar.look == crate::config::Look::Pixel {
+            return Some(self.hypr_locked(
+                c,
+                "Corner radius (The pixel look keeps window corners square)",
+            ));
+        }
+        let owned = hypr.draft.options.contains_key(key);
+        let dirty = hypr.draft.options.get(key) != c.hyprland.options.get(key);
+        let as_f32 = |v: &Value| match v {
+            Value::Int(i) => i32::try_from(*i).map_or(0., |i| i as f32),
+            Value::Float(f) => *f as f32,
+            _ => 0.,
+        };
+        let int = |i: i64| i32::try_from(i).map_or(0., |i| i as f32);
+        let control = match (spec.kind, &value) {
+            (Kind::Bool, Value::Bool(on)) => {
+                self.toggle_switch(&id, *on, Msg::Hypr(HyprEdit::Set(key, Value::Bool(!on))))
+            }
+            (Kind::Int { min, max, step }, v) => self.hypr_slider(
+                c,
+                id.clone(),
+                (
+                    as_f32(v),
+                    (int(min), int(max)),
+                    int(step).max(1.),
+                    spec.unit,
+                ),
+                move |v| HyprEdit::Num(key, v),
+                window,
+                cx,
+            ),
+            (Kind::Float { min, max, step }, v) => self.hypr_slider(
+                c,
+                id.clone(),
+                (as_f32(v), (min as f32, max as f32), step as f32, spec.unit),
+                move |v| HyprEdit::Num(key, v),
+                window,
+                cx,
+            ),
+            (Kind::Choice(options), Value::Text(current)) if options.len() <= 4 => self.segmented(
+                &id,
+                options
+                    .iter()
+                    .map(|o| {
+                        let mut label = (*o).to_owned();
+                        if let Some(first) = label.get_mut(..1) {
+                            first.make_ascii_uppercase();
+                        }
+                        (
+                            label,
+                            current == o,
+                            Msg::Hypr(HyprEdit::Set(key, Value::Text((*o).to_owned()))),
+                        )
+                    })
+                    .collect(),
+            ),
+            (Kind::Choice(options), Value::Text(current)) => self.hypr_select(
+                c,
+                id.clone(),
+                current,
+                options
+                    .iter()
+                    .map(|o| {
+                        (
+                            (*o).to_owned(),
+                            Msg::Hypr(HyprEdit::Set(key, Value::Text((*o).to_owned()))),
+                        )
+                    })
+                    .collect(),
+                cx,
+            ),
+            (Kind::Sides { .. }, Value::Sides(sides)) => {
+                let mut fields = row().gap(px(4.)).flex_none().items_start();
+                for (side, (name, v)) in ["top", "right", "bottom", "left"]
+                    .into_iter()
+                    .zip(sides)
+                    .enumerate()
+                {
+                    let field = self.hypr_field(
+                        format!("{id}:{name}"),
+                        v.to_string(),
+                        std::rc::Rc::new(move |text: &str| {
+                            text.parse::<f32>()
+                                .ok()
+                                .filter(|v| v.is_finite())
+                                .map(|v| HyprEdit::Side(key, side, v))
+                        }),
+                        window,
+                        cx,
+                    );
+                    fields = fields.child(
+                        column().gap(px(2.)).items_center().child(field).child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(color(c.colors.muted))
+                                .child(name),
+                        ),
+                    );
+                }
+                fields.into_any_element()
+            }
+            _ => div()
+                .text_color(color(c.colors.muted))
+                .child(format!("{value:?}"))
+                .into_any_element(),
+        };
+        Some(self.hypr_row(
+            c,
+            &id,
+            spec.label,
+            (Some(source), owned, dirty),
+            control,
+            HyprEdit::Revert(key),
+        ))
+    }
+    /// The bottom bar while there are unsaved changes: live indicator, count and actions.
+    fn hypr_pending(&self, c: &Config, hypr: &HyprUi) -> AnyElement {
+        use hyprland_config::Setup;
+        let count = hypr.changes(&c.hyprland);
+        let ready = hypr.live.as_ref().is_some_and(|l| l.setup == Setup::Added);
+        let pixel = crate::gpui_widgets::pixel_look();
+        let live = row()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .text_color(color(c.colors.muted))
+            .child(
+                div()
+                    .size(px(8.))
+                    .rounded(crate::gpui_widgets::corner(9999.))
+                    .bg(gpui::rgba(0x30d158ff))
+                    .with_animation(
+                        "hypr-live",
+                        gpui::Animation::new(std::time::Duration::from_millis(if pixel {
+                            1000
+                        } else {
+                            1800
+                        }))
+                        .repeat(),
+                        move |dot, t| {
+                            let opacity = if pixel {
+                                if t < 0.5 { 1. } else { 0. }
+                            } else {
+                                1. - 0.65 * (t * std::f32::consts::PI).sin()
+                            };
+                            dot.opacity(opacity)
+                        },
+                    ),
+            )
+            .child("Live");
+        let save = if hypr.busy {
+            div()
+                .px(px(14.))
+                .py(px(5.))
+                .text_color(color(c.colors.muted))
+                .child("Working…")
+                .into_any_element()
+        } else if ready && count > 0 {
+            self.primary("hypr-save", "Save", Msg::Hypr(HyprEdit::Save))
+        } else {
+            div()
+                .px(px(12.))
+                .py(px(3.))
+                .rounded(crate::gpui_widgets::corner(6.))
+                .bg(color(c.colors.accent))
+                .text_color(color(c.colors.on_accent))
+                .opacity(0.4)
+                .child("Save")
+                .into_any_element()
+        };
+        let review = {
+            let dispatch = self.dispatch.clone();
+            button(
+                "hypr-review",
+                row()
+                    .gap(px(5.))
+                    .child(crate::gpui_widgets::icon(c, "difference", 15.))
+                    .child("Review"),
+                crate::Message::Settings(Msg::Page(Page::HyprReview)),
+                &dispatch,
+            )
+            .rounded(crate::gpui_widgets::corner(6.))
+            .px(px(10.))
+            .bg(gpui::rgba(0xffffff14))
+        };
+        row()
+            .flex_none()
+            .w_full()
+            .gap(px(12.))
+            .px(px(22.))
+            .py(px(12.))
+            .border_t_1()
+            .border_color(gpui::rgba(0xffffff1a))
+            .bg(crate::gpui_widgets::material(
+                c,
+                crate::gpui_widgets::Material::Popover,
+            ))
+            .child(live)
+            .child(format!(
+                "{count} unsaved change{}",
+                if count == 1 { "" } else { "s" }
+            ))
+            .child(div().flex_1())
+            .child(review)
+            .child(self.action("hypr-discard", "Discard", Msg::Hypr(HyprEdit::Discard)))
+            .child(save)
+            .with_spring(
+                "hypr-pending",
+                gpui::SpringAnimation::new(gpui::SpringConfig::new(300., 34.6, 1.))
+                    .to(true)
+                    .from(false),
+                |bar, phase| {
+                    let t = phase.clamp(0.0..=1.0);
+                    bar.relative().top(t.interpolate(px(56.), px(0.)))
+                },
+            )
+            .into_any_element()
+    }
+    /// The first-run card that adds `require("modules.rune")`, plus errors.
+    fn hypr_notices(&self, c: &Config, hypr: &HyprUi, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use hyprland_config::{REQUIRE_COMMENT, REQUIRE_LINE, Setup};
+        let mut items = Vec::new();
+        if !hypr.status.is_empty() {
+            items.push(
+                crate::gpui_widgets::frame(div())
+                    .p(px(12.))
+                    .rounded(crate::gpui_widgets::corner(10.))
+                    .bg(color(c.colors.urgent).opacity(0.14))
+                    .text_color(color(c.colors.urgent))
+                    .child(hypr.status.clone())
+                    .into_any_element(),
+            );
+        }
+        let Some(live) = &hypr.live else {
+            items.push(note(c, "Reading Hyprland's settings…"));
+            return items;
+        };
+        if live.setup == Setup::Added || (self.hypr_later && live.setup == Setup::NotAdded) {
+            return items;
+        }
+        let accent = color(c.colors.accent);
+        let pixel = crate::gpui_widgets::pixel_look();
+        let text = if live.setup == Setup::NoLuaConfig {
+            "Rune saves to ~/.config/hypr/modules/rune.lua, which needs a Lua config (hyprland.lua, Hyprland 0.55 or newer). Until then, changes still preview live but can't be saved."
+        } else {
+            "Rune will create modules/rune.lua and add one line to the end of hyprland.lua. It loads last, so it only overrides the values you change here. Your other modules are never rewritten. Until then, changes still preview live but can't be saved."
+        };
+        let card = column()
+            .gap(px(6.))
+            .p(px(18.))
+            .rounded(crate::gpui_widgets::corner(10.))
+            .when(!pixel, |card| {
+                card.bg(gpui::linear_gradient(
+                    135.,
+                    gpui::linear_color_stop(accent.opacity(0.14), 0.),
+                    gpui::linear_color_stop(color(c.colors.urgent).opacity(0.08), 1.),
+                ))
+                .border_1()
+                .border_color(gpui::rgba(0xffffff1f))
+            })
+            .when(pixel, |card| card.border_2().border_color(accent));
+        let card = crate::gpui_widgets::fill(
+            card,
+            if pixel {
+                accent.opacity(0.14)
+            } else {
+                gpui::rgba(0)
+            },
+        )
+        .child(
+            crate::gpui_widgets::heading(div())
+                .text_size(px(14.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Let Rune manage Hyprland settings"),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(color(c.colors.muted))
+                .child(text),
+        );
+        if live.setup != Setup::NotAdded {
+            items.push(card.into_any_element());
+            return items;
+        }
+        let path = match &live.entry.target {
+            Some(target) => format!("{}  (→ {target})", live.entry.path),
+            None => live.entry.path.clone(),
+        };
+        let line =
+            |text: String, tone: gpui::Rgba| div().min_h(px(18.)).text_color(tone).child(text);
+        let added = gpui::rgba(ADDED);
+        let diff = column()
+            .gap_0()
+            .mt(px(6.))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(crate::gpui_widgets::corner(7.))
+            .bg(gpui::rgba(0x15151880))
+            .text_size(px(12.))
+            .font_family(crate::gpui_widgets::text_font(c))
+            .child(line(path, color(c.colors.muted)))
+            .child(line(
+                format!("  {}", live.entry.last_line),
+                color(c.colors.foreground),
+            ))
+            .child(line("+".into(), added))
+            .child(line(format!("+ {REQUIRE_COMMENT}"), added))
+            .child(line(format!("+ {REQUIRE_LINE}"), added));
+        let add = {
+            let dispatch = self.dispatch.clone();
+            button(
+                "hypr-setup",
+                row()
+                    .gap(px(5.))
+                    .child(crate::gpui_widgets::icon(c, "add", 16.))
+                    .child("Add to hyprland.lua"),
+                crate::Message::Settings(Msg::Hypr(HyprEdit::Setup)),
+                &dispatch,
+            )
+            .rounded(crate::gpui_widgets::corner(6.))
+            .px(px(12.))
+            .bg(accent)
+            .text_color(color(c.colors.on_accent))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+        };
+        let later = div()
+            .id("hypr-later")
+            .px(px(12.))
+            .py(px(3.))
+            .rounded(crate::gpui_widgets::corner(6.))
+            .bg(gpui::rgba(0xffffff1a))
+            .cursor_pointer()
+            .active(|style| style.opacity(0.7))
+            .child("Not now")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.hypr_later = true;
+                cx.notify();
+            }));
+        let actions = row()
+            .gap(px(8.))
+            .mt(px(12.))
+            .when(!hypr.busy, |actions| actions.child(add).child(later));
+        items.push(card.child(diff).child(actions).into_any_element());
+        items
+    }
+    fn hypr_page(
+        &mut self,
+        c: &Config,
+        s: &State,
+        items: &mut Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hypr = &s.hypr;
+        let description = match s.page {
+            Page::HyprWindows => "Layout, gaps and borders. They apply live while you drag.",
+            Page::HyprEffects => "Corners, transparency, blur and shadows.",
+            Page::HyprInput => "Keyboard repeat, layout and focus behaviour.",
+            Page::HyprMotion => {
+                "Hyprland's own animations, with springs and bezier curves. Rune's panel motion is under Rune → Animations."
+            }
+            _ => {
+                "This is exactly what Save writes to modules/rune.lua. Hyprland reloads it on its own."
+            }
+        };
+        items.extend(self.hypr_notices(c, hypr, cx));
+        items.push(hero(c, s.page, description, None));
+        if hypr.live.is_none() {
+            return;
+        }
+        if let Some(section) = s.page.section() {
+            let mut groups: Vec<(&str, Vec<AnyElement>)> = Vec::new();
+            for spec in hyprland_config::OPTIONS
+                .iter()
+                .filter(|o| o.section == section)
+            {
+                let Some(row) = self.hypr_option(c, hypr, spec, window, cx) else {
+                    continue;
+                };
+                match groups.last_mut() {
+                    Some((name, list)) if *name == spec.group => list.push(row),
+                    _ => groups.push((spec.group, vec![row])),
+                }
+            }
+            for (name, mut list) in groups {
+                if name == "Borders" {
+                    list.push(self.hypr_locked(
+                        c,
+                        "Border colours (Set by your Rune theme (Settings → Theme))",
+                    ));
+                }
+                items.push(group(name, list));
+            }
+            if section == hyprland_config::Section::Input {
+                let field = self.input(
+                    "hypr-test-field".into(),
+                    hypr.test_text.clone(),
+                    "Hold a key here to feel the repeat rate",
+                    (|text| Msg::Hypr(HyprEdit::TestText(text)), None),
+                    window,
+                    cx,
+                );
+                items.push(group("Test field", vec![field]));
+            }
+            return;
+        }
+        match s.page {
+            Page::HyprMotion => self.hypr_motion(c, hypr, items, window, cx),
+            _ => items.push(self.hypr_review(c, hypr)),
+        }
+    }
+    fn hypr_bezier_editor(
+        &mut self,
+        c: &Config,
+        hypr: &HyprUi,
+        items: &mut Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut names = hypr.curve_names();
+        names.retain(|n| hypr.bezier(n).is_some() && hyprland_config::bezier_preset(n).is_none());
+        let selected = self
+            .hypr_curve
+            .as_ref()
+            .filter(|n| names.contains(n))
+            .cloned()
+            .or_else(|| names.first().cloned());
+        let mut children = Vec::new();
+        let mut tiles = row().w_full().flex_wrap().gap(px(6.));
+        for name in &names {
+            let pick = name.clone();
+            let label = if hypr.custom_curve(name) {
+                format!("{name} ★")
+            } else {
+                name.clone()
+            };
+            tiles = tiles.child(
+                curve_button(format!("bezier-tile:{name}"), label)
+                    .when(selected.as_ref() == Some(name), |tile| {
+                        tile.border_1().border_color(color(c.colors.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.hypr_curve = Some(pick.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        tiles = tiles.child(
+            curve_button("new-curve", "+ New curve").on_click(cx.listener(|this, _, _, cx| {
+                this.hypr_new_curve = true;
+                cx.notify();
+            })),
+        );
+        children.push(tiles.into_any_element());
+        if self.hypr_new_curve {
+            let next = (1..=33)
+                .map(|i| format!("custom{i}"))
+                .find(|n| !hypr.curve_names().contains(n))
+                .unwrap_or_default();
+            let field = self.hypr_field(
+                "hypr-new:name".into(),
+                next,
+                std::rc::Rc::new(|_| None),
+                window,
+                cx,
+            );
+            let spring = self.hypr_new_spring;
+            let dispatch = self.dispatch.clone();
+            children.push(
+                row()
+                    .gap(px(8.))
+                    .items_center()
+                    .child("Name")
+                    .child(field)
+                    .child(
+                        curve_button("new-curve-kind", if spring { "Spring" } else { "Bezier" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hypr_new_spring = !this.hypr_new_spring;
+                                cx.notify();
+                            })),
+                    )
+                    .child(curve_button("create-curve", "Create").on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            let name = this
+                                .inputs
+                                .get("hypr-new:name")
+                                .map(|(text, _)| text.trim().to_owned())
+                                .unwrap_or_default();
+                            let curve = if spring {
+                                Curve::Spring(Spring {
+                                    mass: 1.,
+                                    stiffness: 150.,
+                                    dampening: 25.,
+                                })
+                            } else {
+                                Curve::Bezier(Bezier {
+                                    points: [0.25, 0.1, 0.25, 1.],
+                                })
+                            };
+                            dispatch(
+                                crate::Message::Settings(Msg::Hypr(HyprEdit::CurveCreate(
+                                    name.clone(),
+                                    curve,
+                                ))),
+                                window,
+                                cx,
+                            );
+                            if this
+                                .shell
+                                .read(cx)
+                                .settings_ui
+                                .hypr
+                                .draft
+                                .curves
+                                .contains_key(&name)
+                            {
+                                this.hypr_curve = Some(name);
+                                this.hypr_new_curve = false;
+                                this.inputs.remove("hypr-new:name");
+                            }
+                            cx.notify();
+                        },
+                    )))
+                    .child(curve_button("cancel-curve", "Cancel").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.hypr_new_curve = false;
+                            this.inputs.remove("hypr-new:name");
+                            cx.notify();
+                        },
+                    )))
+                    .into_any_element(),
+            );
+        }
+        if let Some(name) = selected
+            && let Some(bezier) = hypr.bezier(&name)
+        {
+            let graph = self.bezier_canvas(c, &name, bezier, cx);
+            let mut fields = column().gap(px(8.));
+            let mut pair = row().gap(px(6.)).items_center();
+            for (index, label) in ["X1", "Y1", "X2", "Y2"].iter().enumerate() {
+                let target = name.clone();
+                let points = bezier.points;
+                let field = self.hypr_field(
+                    format!("bezier:{name}:{index}"),
+                    points.get(index).copied().unwrap_or_default().to_string(),
+                    std::rc::Rc::new(move |text| {
+                        let v = text.parse::<f64>().ok().filter(|v| v.is_finite())?;
+                        Some(HyprEdit::BezierCoordinate(target.clone(), index, v))
+                    }),
+                    window,
+                    cx,
+                );
+                pair = pair.child((*label).to_owned()).child(field);
+                if index % 2 == 1 {
+                    fields = fields.child(pair);
+                    pair = row().gap(px(6.)).items_center();
+                }
+            }
+            let presets = hyprland_config::BEZIER_PRESETS
+                .iter()
+                .map(|(preset, b)| {
+                    (
+                        (*preset).to_owned(),
+                        Msg::Hypr(HyprEdit::BezierPoints(name.clone(), b.points)),
+                    )
+                })
+                .collect();
+            let preset = self.hypr_select(
+                c,
+                format!("bezier:{name}:preset"),
+                "Load preset",
+                presets,
+                cx,
+            );
+            let actions = self.hypr_curve_actions(hypr, &name, window, cx);
+            children.push(
+                row()
+                    .w_full()
+                    .gap(px(16.))
+                    .items_start()
+                    .child(div().flex_1().min_w_0().child(graph))
+                    .child(
+                        column()
+                            .w(px(220.))
+                            .flex_none()
+                            .gap(px(14.))
+                            .child(fields)
+                            .child(preset)
+                            .child(actions),
+                    )
+                    .into_any_element(),
+            );
+            children.push(self.bezier_stage(c, bezier, cx));
+        }
+        items.push(group_with(
+            c,
+            "Bezier curves",
+            Some("Drag either handle or enter control points".into()),
+            children,
+        ));
+    }
+
+    fn hypr_curve_actions(
+        &mut self,
+        hypr: &HyprUi,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = name.to_owned();
+        if hypr.custom_curve(&name) {
+            let field_id = format!("bezier:{name}:name");
+            let field = self.hypr_field(
+                field_id.clone(),
+                name.clone(),
+                std::rc::Rc::new(|_| None),
+                window,
+                cx,
+            );
+            let old = name.clone();
+            let dispatch = self.dispatch.clone();
+            row()
+                .flex_wrap()
+                .gap(px(8.))
+                .items_center()
+                .child(field)
+                .child(
+                    curve_button(format!("rename:{name}"), "Rename").on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            let new = this
+                                .inputs
+                                .get(&field_id)
+                                .map(|(text, _)| text.trim().to_owned())
+                                .unwrap_or_default();
+                            dispatch(
+                                crate::Message::Settings(Msg::Hypr(HyprEdit::CurveRename(
+                                    old.clone(),
+                                    new.clone(),
+                                ))),
+                                window,
+                                cx,
+                            );
+                            if this
+                                .shell
+                                .read(cx)
+                                .settings_ui
+                                .hypr
+                                .draft
+                                .curves
+                                .contains_key(&new)
+                            {
+                                this.hypr_curve = Some(new);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(self.action(
+                    format!("delete:{name}"),
+                    "Delete",
+                    Msg::Hypr(HyprEdit::CurveDelete(name.clone())),
+                ))
+                .into_any_element()
+        } else {
+            self.action(
+                format!("revert-bezier:{name}"),
+                "Revert to dotfile curve",
+                Msg::Hypr(HyprEdit::CurveRevert(name)),
+            )
+        }
+    }
+
+    fn bezier_canvas(
+        &self,
+        c: &Config,
+        name: &str,
+        bezier: Bezier,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
+        let measured = bounds.clone();
+        let hit_bounds = bounds.clone();
+        let ink = color(c.colors.accent);
+        let pixel = crate::gpui_widgets::pixel_look();
+        let target = name.to_owned();
+        let moving = name.to_owned();
+        let dispatch = self.dispatch.clone();
+        let entity = cx.entity();
+        div()
+            .id(format!("bezier-canvas:{name}"))
+            .w_full()
+            .h(px(220.))
+            .relative()
+            .rounded(crate::gpui_widgets::corner(7.))
+            .bg(gpui::rgba(0x00000038))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    let b = hit_bounds.get();
+                    let mut closest = None;
+                    for (i, (x, y)) in [
+                        (bezier.points[0], bezier.points[1]),
+                        (bezier.points[2], bezier.points[3]),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let handle = bezier_screen(b, x, y);
+                        let dx = f32::from(event.position.x - handle.x);
+                        let dy = f32::from(event.position.y - handle.y);
+                        let distance = dx * dx + dy * dy;
+                        if distance <= 400. && closest.is_none_or(|(_, d, _)| distance < d) {
+                            closest = Some((i, distance, event.position - handle));
+                        }
+                    }
+                    if let Some((i, _, offset)) = closest {
+                        this.hypr_drag = Some((target.clone(), i, offset));
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                gpui::canvas(
+                    move |b, _, _| {
+                        measured.set(b);
+                        b
+                    },
+                    move |_, b, window, _| {
+                        let dot = if pixel { 3. } else { 2. };
+                        let origin = bezier_screen(b, 0., 0.);
+                        let target = bezier_screen(b, 1., 1.);
+                        for y in [origin.y, target.y] {
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(
+                                    gpui::point(origin.x, y),
+                                    gpui::size(target.x - origin.x, px(1.)),
+                                ),
+                                ink.opacity(0.15),
+                            ));
+                        }
+                        for x in [origin.x, target.x] {
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(
+                                    gpui::point(x, target.y),
+                                    gpui::size(px(1.), origin.y - target.y),
+                                ),
+                                ink.opacity(0.15),
+                            ));
+                        }
+                        for p in [origin, target] {
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(
+                                    p - gpui::point(px(3.), px(3.)),
+                                    gpui::size(px(6.), px(6.)),
+                                ),
+                                ink.opacity(0.5),
+                            ));
+                        }
+                        for i in 0..=160 {
+                            let (x, y) = bezier.position(f64::from(i) / 160.);
+                            let p = bezier_screen(b, x, y);
+                            let p = if pixel {
+                                gpui::point(
+                                    px((f32::from(p.x) / 3.).round() * 3.),
+                                    px((f32::from(p.y) / 3.).round() * 3.),
+                                )
+                            } else {
+                                p
+                            };
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(p, gpui::size(px(dot), px(dot))),
+                                ink,
+                            ));
+                        }
+                        for (start, end) in [
+                            ((0., 0.), (bezier.points[0], bezier.points[1])),
+                            ((1., 1.), (bezier.points[2], bezier.points[3])),
+                        ] {
+                            for i in 0..=40 {
+                                let t = f64::from(i) / 40.;
+                                let p = bezier_screen(
+                                    b,
+                                    start.0 + (end.0 - start.0) * t,
+                                    start.1 + (end.1 - start.1) * t,
+                                );
+                                window.paint_quad(gpui::fill(
+                                    gpui::Bounds::new(p, gpui::size(px(1.), px(1.))),
+                                    ink.opacity(0.4),
+                                ));
+                            }
+                            let p = bezier_screen(b, end.0, end.1);
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(
+                                    p - gpui::point(px(6.), px(6.)),
+                                    gpui::size(px(12.), px(12.)),
+                                ),
+                                ink,
+                            ));
+                        }
+                        let moved = entity.clone();
+                        let target = moving.clone();
+                        let dispatch = dispatch.clone();
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                                if !phase.bubble() {
+                                    return;
+                                }
+                                moved.update(cx, |this, cx| {
+                                    if let Some((name, index, offset)) = &this.hypr_drag
+                                        && name == &target
+                                    {
+                                        let p = event.position - *offset;
+                                        let width = f64::from(f32::from(b.size.width)) - 32.;
+                                        let height = f64::from(f32::from(b.size.height)) - 24.;
+                                        if width <= 0. || height <= 0. {
+                                            return;
+                                        }
+                                        let mut points = bezier.points;
+                                        if let Some(x) = points.get_mut(index.saturating_mul(2)) {
+                                            *x = (f64::from(f32::from(p.x - b.left())) - 16.)
+                                                / width;
+                                        }
+                                        if let Some(y) = points
+                                            .get_mut(index.saturating_mul(2).saturating_add(1))
+                                        {
+                                            *y = 3.
+                                                - (f64::from(f32::from(p.y - b.top())) - 12.)
+                                                    / height
+                                                    * 5.;
+                                        }
+                                        dispatch(
+                                            crate::Message::Settings(Msg::Hypr(
+                                                HyprEdit::BezierPoints(name.clone(), points),
+                                            )),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            },
+                        );
+                        window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
+                            if phase.bubble() && event.button == gpui::MouseButton::Left {
+                                entity.update(cx, |this, cx| {
+                                    this.hypr_drag = None;
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    },
+                )
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    fn bezier_stage(&self, c: &Config, bezier: Bezier, cx: &mut Context<Self>) -> AnyElement {
+        let reduced = c.animations.reduce_motion || !c.animations.enabled;
+        let pixel = crate::gpui_widgets::pixel_look();
+        let window_box = curve_preview_window(c).with_animation(
+            format!("bezier-preview:{}:{:?}", self.hypr_stage, bezier.points),
+            gpui::Animation::new(std::time::Duration::from_millis(800)),
+            move |element, t| {
+                let t = if reduced {
+                    1.
+                } else {
+                    bezier.ease(f64::from(t)) as f32
+                };
+                let t = if pixel { (t * 12.).round() / 12. } else { t };
+                element.left(gpui::relative(0.03 + t * 0.74))
+            },
+        );
+        self.curve_preview(c, "bezier-preview", window_box.into_any_element(), cx)
+    }
+
+    fn hypr_motion(
+        &mut self,
+        c: &Config,
+        hypr: &HyprUi,
+        items: &mut Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hypr_bezier_editor(c, hypr, items, window, cx);
+        let springs: Vec<_> = hypr
+            .springs()
+            .into_iter()
+            .filter(|name| hypr.curve(name).is_some())
+            .collect();
+        let curves: Vec<(String, hyprland_config::Spring)> = springs
+            .iter()
+            .filter_map(|name| Some((name.clone(), hypr.curve(name)?)))
+            .collect();
+        let sources = hypr.live.as_ref().map(|l| &l.sources);
+        let pixel = crate::gpui_widgets::pixel_look();
+        if curves.is_empty() {
+            items.push(note(
+                c,
+                "No spring curves found. Use New curve above and choose Spring to create one.",
+            ));
+        } else {
+            let selected = self
+                .hypr_curve
+                .clone()
+                .filter(|name| curves.iter().any(|(n, _)| n == name))
+                .or_else(|| curves.first().map(|(n, _)| n.clone()))
+                .unwrap_or_default();
+            let mut tiles = row().w_full().gap(px(8.)).items_stretch();
+            for (name, spring) in &curves {
+                let on = *name == selected;
+                let pick = name.clone();
+                tiles = tiles.child(
+                    column()
+                        .id(format!("hypr-curve-tile:{name}"))
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(4.))
+                        .items_center()
+                        .p(px(8.))
+                        .rounded(crate::gpui_widgets::corner(7.))
+                        .bg(gpui::rgba(0xffffff0d))
+                        .text_size(px(11.5))
+                        .cursor_pointer()
+                        .when(on, |tile| {
+                            tile.border_2().border_color(color(c.colors.accent))
+                        })
+                        .when(!on && pixel, |tile| {
+                            tile.border_2().border_color(gpui::rgba(0xffffff1a))
+                        })
+                        .hover(|style| style.bg(gpui::rgba(0xffffff17)))
+                        .child(spring_graph(c, *spring, on))
+                        .child(div().truncate().child(if hypr.custom_curve(name) {
+                            format!("{name} ★")
+                        } else {
+                            name.clone()
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.hypr_curve = Some(pick.clone());
+                            this.hypr_stage = this.hypr_stage.wrapping_add(1);
+                            cx.notify();
+                        })),
+                );
+            }
+            let mut list = vec![tiles.into_any_element()];
+            if let Some(spring) = hypr.curve(&selected) {
+                let id = format!("hypr-curve:{selected}");
+                let owned = hypr.draft.curves.contains_key(&selected);
+                let dirty = hypr.draft.curves.get(&selected) != c.hyprland.curves.get(&selected);
+                let source = sources
+                    .and_then(|s| s.curves.get(&selected))
+                    .map_or("Rune", String::as_str);
+                let name = selected.clone();
+                let stiffness = self.hypr_slider(
+                    c,
+                    format!("{id}:stiffness"),
+                    (spring.stiffness as f32, (50., 400.), 5., ""),
+                    move |v| HyprEdit::Stiffness(name.clone(), v),
+                    window,
+                    cx,
+                );
+                list.push(self.hypr_row(
+                    c,
+                    &format!("{id}:stiffness"),
+                    "Stiffness (Higher is faster)",
+                    (Some(source), owned, dirty),
+                    stiffness,
+                    HyprEdit::CurveRevert(selected.clone()),
+                ));
+                let name = selected.clone();
+                let dampening = self.hypr_slider(
+                    c,
+                    format!("{id}:dampening"),
+                    (spring.dampening as f32, (5., 50.), 1., ""),
+                    move |v| HyprEdit::Dampening(name.clone(), v),
+                    window,
+                    cx,
+                );
+                list.push(self.hypr_row(
+                    c,
+                    &format!("{id}:dampening"),
+                    "Damping (Lower is bouncier. Overshoot is only for gestures.)",
+                    (Some(source), owned, dirty),
+                    dampening,
+                    HyprEdit::CurveRevert(selected.clone()),
+                ));
+                list.push(self.hypr_stage(c, spring, cx));
+                list.push(self.hypr_curve_actions(hypr, &selected, window, cx));
+            }
+            let from = curves
+                .first()
+                .and_then(|(n, _)| sources?.curves.get(n))
+                .map(|file| format!("from {file}"));
+            items.push(group_with(c, "Spring curves", from, list));
+        }
+        let mut leaves = Vec::new();
+        for leaf_name in hyprland_config::LEAVES {
+            let Some(leaf) = hypr.leaf(leaf_name).cloned() else {
+                continue;
+            };
+            let name = (*leaf_name).to_owned();
+            let id = format!("hypr-leaf:{name}");
+            let owned = hypr.draft.animations.contains_key(&name);
+            let dirty = hypr.draft.animations.get(&name) != c.hyprland.animations.get(&name);
+            let source = sources
+                .and_then(|s| s.leaves.get(&name))
+                .map_or("Default", String::as_str);
+            let picker = self.hypr_select(
+                c,
+                format!("{id}:curve"),
+                &leaf.curve,
+                hypr.animation_curves()
+                    .into_iter()
+                    .map(|curve| {
+                        (
+                            curve.clone(),
+                            Msg::Hypr(HyprEdit::LeafCurve(name.clone(), curve)),
+                        )
+                    })
+                    .collect(),
+                cx,
+            );
+            let speed_name = name.clone();
+            let speed = self.hypr_field(
+                format!("{id}:speed"),
+                format!("{}", leaf.speed),
+                std::rc::Rc::new(move |text: &str| {
+                    text.parse::<f32>()
+                        .ok()
+                        .filter(|v| v.is_finite() && *v > 0.)
+                        .map(|v| HyprEdit::LeafSpeed(speed_name.clone(), v))
+                }),
+                window,
+                cx,
+            );
+            let toggle = self.toggle_switch(
+                &format!("{id}:enabled"),
+                leaf.enabled,
+                Msg::Hypr(HyprEdit::LeafEnabled(name.clone(), !leaf.enabled)),
+            );
+            let label = if leaf.style.is_empty() {
+                format!("{name} (default style)")
+            } else {
+                format!("{name} ({})", leaf.style)
+            };
+            leaves.push(
+                self.hypr_row(
+                    c,
+                    &id,
+                    &label,
+                    (Some(source), owned, dirty),
+                    row()
+                        .gap(px(8.))
+                        .flex_none()
+                        .child(picker)
+                        .child(speed)
+                        .child(toggle)
+                        .into_any_element(),
+                    HyprEdit::LeafRevert(name.clone()),
+                ),
+            );
+        }
+        if !leaves.is_empty() {
+            items.push(group("Animations", leaves));
+        }
+    }
+    /// A window-shaped box that springs across with the selected curve; click to replay.
+    fn hypr_stage(
+        &self,
+        c: &Config,
+        spring: hyprland_config::Spring,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pixel = crate::gpui_widgets::pixel_look();
+        let reduced = c.animations.reduce_motion || !c.animations.enabled;
+        let window_box = curve_preview_window(c).with_spring(
+            format!("hypr-stage:{}", self.hypr_stage),
+            gpui::SpringAnimation::new(gpui::SpringConfig::new(
+                spring.stiffness as f32,
+                spring.dampening as f32,
+                spring.mass as f32,
+            ))
+            .to(true)
+            .from(false),
+            move |b, phase| {
+                let t = if reduced {
+                    1.
+                } else if pixel {
+                    (phase.0 * 12.).round() / 12.
+                } else {
+                    phase.0
+                };
+                b.left(gpui::relative(0.03 + t * 0.74))
+            },
+        );
+        self.curve_preview(c, "hypr-stage", window_box.into_any_element(), cx)
+    }
+
+    fn curve_preview(
+        &self,
+        c: &Config,
+        id: &'static str,
+        window_box: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .relative()
+            .w_full()
+            .h(px(96.))
+            .rounded(crate::gpui_widgets::corner(7.))
+            .bg(gpui::rgba(0x00000038))
+            .overflow_hidden()
+            .cursor_pointer()
+            .child(window_box)
+            .child(
+                div()
+                    .absolute()
+                    .right(px(10.))
+                    .bottom(px(8.))
+                    .text_size(px(11.))
+                    .text_color(color(c.colors.muted))
+                    .child("click to replay · Hyprland previews live too"),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.hypr_stage = this.hypr_stage.wrapping_add(1);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+    fn hypr_review(&self, c: &Config, hypr: &HyprUi) -> AnyElement {
+        let text = hypr.draft.render();
+        let dirty = hypr.is_dirty(&c.hyprland);
+        let mut code = crate::gpui_widgets::frame(column())
+            .gap_0()
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(crate::gpui_widgets::corner(7.))
+            .bg(gpui::rgba(0x15151880))
+            .font_family(crate::gpui_widgets::text_font(c))
+            .text_size(px(12.));
+        for line in text.lines() {
+            let tone = if line.starts_with("--") {
+                color(c.colors.muted)
+            } else if dirty {
+                gpui::rgba(ADDED)
+            } else {
+                color(c.colors.foreground)
+            };
+            code = code.child(div().min_h(px(18.)).text_color(tone).child(line.to_owned()));
+        }
+        code.into_any_element()
+    }
+}
+/// A settings group whose heading has text on the right, like "from modules/animations.lua".
+fn group_with(
+    c: &Config,
+    title: &str,
+    trailing: Option<String>,
+    children: Vec<AnyElement>,
+) -> AnyElement {
+    let list = group(title, children);
+    match trailing {
+        None => list,
+        Some(trailing) => div()
+            .relative()
+            .child(list)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right(px(4.))
+                    .text_size(px(12.))
+                    .text_color(color(c.colors.muted))
+                    .child(trailing),
+            )
+            .into_any_element(),
+    }
+}
+fn curve_preview_window(c: &Config) -> gpui::Div {
+    let pixel = crate::gpui_widgets::pixel_look();
+    div()
+        .absolute()
+        .top(px(18.))
+        .w(px(110.))
+        .h(px(60.))
+        .rounded(crate::gpui_widgets::corner(10.))
+        .bg(gpui::linear_gradient(
+            135.,
+            gpui::linear_color_stop(color(c.colors.accent), 0.),
+            gpui::linear_color_stop(color(c.colors.urgent), 1.),
+        ))
+        .when(!pixel, |b| b.shadow_lg())
+        .when(pixel, |b| b.border_2().border_color(gpui::black()))
+}
+
+fn curve_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    crate::gpui_widgets::frame(div())
+        .id(id)
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(crate::gpui_widgets::corner(6.))
+        .bg(gpui::rgba(0xffffff14))
+        .cursor_pointer()
+        .hover(|s| s.bg(gpui::rgba(0xffffff24)))
+        .active(|s| s.opacity(0.7))
+        .child(label.into())
+}
+
+fn bezier_screen(bounds: gpui::Bounds<gpui::Pixels>, x: f64, y: f64) -> gpui::Point<gpui::Pixels> {
+    gpui::point(
+        bounds.left() + px(16. + x as f32 * (f32::from(bounds.size.width) - 32.)),
+        bounds.top() + px(12. + (3. - y as f32) / 5. * (f32::from(bounds.size.height) - 24.)),
+    )
+}
+
+/// A spring's step response over 0.8 s. The pixel look draws it on a 3 px grid.
+fn spring_graph(c: &Config, spring: hyprland_config::Spring, selected: bool) -> AnyElement {
+    let ink = if selected {
+        color(c.colors.accent)
+    } else {
+        color(c.colors.foreground).opacity(0.6)
+    };
+    let pixel = crate::gpui_widgets::pixel_look();
+    div()
+        .w_full()
+        .h(px(46.))
+        .child(
+            gpui::canvas(
+                |bounds, _, _| bounds,
+                move |_, bounds, window, _| {
+                    let dot = if pixel { 3. } else { 2. };
+                    let width = f32::from(bounds.size.width);
+                    let height = f32::from(bounds.size.height);
+                    let mut x = 0.;
+                    while x <= width - dot {
+                        let t = f64::from(x / width) * 0.8;
+                        let y = height - 6. - spring.response(t) as f32 * (height - 16.);
+                        let y = if pixel { (y / dot).round() * dot } else { y };
+                        window.paint_quad(gpui::fill(
+                            gpui::Bounds::new(
+                                gpui::point(bounds.left() + px(x), bounds.top() + px(y)),
+                                gpui::size(px(dot), px(dot)),
+                            ),
+                            ink,
+                        ));
+                        x += if pixel { dot + 1. } else { 1. };
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let app = self.shell.read(cx);
@@ -1080,6 +2682,11 @@ impl Render for SettingsView {
             };
         }
         match s.page {
+            Page::HyprWindows
+            | Page::HyprEffects
+            | Page::HyprInput
+            | Page::HyprMotion
+            | Page::HyprReview => self.hypr_page(&c, &s, &mut items, window, cx),
             Page::Appearance => {
                 items.push(hero(
                     &c,
@@ -2181,10 +3788,21 @@ impl Render for SettingsView {
                     .child("No Results"),
             );
         }
-        for (index, group) in groups.into_iter().enumerate() {
-            if index > 0 {
-                sidebar = sidebar.child(div().h(px(12.)));
-            }
+        for (index, (title, group)) in groups.into_iter().enumerate() {
+            sidebar = sidebar.child(
+                crate::gpui_widgets::heading(div())
+                    .px(px(6.))
+                    .pt(px(if index > 0 { 12. } else { 2. }))
+                    .pb(px(4.))
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(foreground.opacity(0.4))
+                    .child(if crate::gpui_widgets::pixel_look() {
+                        title.to_uppercase()
+                    } else {
+                        title.to_owned()
+                    }),
+            );
             for page in group {
                 let selected = page == s.page;
                 let dispatch = self.dispatch.clone();
@@ -2218,6 +3836,14 @@ impl Render for SettingsView {
                                 .child(crate::gpui_widgets::icon(&c, page.label().0, 15.)),
                         )
                         .child(page.label().1)
+                        .when(s.hypr.page_dirty(page, &c.hyprland), |item| {
+                            item.child(div().flex_1()).child(
+                                div()
+                                    .size(px(7.))
+                                    .rounded(crate::gpui_widgets::corner(9999.))
+                                    .bg(gpui::rgba(WARN)),
+                            )
+                        })
                         .on_click(move |_, window, cx| {
                             dispatch(crate::Message::Settings(Msg::Page(page)), window, cx)
                         }),
@@ -2285,6 +3911,10 @@ impl Render for SettingsView {
                                     .gap(px(18.))
                                     .children(items),
                             ),
+                    )
+                    .when(
+                        s.page.is_hypr() && s.hypr.changes(&c.hyprland) > 0,
+                        |content| content.child(self.hypr_pending(&c, &s.hypr)),
                     ),
             )
             .child(crate::gpui_widgets::edge(&c, 12.))
@@ -2294,6 +3924,233 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct DropdownScrollFixture {
+        settings: Entity<SettingsView>,
+        page_scroll: gpui::ScrollHandle,
+        trigger_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
+    }
+
+    impl Render for DropdownScrollFixture {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let picker = self.settings.update(cx, |view, cx| {
+                view.hypr_select(
+                    &Config::default(),
+                    "test-preset".into(),
+                    "Load preset",
+                    hyprland_config::BEZIER_PRESETS
+                        .iter()
+                        .map(|(name, _)| {
+                            (
+                                (*name).to_owned(),
+                                Msg::Hypr(HyprEdit::TestText((*name).to_owned())),
+                            )
+                        })
+                        .collect(),
+                    cx,
+                )
+            });
+            let bounds = self.trigger_bounds.clone();
+            div()
+                .size_full()
+                .id("test-page-scroll")
+                .overflow_y_scroll()
+                .track_scroll(&self.page_scroll)
+                .child(
+                    column()
+                        .w_full()
+                        .child(div().h(px(40.)).flex_none())
+                        .child(
+                            div().relative().child(picker).child(
+                                gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                                    .absolute()
+                                    .size_full(),
+                            ),
+                        )
+                        .child(div().h(px(1200.)).flex_none()),
+                )
+        }
+    }
+
+    #[test]
+    #[ignore = "opens native settings on Wayland; run one GPUI test per process"]
+    fn native_preset_menu_scroll_stays_inside_the_menu() {
+        use gpui::{MouseButton, PlatformInput, ScrollDelta, ScrollEvent};
+        gpui_platform::application()
+            .with_quit_mode(gpui::QuitMode::Explicit)
+            .run(|cx| {
+                let mut config = Config::default();
+                if std::env::var("RUNE_TEST_LOOK").as_deref() == Ok("pixel") {
+                    config.bar.look = crate::config::Look::Pixel;
+                }
+                crate::gpui_widgets::set_look(config.bar.look, config.bar.pixel_font);
+                let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+                let (_, events) = tokio::sync::mpsc::unbounded_channel();
+                let (app, _) = crate::App::new(config, events, actions, false);
+                let shell = cx.new(|_| app);
+                let dispatch: Dispatch = {
+                    let shell = shell.clone();
+                    std::rc::Rc::new(move |message, _, cx| {
+                        shell.update(cx, |app, cx| {
+                            let _ = app.update(message);
+                            cx.notify();
+                        });
+                    })
+                };
+                let scroll = gpui::ScrollHandle::new();
+                let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
+                let handle = cx
+                    .open_window(
+                        crate::gpui_surfaces::options(
+                            &crate::Surface::Settings,
+                            (500, 400),
+                            None,
+                            true,
+                            0,
+                        ),
+                        |window, cx| {
+                            let settings = cx.new(|cx| {
+                                let mut view =
+                                    SettingsView::new(shell.clone(), dispatch, window, cx);
+                                view.hypr_select = Some("test-preset".into());
+                                view
+                            });
+                            cx.new(|_| DropdownScrollFixture {
+                                settings,
+                                page_scroll: scroll.clone(),
+                                trigger_bounds: bounds.clone(),
+                            })
+                        },
+                    )
+                    .unwrap();
+                cx.spawn(async move |cx| {
+                    let delay = std::time::Duration::from_millis(100);
+                    cx.background_executor().timer(delay).await;
+                    let position = cx.update(|cx| {
+                        cx.update_window(handle.into(), |_, window, cx| {
+                            let position = bounds.get().origin + gpui::point(px(20.), px(48.));
+                            window.dispatch_event(
+                                PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                    position,
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                            window.dispatch_event(
+                                PlatformInput::Scroll(ScrollEvent {
+                                    position,
+                                    delta: ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                            position
+                        })
+                        .unwrap()
+                    });
+                    cx.background_executor().timer(delay).await;
+                    cx.update(|_| {
+                        assert!(
+                            scroll.max_offset().y > px(0.),
+                            "fixture page must be scrollable"
+                        );
+                        assert_eq!(
+                            scroll.offset().y,
+                            px(0.),
+                            "scrolling the preset menu must not move the page"
+                        );
+                    });
+                    for delta in [-10_000., -120., 10_000., 120., -120.] {
+                        cx.update(|cx| {
+                            cx.update_window(handle.into(), |_, window, cx| {
+                                window.dispatch_event(
+                                    PlatformInput::Scroll(ScrollEvent {
+                                        position,
+                                        delta: ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .unwrap();
+                        });
+                        cx.background_executor().timer(delay).await;
+                        cx.update(|_| {
+                            assert_eq!(
+                                scroll.offset().y,
+                                px(0.),
+                                "scrolling at either end of the menu must not move the page"
+                            )
+                        });
+                    }
+                    cx.update(|cx| {
+                        cx.update_window(handle.into(), |_, window, cx| {
+                            window.dispatch_event(
+                                PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                    position,
+                                    button: MouseButton::Left,
+                                    click_count: 1,
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                            window.dispatch_event(
+                                PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                    position,
+                                    button: MouseButton::Left,
+                                    click_count: 1,
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                        })
+                        .unwrap();
+                    });
+                    cx.background_executor().timer(delay).await;
+                    cx.update(|cx| {
+                        let selected = &shell.read(cx).settings_ui.hypr.test_text;
+                        assert!(
+                            !selected.is_empty(),
+                            "a preset must remain selectable after scrolling"
+                        );
+                        assert_ne!(selected, "ease", "the preset list itself must scroll");
+                        handle
+                            .update(cx, |fixture, window, cx| {
+                                assert!(
+                                    fixture.settings.read(cx).hypr_select.is_none(),
+                                    "selection closes the menu"
+                                );
+                                let position = gpui::point(px(400.), px(300.));
+                                window.dispatch_event(
+                                    PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                        position,
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                                window.dispatch_event(
+                                    PlatformInput::Scroll(ScrollEvent {
+                                        position,
+                                        delta: ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .unwrap();
+                    });
+                    cx.background_executor().timer(delay).await;
+                    cx.update(|cx| {
+                        assert!(
+                            scroll.offset().y < px(0.),
+                            "the page still scrolls outside the menu"
+                        );
+                        cx.quit();
+                    });
+                })
+                .detach();
+            });
+    }
+
     #[test]
     #[ignore = "opens native settings on Wayland; run one GPUI test per process"]
     fn native_all_pages_and_validated_edits() {
@@ -2457,6 +4314,46 @@ mod tests {
                                         admin1: String::new(),
                                     }];
                                     s.cal_errors = vec!["Example calendar fetch error".into()];
+                                    let mut live = hyprland_config::Snapshot::default();
+                                    for spec in hyprland_config::OPTIONS {
+                                        let value = match spec.kind {
+                                            hyprland_config::Kind::Bool => Value::Bool(true),
+                                            hyprland_config::Kind::Choice(list) => {
+                                                Value::Text(list[0].into())
+                                            }
+                                            hyprland_config::Kind::Sides { .. } => {
+                                                Value::Sides([0, 16, 16, 16])
+                                            }
+                                            _ => Value::Int(2),
+                                        };
+                                        live.options.insert(spec.key.into(), value);
+                                    }
+                                    live.curves.insert(
+                                        "stripGlide".into(),
+                                        hyprland_config::Curve::Spring(Spring {
+                                            mass: 1.,
+                                            stiffness: 150.,
+                                            dampening: 25.,
+                                        }),
+                                    );
+                                    live.leaves.insert(
+                                        "windowsIn".into(),
+                                        Leaf {
+                                            enabled: true,
+                                            speed: 4.,
+                                            curve: "spring:stripGlide".into(),
+                                            style: "popin 96%".into(),
+                                        },
+                                    );
+                                    live.setup = hyprland_config::Setup::NotAdded;
+                                    s.hypr.received(Ok(Box::new(live)));
+                                    s.hypr.draft.curves.insert(
+                                        "testBezier".into(),
+                                        Curve::Bezier(Bezier {
+                                            points: [0.25, 0.1, 0.25, 1.],
+                                        }),
+                                    );
+                                    s.hypr.status = "Example Hyprland error".into();
                                     app.config.calendar.urls =
                                         vec!["https://calendar.example/private/basic.ics".into()];
                                     s.wallpapers = vec![Wallpaper {
@@ -2484,9 +4381,44 @@ mod tests {
                                             assert!(view.focus.is_focused(window));
                                         }
                                         let _ = view.render(window, cx);
+                                        if populated && page == Page::HyprMotion {
+                                            for (index, length, text) in
+                                                [(0, 4, "0.4"), (1, 3, "-0.3")]
+                                            {
+                                                let input = view.inputs
+                                                    [&format!("bezier:testBezier:{index}")]
+                                                    .1
+                                                    .clone();
+                                                window.focus(&input.focus_handle(cx), cx);
+                                                input.update(cx, |input, cx| {
+                                                    input.replace_text_in_range(
+                                                        Some(0..length),
+                                                        text,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                            window.focus(&view.focus, cx);
+                                        }
                                     })
                                     .unwrap()
                             });
+                            if populated && page == Page::HyprMotion {
+                                cx.background_executor().timer(delay).await;
+                                cx.update(|cx| {
+                                    assert_eq!(
+                                        shell
+                                            .read(cx)
+                                            .settings_ui
+                                            .hypr
+                                            .bezier("testBezier")
+                                            .unwrap()
+                                            .points,
+                                        [0.4, -0.3, 0.25, 1.]
+                                    )
+                                });
+                            }
                         }
                         // Wallpaper-derived schemes are a second render branch.
                         cx.update(|cx| {

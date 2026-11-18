@@ -236,6 +236,7 @@ fn daemon() -> Result<()> {
     let audio_controls = audio::Controls::new(volume);
     let (recording, record_cmds) = capture::spawn_recorder(hypr.clone(), capture_conn.clone());
     forward(recording, ui.clone(), UiEvent::Recording);
+    let preview = hypr.clone().map(|h| spawn_preview(h, ui.clone()));
     let actions_ui = ui.clone();
     let media_handle = media;
     let eq = equalizer.clone();
@@ -251,6 +252,11 @@ fn daemon() -> Result<()> {
             match action {
                 Action::SaveConfig(config) => {
                     let _ = save.send(Some(*config)); // writer lives as long as the runtime
+                }
+                Action::HyprPreview(lua) => {
+                    if let Some(preview) = &preview {
+                        preview.send_replace(lua);
+                    }
                 }
                 Action::Hypr(cmd) => {
                     let Some(h) = hypr else { continue };
@@ -437,6 +443,28 @@ fn spawn_handled<R, E, F>(
             warn!("{what}: {e}");
         }
     });
+}
+
+/// Runs settings previews in Hyprland. A slider drag sends many; only the
+/// newest is evaluated, so the socket never queues stale ones.
+fn spawn_preview(hypr: Hyprland, ui: UnboundedSender<UiEvent>) -> watch::Sender<String> {
+    let (tx, mut rx) = watch::channel(String::new());
+    tokio::spawn(async move {
+        loop {
+            if rx.changed().await.is_err() {
+                warn!("hyprland preview: action channel closed, stopping");
+                return;
+            }
+            let lua = rx.borrow_and_update().clone();
+            if let Err(e) = hypr.eval(&lua).await
+                && ui.send(UiEvent::HyprSettings(Err(e.to_string()))).is_err()
+            {
+                warn!("hyprland preview: UI closed, stopping");
+                return;
+            }
+        }
+    });
+    tx
 }
 
 /// Pushes every value of a service channel into the UI loop.
