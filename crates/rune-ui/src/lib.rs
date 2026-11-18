@@ -301,6 +301,10 @@ impl App {
             Message::Ui(UiEvent::Hypr(state)) => {
                 if state.reloads != self.snapshot.hypr.reloads && !self.game_mode {
                     self.reapply_hypr_rules();
+                    // A reload (e.g. leaving game mode) drops unsaved settings previews.
+                    if let Some(lua) = self.settings_ui.hypr.preview() {
+                        self.send(Action::HyprPreview(lua));
+                    }
                 }
                 self.snapshot.hypr = state;
                 self.instant = Instant::now();
@@ -806,6 +810,10 @@ impl App {
                         settings::Request::WifiForget(p) => {
                             self.send(Action::System(system::Command::WifiForget(p)))
                         }
+                        settings::Request::Hypr(request) => {
+                            self.send(Action::Hypr(hyprland::Command::Settings(request)))
+                        }
+                        settings::Request::HyprPreview(lua) => self.send(Action::HyprPreview(lua)),
                         settings::Request::SetWallpaper(path) => {
                             self.send(Action::SetWallpaper(path));
                             if config.theme.source == config::ThemeSource::Wallpaper {
@@ -819,6 +827,10 @@ impl App {
                 }
                 self.save_config(&config);
                 self.set_config(config)
+            }
+            Message::Ui(UiEvent::HyprSettings(result)) => {
+                self.settings_ui.hypr.received(result);
+                Effects::none()
             }
             Message::Ui(UiEvent::Wallpapers(list)) => {
                 self.settings_ui.wallpapers = list;

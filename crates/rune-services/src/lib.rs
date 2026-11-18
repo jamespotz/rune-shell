@@ -12,6 +12,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod equalizer;
 pub mod hyprland;
+pub mod hyprland_config;
 pub mod icons;
 pub mod media;
 pub mod notifications;

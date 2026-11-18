@@ -69,6 +69,30 @@ Hyprland IPC remains a small query-driven client. Events trigger snapshots;
 workspace names and active IDs are read from Hyprland rather than reconstructed
 from an event history. Commands retain the compositor's Lua dispatch syntax.
 
+Hyprland settings (Settings → Windows, Effects, Input, Window Motion) follow
+hyprmod's overlay design. Rune never edits the user's Lua. It writes only
+`~/.config/hypr/modules/rune.lua`, which a one-time `require("modules.rune")` at
+the end of `hyprland.lua` loads last, so Rune overrides just the values changed
+there. Rune doesn't parse that file back: the overrides live in `[hyprland]` in
+`config.toml`, and `rune.lua` is generated from them. Keys come from the fixed
+`hyprland_config::OPTIONS` schema, and every value is clamped or matched against
+a list before it becomes Lua, so stored config can't inject code. Writes resolve
+symlinks first, then use a temp file and rename in the real directory, which keeps
+dotfile-manager links intact. Edits preview through `eval` on a `watch` channel, so
+a slider drag runs only the newest state. Each preview carries every entry touched
+this session, which lets coalescing drop intermediate states safely, and the full
+set is applied again after a config reload. Hyprland doesn't report spring
+parameters, so baselines for those come from literal `hl.curve` numbers in the
+user's Lua. Bezier baselines come from `j/animations`, with literal dotfile
+control points retained by the source scan. Named overrides store either a spring
+or four bezier control points. Window Motion provides 19 CSS easing presets and
+custom curves; animation previews include their curve definitions before the
+leaves that reference them. Renaming and deleting a custom curve updates those
+references, and deleted names stay hidden from stale live snapshots until reload.
+The same read-only scan follows `hyprland.lua` and its `require`s in
+load order to label which file sets each value. Only literal assignments count. Display settings are left out: per-monitor VRR, bit depth and
+colour mode can't be read over IPC, and an override would silently reset them.
+
 Calendar, notifications, tray, Bluetooth, audio, NetworkManager, UPower, weather,
 capture, wallpaper and theme exports remain service responsibilities. Optional
 backends publish unavailable states so the corresponding controls can hide or

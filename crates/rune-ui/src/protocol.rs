@@ -18,6 +18,9 @@ use rune_services::{
 pub enum Action {
     /// Workspaces, game mode, keybinds; keybinds answer with [`UiEvent::Binds`].
     Hypr(hyprland::Command),
+    /// Lua to run in Hyprland as a live settings preview. Only the latest one
+    /// matters, so the daemon drops any it hasn't sent yet.
+    HyprPreview(String),
     /// Wi-Fi, power profile, keep awake, night light, power menu.
     System(system::Command),
     /// Volume, audio devices, brightness.
@@ -79,8 +82,11 @@ impl From<audio::Reply> for UiEvent {
 }
 
 impl From<hyprland::Reply> for UiEvent {
-    fn from(hyprland::Reply::Binds(binds): hyprland::Reply) -> Self {
-        Self::Binds(binds)
+    fn from(reply: hyprland::Reply) -> Self {
+        match reply {
+            hyprland::Reply::Binds(binds) => Self::Binds(binds),
+            hyprland::Reply::Settings(result) => Self::HyprSettings(result),
+        }
     }
 }
 
@@ -99,6 +105,8 @@ pub enum UiEvent {
     ThemeColors(crate::config::Colors),
     Apps(Vec<DesktopApp>),
     Binds(Vec<Bind>),
+    /// Live Hyprland settings for the settings window, or why a request failed.
+    HyprSettings(Result<Box<rune_services::hyprland_config::Snapshot>, String>),
     Media(Option<Media>),
     /// Visualizer bars, 0..=100 each; empty while nothing plays.
     Bars(Vec<u8>),
