@@ -1038,6 +1038,7 @@ impl App {
         let rebuild = config.bar.height != self.config.bar.height
             || config.bar.margin_top != self.config.bar.margin_top
             || config.bar.gap != self.config.bar.gap
+            || config.bar.shadow_room() != self.config.bar.shadow_room()
             || config.bar.outputs != self.config.bar.outputs;
         if config.bar.look != self.config.bar.look && !self.game_mode {
             let square = config.bar.look == config::Look::Pixel;
@@ -1100,8 +1101,16 @@ impl App {
         {
             tasks.push(self.close_panel()); // its monitor was unplugged
         }
-        let h = self.config.bar.height + self.config.bar.margin_top;
-        let gap = i32::try_from(self.config.bar.gap).unwrap_or(i32::MAX);
+        let bar = &self.config.bar;
+        let room = bar.shadow_room();
+        let h = bar
+            .height
+            .saturating_add(bar.margin_top)
+            .saturating_add(room);
+        // The shadow room is drawn over, not reserved: take it back out of the gap.
+        let gap = i32::try_from(bar.gap)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(i32::try_from(room).unwrap_or(0));
         for name in wanted {
             let output_option = if name.is_empty() {
                 OutputOption::Active
@@ -1698,6 +1707,19 @@ mod tests {
         app.update(Message::Ui(UiEvent::ThemeColors(colors)));
         assert_eq!(app.config.colors.accent, colors.accent);
         assert_eq!(app.config.theme.dark, !stale.theme.dark);
+    }
+
+    #[test]
+    fn shadow_grows_the_bar_surface_but_not_the_reserved_space() {
+        let (mut app, _received) = test_app();
+        let mut config = app.config.clone();
+        config.bar.shadow = true;
+        config.bar.shadow_blur = 6.;
+        config.bar.shadow_offset = 4.;
+        let _ = app.set_config(config);
+        let spec = &app.surfaces.desired[&Surface::Bar(String::new())];
+        assert_eq!(spec.size, Some((0, 32 + 16)));
+        assert_eq!(spec.margin, Some((0, 0, 8 - 16, 0)));
     }
 
     #[test]

@@ -214,6 +214,8 @@ pub enum Field {
     OnAccent,
     Muted,
     Urgent,
+    BorderColor,
+    ShadowColor,
     LockHint,
 }
 
@@ -228,6 +230,9 @@ pub enum Num {
     Padding,
     Spacing,
     FontSize,
+    BorderWidth,
+    ShadowBlur,
+    ShadowOffset,
     WorkspacesMin,
     TitleChars,
     AnimDuration,
@@ -242,6 +247,7 @@ pub enum Flag {
     AnimEnabled,
     ReduceMotion,
     Blur,
+    BarShadow,
     CaptureCopy,
     RecordAudio,
     ThemeDark,
@@ -773,6 +779,7 @@ pub enum Msg {
     EqReset,
     Source(ThemeSource),
     Look(crate::config::Look),
+    BorderStyle(crate::config::BorderStyle),
     PixelFont(crate::config::PixelFont),
     RemindMinutes(u32),
     Preset(String),
@@ -1072,6 +1079,7 @@ impl State {
                 config.bar.blur = on;
                 return Some(Request::Blur(on));
             }
+            Msg::Flag(Flag::BarShadow, on) => config.bar.shadow = on,
             Msg::Flag(Flag::CaptureCopy, on) => config.capture.copy = on,
             Msg::Flag(Flag::RecordAudio, on) => config.capture.record_audio = on,
             Msg::Flag(Flag::ThemeDark, on) => {
@@ -1097,6 +1105,7 @@ impl State {
                 }
             }
             Msg::Look(look) => config.bar.look = look,
+            Msg::BorderStyle(style) => config.bar.border_style = style,
             Msg::PixelFont(font) => config.bar.pixel_font = font,
             Msg::RemindMinutes(minutes) => config.calendar.remind_minutes = minutes,
             Msg::Source(source) => {
@@ -1191,6 +1200,8 @@ fn color_of(config: &Config, field: Field) -> Rgba {
         Field::Accent => c.accent,
         Field::OnAccent => c.on_accent,
         Field::Muted => c.muted,
+        Field::BorderColor => config.bar.border_color,
+        Field::ShadowColor => config.bar.shadow_color,
         _ => c.urgent,
     }
 }
@@ -1238,6 +1249,8 @@ fn apply_text(config: &mut Config, field: Field, value: &str) -> bool {
         Field::OnAccent => &mut c.on_accent,
         Field::Muted => &mut c.muted,
         Field::Urgent => &mut c.urgent,
+        Field::BorderColor => &mut config.bar.border_color,
+        Field::ShadowColor => &mut config.bar.shadow_color,
     };
     match Rgba::parse(value) {
         Some(color) => {
@@ -1264,6 +1277,9 @@ fn set_num(config: &mut Config, num: Num, v: f32) {
         Num::Padding => config.bar.padding = v,
         Num::Spacing => config.bar.spacing = v,
         Num::FontSize => config.bar.font_size = v,
+        Num::BorderWidth => config.bar.border_width = v,
+        Num::ShadowBlur => config.bar.shadow_blur = v,
+        Num::ShadowOffset => config.bar.shadow_offset = v,
         Num::WorkspacesMin => config.workspaces.min = v.round() as i32,
         Num::TitleChars => config.window_title.max_chars = v.round() as usize,
         Num::AnimDuration => config.animations.duration_ms = v.round() as u64,
@@ -1272,6 +1288,7 @@ fn set_num(config: &mut Config, num: Num, v: f32) {
         Num::LockDim => config.lock.dim = clamp_u8(v, lock::MAX_DIM),
         Num::LockGrace => config.lock.grace_seconds = clamp_u8(v, lock::MAX_GRACE_SECONDS),
     }
+    config.bar.sanitize();
 }
 
 fn clamp_u8(v: f32, max: u8) -> u8 {
@@ -1317,6 +1334,38 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn bar_border_and_shadow_edits_stay_in_range() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(&mut config, Msg::Num(Num::BorderWidth, 1e9));
+        state.update(&mut config, Msg::Num(Num::ShadowBlur, f32::NAN));
+        state.update(&mut config, Msg::Num(Num::ShadowOffset, -3.));
+        assert_eq!(
+            (
+                config.bar.border_width,
+                config.bar.shadow_blur,
+                config.bar.shadow_offset
+            ),
+            (8., 0., 0.)
+        );
+        state.update(
+            &mut config,
+            Msg::BorderStyle(crate::config::BorderStyle::Dashed),
+        );
+        state.update(&mut config, Msg::Flag(Flag::BarShadow, true));
+        assert!(config.bar.shadow);
+        assert_eq!(config.bar.border_style, crate::config::BorderStyle::Dashed);
+        state.update(
+            &mut config,
+            Msg::Text(Field::ShadowColor, "#12345678".into()),
+        );
+        assert_eq!(config.bar.shadow_color, Rgba([0x12, 0x34, 0x56, 0x78]));
+        state.update(&mut config, Msg::Text(Field::BorderColor, "nope".into()));
+        assert_eq!(config.bar.border_color, Config::default().bar.border_color);
+        assert_eq!(state.drafts[&Field::BorderColor], "nope");
+    }
 
     #[test]
     fn lock_edits_stay_in_range_and_lock_now_uses_the_lock_command() {

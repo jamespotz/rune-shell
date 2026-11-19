@@ -29,6 +29,37 @@ pub(crate) fn pixel_look() -> bool {
 pub(crate) fn corner(radius: f32) -> gpui::Pixels {
     if pixel_look() { px(0.) } else { px(radius) }
 }
+/// The bar's configured outline and drop shadow. A notch flush with the top edge
+/// has no top stroke; the pixel look keeps strokes whole.
+pub(crate) fn bar_outline<E: Styled>(element: E, bar: &crate::config::BarConfig) -> E {
+    let width = if pixel_look() {
+        bar.border_width.round()
+    } else {
+        bar.border_width
+    };
+    let mut element = element;
+    if width > 0. {
+        element = if bar.margin_top == 0 {
+            element.border_x(px(width)).border_b(px(width))
+        } else {
+            element.border(px(width))
+        }
+        .border_color(color(bar.border_color));
+        if bar.border_style == crate::config::BorderStyle::Dashed {
+            element = element.border_dashed();
+        }
+    }
+    if bar.shadow {
+        element = element.shadow(vec![gpui::BoxShadow {
+            color: color(bar.shadow_color).into(),
+            offset: gpui::point(px(0.), px(bar.shadow_offset)),
+            blur_radius: px(bar.shadow_blur),
+            spread_radius: px(0.),
+            inset: false,
+        }]);
+    }
+    element
+}
 pub(crate) fn text_font(config: &Config) -> gpui::SharedString {
     match pixel_font() {
         Some(family) => family.into(),
@@ -771,6 +802,24 @@ impl gpui::Element for NaturalContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bar_shadow_keeps_its_softness_in_the_pixel_look() {
+        let bar = crate::config::BarConfig {
+            shadow: true,
+            ..Default::default()
+        };
+        set_look(crate::config::Look::Pixel, crate::config::PixelFont::Tiny5);
+        let mut shadowed = bar_outline(div(), &bar);
+        set_look(crate::config::Look::Smooth, crate::config::PixelFont::Tiny5);
+        let blurs: Vec<_> = shadowed
+            .style()
+            .box_shadow
+            .iter()
+            .flatten()
+            .map(|shadow| shadow.blur_radius)
+            .collect();
+        assert_eq!(blurs, [px(bar.shadow_blur)]);
+    }
     #[test]
     fn material_alpha_blur_off_is_opaque_enough() {
         for material in [

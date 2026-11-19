@@ -46,6 +46,7 @@ fn rgba(width: u32, height: u32, bytes: &[u8]) -> Option<Arc<RenderImage>> {
 enum Source {
     Raw(Image),
     Encoded(Arc<[u8]>, u32),
+    Emoji(&'static str, [u8; 4]),
 }
 impl Source {
     fn hash(&self) -> u64 {
@@ -64,6 +65,11 @@ impl Source {
                 width.hash(&mut hash);
                 height.hash(&mut hash);
                 data.hash(&mut hash);
+            }
+            Self::Emoji(text, color) => {
+                3u8.hash(&mut hash);
+                text.hash(&mut hash);
+                color.hash(&mut hash);
             }
             Self::Encoded(bytes, edge) => {
                 2u8.hash(&mut hash);
@@ -85,6 +91,7 @@ pub(crate) struct Images {
     shared: Shared,
     entries: HashMap<String, Rc<Cached>>,
     assets: HashSet<(PathBuf, u32)>,
+    emoji_assets: HashSet<(&'static str, [u8; 4])>,
 }
 // A new view shares the lookup index, not another view's strong pixel ownership.
 impl Clone for Images {
@@ -93,6 +100,7 @@ impl Clone for Images {
             shared: self.shared.clone(),
             entries: HashMap::new(),
             assets: HashSet::new(),
+            emoji_assets: HashSet::new(),
         }
     }
 }
@@ -112,6 +120,12 @@ impl Images {
         });
         let cached = reused.unwrap_or_else(|| {
             let image = match &source {
+                Source::Emoji(text, color) => {
+                    let request = (*text, *color);
+                    Some(ImageSource::Custom(Arc::new(move |window, cx| {
+                        window.use_asset::<EmojiThumbnail>(&request, cx)
+                    })))
+                }
                 Source::Raw(Image::Path(path)) => {
                     let request = (path.clone(), ICON_EDGE);
                     Some(ImageSource::Custom(Arc::new(move |window, cx| {
@@ -149,11 +163,12 @@ impl Images {
         }
         self.get(key, Source::Raw(source.clone()))
     }
+    pub fn emoji(&mut self, text: &'static str, color: [u8; 4]) -> Option<ImageSource> {
+        self.emoji_assets.insert((text, color));
+        self.get(&format!("emoji:{text}"), Source::Emoji(text, color))
+    }
     pub fn encoded(&mut self, key: &str, bytes: &Arc<[u8]>) -> Option<ImageSource> {
         self.get(key, Source::Encoded(bytes.clone(), ART_EDGE))
-    }
-    pub fn encoded_icon(&mut self, key: &str, bytes: &Arc<[u8]>) -> Option<ImageSource> {
-        self.get(key, Source::Encoded(bytes.clone(), ICON_EDGE))
     }
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.entries.retain(|key, _| keep(key));
@@ -166,6 +181,23 @@ impl Images {
         self.assets.iter().filter(|(path, _)| !self.entries.values().any(|cached| matches!(&cached.source, Source::Raw(Image::Path(active)) if active == path))).cloned().collect()
     }
     pub fn release_unused_assets(&mut self, cx: &mut gpui::App) {
+        let unused: Vec<_> = self
+            .emoji_assets
+            .iter()
+            .copied()
+            .filter(|(text, color)| {
+                !self
+                    .entries
+                    .values()
+                    .any(|cached| cached.source == Source::Emoji(text, *color))
+            })
+            .collect();
+        for request in unused {
+            if self.can_release_source(&Source::Emoji(request.0, request.1)) {
+                cx.remove_asset::<EmojiThumbnail>(&request);
+            }
+            self.emoji_assets.remove(&request);
+        }
         for request in self.unused_assets() {
             if self.can_release_asset(&request) {
                 cx.remove_asset::<Thumbnail>(&request);
@@ -174,11 +206,13 @@ impl Images {
         }
     }
     fn can_release_asset(&self, request: &(PathBuf, u32)) -> bool {
-        let source = Source::Raw(Image::Path(request.0.clone()));
+        self.can_release_source(&Source::Raw(Image::Path(request.0.clone())))
+    }
+    fn can_release_source(&self, source: &Source) -> bool {
         let local = self
             .entries
             .values()
-            .filter(|cached| cached.source == source)
+            .filter(|cached| cached.source == *source)
             .count();
         let shared = self.shared.borrow();
         let live = shared
@@ -187,17 +221,117 @@ impl Images {
                 bucket
                     .iter()
                     .filter_map(Weak::upgrade)
-                    .find(|cached| cached.source == source)
+                    .find(|cached| cached.source == *source)
             })
             .map_or(0, |cached| Rc::strong_count(&cached) - 1);
         live <= local
     }
     pub fn release_assets(&mut self, cx: &mut gpui::App) {
+        for request in std::mem::take(&mut self.emoji_assets) {
+            if self.can_release_source(&Source::Emoji(request.0, request.1)) {
+                cx.remove_asset::<EmojiThumbnail>(&request);
+            }
+        }
         for request in std::mem::take(&mut self.assets) {
             if self.can_release_asset(&request) {
                 cx.remove_asset::<Thumbnail>(&request);
             }
         }
+    }
+}
+
+pub(crate) struct EmojiThumbnail;
+impl Asset for EmojiThumbnail {
+    type Source = (&'static str, [u8; 4]);
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+    fn load(
+        (text, color): Self::Source,
+        _cx: &mut gpui::App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        load_emoji(text, color)
+    }
+}
+
+async fn load_emoji(
+    text: &'static str,
+    color: [u8; 4],
+) -> Result<Arc<RenderImage>, ImageCacheError> {
+    // GPUI runs asset loads in the background. Share font discovery, not mutable shaping state.
+    static FONTS: std::sync::OnceLock<(String, cosmic_text::fontdb::Database)> =
+        std::sync::OnceLock::new();
+    let (locale, database) =
+        FONTS.get_or_init(|| cosmic_text::FontSystem::new().into_locale_and_db());
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db(locale.clone(), database.clone());
+    let pixels = emoji_pixels(text, color, &mut fonts);
+    if !pixels.pixels().any(|pixel| pixel.0[3] != 0) {
+        return Err(anyhow::anyhow!("cannot render emoji {text:?}; install Noto Emoji").into());
+    }
+    Ok(render(image::DynamicImage::ImageRgba8(pixels), ICON_EDGE))
+}
+
+fn emoji_pixels(
+    text: &str,
+    color: [u8; 4],
+    fonts: &mut cosmic_text::FontSystem,
+) -> image::RgbaImage {
+    use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, SwashCache};
+    use image::Pixel;
+    let mut buffer = Buffer::new(fonts, Metrics::new(64., 80.));
+    buffer.set_size(Some(160.), Some(96.));
+    // Swash cannot paint COLRv1 fonts. Noto Emoji supplies outlines and handles emoji sequences.
+    buffer.set_text(
+        text,
+        &Attrs::new().family(Family::Name("Noto Emoji")),
+        Shaping::Advanced,
+        None,
+    );
+    let mut pixels = image::RgbaImage::new(160, 96);
+    let mut cache = SwashCache::new();
+    let mut draw = |x: i32, y: i32, width: u32, height: u32, color: Color| {
+        for dy in 0..height {
+            for dx in 0..width {
+                let Some(x) = i32::try_from(dx)
+                    .ok()
+                    .and_then(|dx| x.checked_add(dx))
+                    .and_then(|x| u32::try_from(x).ok())
+                else {
+                    continue;
+                };
+                let Some(y) = i32::try_from(dy)
+                    .ok()
+                    .and_then(|dy| y.checked_add(dy))
+                    .and_then(|y| u32::try_from(y).ok())
+                else {
+                    continue;
+                };
+                if let Some(pixel) = pixels.get_pixel_mut_checked(x, y) {
+                    pixel.blend(&image::Rgba(color.as_rgba()));
+                }
+            }
+        }
+    };
+    buffer.draw(
+        fonts,
+        &mut cache,
+        Color::rgba(color[0], color[1], color[2], color[3]),
+        &mut draw,
+    );
+    let mut left = pixels.width();
+    let mut top = pixels.height();
+    let (mut right, mut bottom) = (0, 0);
+    for (x, y, pixel) in pixels.enumerate_pixels() {
+        if pixel.0[3] != 0 {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+    }
+    if left <= right && top <= bottom {
+        image::imageops::crop_imm(&pixels, left, top, right - left + 1, bottom - top + 1).to_image()
+    } else {
+        pixels
     }
 }
 
@@ -268,6 +402,34 @@ fn thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn emoji_assets_stay_shared_until_the_last_view_retires_them() {
+        let mut first = Images::default();
+        let mut second = first.clone();
+        let color = [255; 4];
+        first.emoji("👍", color);
+        second.emoji("👍", color);
+        let source = Source::Emoji("👍", color);
+        assert!(!first.can_release_source(&source));
+        first.retain(|_| false);
+        assert!(!first.can_release_source(&source));
+        second.retain(|_| false);
+        assert!(first.can_release_source(&source));
+    }
+
+    #[test]
+    #[ignore = "uses installed Noto Emoji font"]
+    fn native_emoji_icons_have_visible_pixels() {
+        let mut fonts = cosmic_text::FontSystem::new();
+        for text in ["😀", "👍", "❤️", "🇵🇭", "👩‍💻", "🫠"] {
+            let pixels = emoji_pixels(text, [230, 220, 210, 255], &mut fonts);
+            assert!(
+                pixels.pixels().any(|pixel| pixel.0[3] != 0),
+                "empty emoji icon: {text}"
+            );
+        }
+    }
+
     #[test]
     fn rgba_is_converted_to_bgra_without_changing_alpha() {
         let image = rgba(1, 1, &[200, 30, 10, 128]).unwrap();

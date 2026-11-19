@@ -51,6 +51,7 @@ impl Config {
         }
         let bands = &mut config.equalizer.bands;
         *bands = bands.map(rune_services::equalizer::clamp_gain);
+        config.bar.sanitize();
         config.hyprland.sanitize();
         config.lock.sanitize();
         Ok(config)
@@ -189,6 +190,17 @@ pub struct BarConfig {
     pub pixel_font: PixelFont,
     /// Icon font; icons are written by name, e.g. `"schedule"`.
     pub icon_font: String,
+    /// Outline around the bar; 0 turns it off.
+    pub border_width: f32,
+    pub border_style: BorderStyle,
+    pub border_color: Rgba,
+    /// Drop shadow under the bar.
+    pub shadow: bool,
+    /// Shadow softness; 0 draws a hard edge.
+    pub shadow_blur: f32,
+    /// How far the shadow falls below the bar.
+    pub shadow_offset: f32,
+    pub shadow_color: Rgba,
     /// Connector names (`DP-1`) to show a bar on. Empty means every monitor.
     pub outputs: Vec<String>,
     pub left: Vec<Widget>,
@@ -213,6 +225,13 @@ impl Default for BarConfig {
             blur: false,
             look: Look::Smooth,
             pixel_font: PixelFont::Tiny5,
+            border_width: 0.0,
+            border_style: BorderStyle::Solid,
+            border_color: Rgba([0xff, 0xff, 0xff, 0x33]),
+            shadow: false,
+            shadow_blur: 12.0,
+            shadow_offset: 4.0,
+            shadow_color: Rgba([0, 0, 0, 0x66]),
             outputs: Vec::new(),
             left: vec![Widget::Workspaces],
             center: vec![Widget::Media, Widget::WindowTitle],
@@ -229,6 +248,45 @@ impl Default for BarConfig {
             ],
         }
     }
+}
+
+impl BarConfig {
+    pub const MAX_BORDER_WIDTH: f32 = 8.0;
+    pub const MAX_SHADOW_BLUR: f32 = 32.0;
+    pub const MAX_SHADOW_OFFSET: f32 = 16.0;
+
+    /// Pixels the bar surface grows below the bar so the shadow is not clipped.
+    pub fn shadow_room(&self) -> u32 {
+        if !self.shadow {
+            return 0;
+        }
+        // A GPUI shadow is a gaussian with sigma = blur; past 2 sigma it is invisible.
+        let room = (self.shadow_offset + 2.0 * self.shadow_blur).ceil();
+        // Float-to-int `as` saturates; `sanitize` keeps both inputs small and finite.
+        room.clamp(0.0, Self::MAX_SHADOW_OFFSET + 2.0 * Self::MAX_SHADOW_BLUR) as u32
+    }
+
+    pub(crate) fn sanitize(&mut self) {
+        let bound = |v: f32, max: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, max)
+            } else {
+                0.0
+            }
+        };
+        self.border_width = bound(self.border_width, Self::MAX_BORDER_WIDTH);
+        self.shadow_blur = bound(self.shadow_blur, Self::MAX_SHADOW_BLUR);
+        self.shadow_offset = bound(self.shadow_offset, Self::MAX_SHADOW_OFFSET);
+    }
+}
+
+/// Bar outline stroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BorderStyle {
+    #[default]
+    Solid,
+    Dashed,
 }
 
 /// `[workspaces]`
@@ -612,6 +670,24 @@ mod tests {
     fn capture_widget_parses() {
         let c = Config::parse("[bar]\nright = [\"capture\"]").unwrap();
         assert_eq!(c.bar.right, [Widget::Capture]);
+    }
+
+    #[test]
+    fn bar_outline_parses_and_hostile_sizes_are_bounded() {
+        let c = Config::parse(
+            "[bar]\nborder_width = inf\nborder_style = \"dashed\"\nborder_color = \"#ff000080\"\n\
+             shadow = true\nshadow_blur = nan\nshadow_offset = -5.0",
+        )
+        .unwrap();
+        assert_eq!(c.bar.border_width, 0.0);
+        assert_eq!(c.bar.border_style, BorderStyle::Dashed);
+        assert_eq!(c.bar.border_color, Rgba([0xff, 0, 0, 0x80]));
+        assert_eq!((c.bar.shadow_blur, c.bar.shadow_offset), (0.0, 0.0));
+        let c =
+            Config::parse("[bar]\nshadow = true\nshadow_blur = 1e9\nshadow_offset = 3.2").unwrap();
+        assert_eq!(c.bar.shadow_room(), 68);
+        assert_eq!(Config::default().bar.shadow_room(), 0);
+        assert!(Config::parse("[bar]\nborder_style = \"dotted\"").is_err());
     }
 
     #[test]

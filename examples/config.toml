@@ -19,6 +19,13 @@ blur = false              # blur behind the notch (needs a transparent backgroun
 look = "smooth"           # "smooth" (rounded, soft) or "pixel" (square frames, pixel font)
 pixel_font = "tiny5"      # pixel look font: "tiny5" or "monocraft"
 icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
+border_width = 0.0        # outline around the bar; 0 = none (max 8)
+border_style = "solid"    # "solid" or "dashed"
+border_color = "#ffffff33"
+shadow = false            # drop shadow under the bar
+shadow_blur = 12.0        # softness (max 32); 0 = hard edge
+shadow_offset = 4.0       # how far it falls below the bar (max 16)
+shadow_color = "#00000066"
 outputs = []              # e.g. ["DP-1"]; empty = every monitor
 # Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
 # "weather", "bluetooth", "volume", "network", "battery", "stats", "updates", "quick_settings", "power", "capture",

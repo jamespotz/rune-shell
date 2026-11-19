@@ -132,20 +132,10 @@ impl Render for LauncherView {
                 Hit::App(a) => {
                     let app = &model.apps[*a];
                     let source = app.icon.as_ref().and_then(|path| {
-                        if let Some(bytes) = model.sniffed.get(path) {
-                            self.images.encoded_icon(&path.to_string_lossy(), bytes)
-                        } else if path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(super::known_ext)
-                        {
-                            self.images.source(
-                                &path.to_string_lossy(),
-                                &rune_services::notifications::Image::Path(path.clone()),
-                            )
-                        } else {
-                            None
-                        }
+                        self.images.source(
+                            &path.to_string_lossy(),
+                            &rune_services::notifications::Image::Path(path.clone()),
+                        )
                     });
                     match source {
                         Some(source) => gpui::img(source)
@@ -169,10 +159,28 @@ impl Render for LauncherView {
                     None => glyph("content_paste"),
                 },
                 Hit::Calc(_) => glyph("calculate"),
-                Hit::Emoji(_) => div()
-                    .text_size(px(26.))
-                    .child(lead.clone())
-                    .into_any_element(),
+                Hit::Emoji(emoji) => match self
+                    .images
+                    .emoji(emoji.as_str(), config.colors.foreground.0)
+                {
+                    Some(source) => gpui::img(source)
+                        .size(px(32.))
+                        .with_fallback({
+                            let font = config.bar.icon_font.clone();
+                            let foreground = color(config.colors.foreground);
+                            move || {
+                                div()
+                                    .font_family(font.clone())
+                                    .text_color(foreground)
+                                    .text_size(px(26.))
+                                    .child("mood")
+                                    .into_any_element()
+                            }
+                        })
+                        .object_fit(gpui::ObjectFit::Contain)
+                        .into_any_element(),
+                    None => glyph("mood"),
+                },
                 Hit::Bind(_) => div()
                     .flex()
                     .gap(px(4.))
@@ -347,6 +355,14 @@ impl Render for LauncherView {
                     self.measure.clone(),
                     self.dispatch.clone(),
                 ));
+        self.images.retain(|key| {
+            key.strip_prefix("emoji:").is_none_or(|text| {
+                model
+                    .results
+                    .iter()
+                    .any(|hit| matches!(hit, Hit::Emoji(emoji) if emoji.as_str() == text))
+            })
+        });
         self.images.release_unused_assets(cx);
         crate::gpui_widgets::natural_content(content)
     }
@@ -355,6 +371,108 @@ impl Render for LauncherView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "opens a GPUI launcher; requires Wayland and Noto Emoji"]
+    fn native_emoji_smooth() {
+        emoji_fixture(crate::config::Look::Smooth);
+    }
+
+    #[test]
+    #[ignore = "opens a GPUI launcher; requires Wayland and Noto Emoji"]
+    fn native_emoji_pixel() {
+        emoji_fixture(crate::config::Look::Pixel);
+    }
+
+    fn emoji_fixture(look: crate::config::Look) {
+        gpui_platform::application()
+            .with_quit_mode(gpui::QuitMode::Explicit)
+            .run(move |cx| {
+                TextInput::bind_keys(cx);
+                let mut config = crate::Config::default();
+                config.bar.look = look;
+                crate::gpui_widgets::set_look(look, config.bar.pixel_font);
+                let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+                let (_, events) = tokio::sync::mpsc::unbounded_channel();
+                let (mut app, _) = Shell::new(config, events, actions, false);
+                app.launcher.results = ["😀", "👍", "❤️", "🇵🇭", "👩‍💻", "🫠"]
+                    .into_iter()
+                    .map(|text| Hit::Emoji(emojis::get(text).unwrap()))
+                    .collect();
+                let foreground = app.config.colors.foreground.0;
+                let shell = cx.new(|_| app);
+                let dispatch: Dispatch = std::rc::Rc::new(|_, _, _| {});
+                cx.open_window(
+                    crate::gpui_surfaces::options(
+                        &crate::Surface::Panel,
+                        (672, 440),
+                        None,
+                        true,
+                        0,
+                    ),
+                    |window, cx| cx.new(|cx| LauncherView::new(shell, dispatch, window, cx)),
+                )
+                .unwrap();
+                cx.spawn(async move |cx| {
+                    let started = std::time::Instant::now();
+                    loop {
+                        let ready = cx.update(|cx| {
+                            ["😀", "👍", "❤️", "🇵🇭", "👩‍💻", "🫠"]
+                                .into_iter()
+                                .all(|text| {
+                                    match cx.fetch_asset::<crate::gpui_images::EmojiThumbnail>(&(
+                                        text, foreground,
+                                    )) {
+                                        Some(Ok(image)) => {
+                                            assert!(
+                                                image
+                                                    .as_bytes(0)
+                                                    .unwrap()
+                                                    .as_chunks::<4>()
+                                                    .0
+                                                    .iter()
+                                                    .any(|pixel| pixel[3] != 0)
+                                            );
+                                            true
+                                        }
+                                        Some(Err(error)) => panic!("emoji {text}: {error}"),
+                                        None => false,
+                                    }
+                                })
+                        });
+                        if ready {
+                            break;
+                        }
+                        assert!(
+                            started.elapsed() < std::time::Duration::from_secs(10),
+                            "emoji assets did not finish loading"
+                        );
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(20))
+                            .await;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    cx.background_executor()
+                        .spawn(async move {
+                            let path = if look == crate::config::Look::Pixel {
+                                "/tmp/rune-emoji-pixel.png"
+                            } else {
+                                "/tmp/rune-emoji-smooth.png"
+                            };
+                            let status = std::process::Command::new("grim")
+                                .arg(path)
+                                .status()
+                                .unwrap();
+                            assert!(status.success(), "grim failed: {status}");
+                        })
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
+    }
+
     #[test]
     #[ignore = "opens a GPUI launcher; requires Wayland"]
     fn native_edit_updates_search_results() {

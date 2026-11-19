@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cosmic-text = { workspace = true }
 image = { workspace = true }
 unicode-segmentation = "1"
 uuid = { version = "1", features = ["v5"] }

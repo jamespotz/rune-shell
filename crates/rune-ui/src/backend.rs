@@ -185,7 +185,17 @@ fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
                 let monitor = monitor.clone();
                 state
                     .windows
-                    .open(surface.clone(), options, cx, move |_, cx| {
+                    .open(surface.clone(), options, cx, move |window, cx| {
+                        let bar = &view_shell.read(cx).config.bar;
+                        if bar.shadow_room() > 0 {
+                            // Only the bar takes input, not the shadow over the windows. The
+                            // width outgrows any output; Wayland clips regions to the surface.
+                            let rows = bar.height.saturating_add(bar.margin_top) as f32;
+                            window.set_input_region(Some(&[gpui::Bounds::new(
+                                gpui::point(gpui::px(0.), gpui::px(0.)),
+                                gpui::size(gpui::px(65_536.), gpui::px(rows)),
+                            )]));
+                        }
                         cx.new(|cx| {
                             crate::gpui_notch::Notch::new(view_shell, monitor, callback, cx)
                         })

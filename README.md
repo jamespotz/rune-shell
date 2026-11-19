@@ -114,7 +114,9 @@ install -Dm755 target/release/rune-shell ~/.local/bin/rune-shell
 ```
 
 Fonts: the defaults are `JetBrainsMono Nerd Font` for text and `Material Symbols Rounded`
-for icons (icons are written by name, e.g. `schedule`). Any installed font works. Run tests with
+for icons (icons are written by name, e.g. `schedule`). Launcher emoji use the
+outline `Noto Emoji` font, installed on Fedora with `sudo dnf install google-noto-emoji-fonts`.
+They render as monochrome thumbnails because the GPUI rasterizer does not support COLRv1 color fonts. Run tests with
 `cargo test --workspace`. Native window tests are opt-in and require a running Wayland
 compositor; run individual ignored tests with `--ignored --exact --test-threads=1`.
 

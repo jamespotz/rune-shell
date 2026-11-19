@@ -15,7 +15,6 @@ use rune_services::{
     clipboard::{Entry as ClipEntry, Id as ClipId},
     hyprland::Bind,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 /// Height of one result row; used to keep the selection scrolled into view.
 pub const ROW_H: f32 = 52.0;
@@ -71,8 +70,6 @@ pub struct Launcher {
     selected: usize,
     results: Vec<Hit>,
     apps: Vec<App>,
-    /// Icons without a usable extension, loaded from their bytes (see [`app_icon`]).
-    sniffed: HashMap<PathBuf, Arc<[u8]>>,
     binds: Vec<Bind>,
     clips: Vec<ClipEntry>,
 }
@@ -86,22 +83,6 @@ impl Launcher {
     }
 
     pub fn set_apps(&mut self, apps: Vec<App>) {
-        self.sniffed = apps
-            .iter()
-            .filter_map(|a| a.icon.as_ref())
-            .filter(|p| {
-                !p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(known_ext)
-            })
-            .filter_map(|p| {
-                let bytes = std::fs::read(p).ok()?;
-                // Decode extensionless raster icons from bytes.
-                let png = bytes.starts_with(b"\x89PNG");
-                let jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
-                (png || jpeg).then(|| (p.clone(), Arc::from(bytes)))
-            })
-            .collect();
         self.apps = apps;
         self.refilter();
     }
@@ -249,12 +230,6 @@ fn emoji(query: &str) -> Vec<&'static emojis::Emoji> {
         })
         .take(MAX_RESULTS)
         .collect()
-}
-
-/// Common image formats decoded by GPUI from a file path.
-fn known_ext(ext: &str) -> bool {
-    ["svg", "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico"]
-        .contains(&ext.to_ascii_lowercase().as_str())
 }
 
 #[cfg(test)]

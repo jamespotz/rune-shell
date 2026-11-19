@@ -54,7 +54,7 @@ impl Render for Notch {
             .w_full()
             .flex()
             .items_center()
-            .h(px(height))
+            .size_full()
             .gap(px(bar.spacing));
         for (section_index, widgets) in [&bar.left, &bar.center, &bar.right].into_iter().enumerate()
         {
@@ -247,7 +247,7 @@ impl Render for Notch {
             .text_color(color(config.colors.foreground))
             .font_weight(gpui::FontWeight::MEDIUM)
             .child(
-                div()
+                crate::gpui_widgets::bar_outline(div(), bar)
                     .w_full()
                     .when(bar.width > 0, |inner| inner.max_w(px(bar.width as f32)))
                     .h(px(height))
@@ -303,6 +303,9 @@ mod tests {
                 shell.config.bar.center.clear();
                 shell.config.bar.right = Widget::ALL.to_vec();
                 shell.game_mode = true;
+                shell.config.bar.border_width = 2.;
+                shell.config.bar.border_style = crate::config::BorderStyle::Dashed;
+                shell.config.bar.shadow = true;
                 shell.snapshot.recording = Some(rune_services::capture::Recording {
                     path: "/tmp/rune-test.mp4".into(),
                     started: std::time::Instant::now(),

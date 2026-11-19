@@ -22,8 +22,8 @@ pub(crate) fn options(
             Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
             Some(px(i32::try_from(dimensions.1)
                 .unwrap_or(i32::MAX)
-                .saturating_add(margin.map_or(0, |(_, _, gap, _)| gap.max(0)))
-                as f32)),
+                .saturating_add(margin.map_or(0, |(_, _, gap, _)| gap))
+                .max(0) as f32)),
             KeyboardInteractivity::None,
         ),
         Surface::Catcher => (Layer::Top, Anchor::all(), None, KeyboardInteractivity::None),
@@ -183,6 +183,21 @@ mod tests {
             &Surface::Bar("DP-1".into()),
             (0, 32),
             Some((0, 0, 8, 0)),
+            false,
+            0,
+        );
+        let WindowKind::LayerShell(layer) = options.kind else {
+            panic!("expected layer shell")
+        };
+        assert_eq!(layer.exclusive_zone, Some(px(40.)));
+    }
+
+    #[test]
+    fn bar_shadow_room_is_not_reserved() {
+        let options = options(
+            &Surface::Bar("DP-1".into()),
+            (0, 48),
+            Some((0, 0, -8, 0)),
             false,
             0,
         );

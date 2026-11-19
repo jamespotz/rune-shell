@@ -296,14 +296,15 @@ fn duration(v: &str) -> Option<Duration> {
             _ => {
                 let n: i64 = num.parse().ok()?;
                 num.clear();
-                total += match (c, in_time) {
-                    ('W', false) => Duration::weeks(n),
-                    ('D', false) => Duration::days(n),
-                    ('H', true) => Duration::hours(n),
-                    ('M', true) => Duration::minutes(n),
-                    ('S', true) => Duration::seconds(n),
+                let part = match (c, in_time) {
+                    ('W', false) => Duration::try_weeks(n)?,
+                    ('D', false) => Duration::try_days(n)?,
+                    ('H', true) => Duration::try_hours(n)?,
+                    ('M', true) => Duration::try_minutes(n)?,
+                    ('S', true) => Duration::try_seconds(n)?,
                     _ => return None,
                 };
+                total = total.checked_add(&part)?;
             }
         }
     }
@@ -392,11 +393,13 @@ pub fn parse(text: &str, calendar: usize, today: NaiveDate) -> Vec<Event> {
             {
                 continue;
             }
-            if s.date() > to || (s + length).date() < from {
+            let Some(end) = s.checked_add_signed(length) else {
+                continue;
+            };
+            if s.date() > to || end.date() < from {
                 continue;
             }
-            let (Some(begin), Some(end)) = (start.with(s).local(), start.with(s + length).local())
-            else {
+            let (Some(begin), Some(end)) = (start.with(s).local(), start.with(end).local()) else {
                 continue;
             };
             events.push(Event {
@@ -550,7 +553,7 @@ fn expand(rule: &str, start: NaiveDateTime, from: NaiveDate, to: NaiveDate) -> V
 /// `MO`, `2TU`, `-1FR`.
 fn byday(s: &str) -> Option<(Option<i32>, Weekday)> {
     let s = s.trim();
-    let (num, day) = s.split_at(s.len().checked_sub(2)?);
+    let (num, day) = s.split_at_checked(s.len().checked_sub(2)?)?;
     let w = match day {
         "MO" => Weekday::Mon,
         "TU" => Weekday::Tue,
@@ -573,12 +576,19 @@ fn byday(s: &str) -> Option<(Option<i32>, Weekday)> {
 
 /// The `n`th `w` of the month (`-1` = last).
 fn nth_weekday(month: NaiveDate, n: i32, w: Weekday) -> Option<NaiveDate> {
+    if n == 0 || !(-5..=5).contains(&n) {
+        return None;
+    }
     if n > 0 {
         NaiveDate::from_weekday_of_month_opt(month.year(), month.month(), w, u8::try_from(n).ok()?)
     } else {
-        let last = month.checked_add_months(Months::new(1))? - Days::new(1);
+        let last = month
+            .checked_add_months(Months::new(1))?
+            .checked_sub_days(Days::new(1))?;
         let back = (7 + last.weekday().num_days_from_monday() - w.num_days_from_monday()) % 7;
-        let d = last - Days::new(u64::from(back) + 7 * u64::from((-n - 1).unsigned_abs()));
+        let d = last.checked_sub_days(Days::new(
+            u64::from(back) + 7 * u64::from((-n - 1).unsigned_abs()),
+        ))?;
         (d.month() == month.month()).then_some(d)
     }
 }
@@ -609,6 +619,21 @@ pub fn meeting_link(texts: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_durations_are_rejected() {
+        assert!(duration("P9223372036854775807W").is_none());
+        assert!(duration("PT9223372036854775S9223372036854775S").is_none());
+    }
+
+    #[test]
+    fn hostile_recurrence_fields_are_rejected() {
+        assert!(byday("€").is_none());
+        let month = d("2026-11-01");
+        for ordinal in [i32::MIN, -1000000, 0, 6] {
+            assert!(nth_weekday(month, ordinal, Weekday::Mon).is_none());
+        }
+    }
 
     #[test]
     fn reminders_fire_within_lead_before_start() {

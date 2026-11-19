@@ -953,6 +953,7 @@ fn bar_preview(c: &Config, window: &Window, cx: &gpui::App) -> AnyElement {
     } else {
         bar.rounded(radius)
     };
+    bar = crate::gpui_widgets::bar_outline(bar, &c.bar);
     let windows_top = top + height + c.bar.gap as f32;
     crate::gpui_widgets::frame(div())
         .relative()
@@ -3742,6 +3743,89 @@ impl Render for SettingsView {
                     1.
                 ));
                 items.push(group("Shape", shape));
+                let swatch_field = |this: &mut Self,
+                                    field: Field,
+                                    label: &str,
+                                    value,
+                                    window: &mut Window,
+                                    cx: &mut Context<Self>| {
+                    row()
+                        .w_full()
+                        .gap(px(10.))
+                        .child(swatch(value, 18.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(this.field(&s, &c, field, label, window, cx)),
+                        )
+                        .into_any_element()
+                };
+                let mut border = vec![number!(
+                    BorderWidth,
+                    "Width (0 for none)",
+                    c.bar.border_width,
+                    0.,
+                    crate::config::BarConfig::MAX_BORDER_WIDTH,
+                    0.5
+                )];
+                if c.bar.border_width > 0. {
+                    use crate::config::BorderStyle;
+                    border.push(
+                        self.segmented(
+                            "bar-border-style",
+                            [
+                                (BorderStyle::Solid, "Solid"),
+                                (BorderStyle::Dashed, "Dashed"),
+                            ]
+                            .into_iter()
+                            .map(|(style, label)| {
+                                (
+                                    label.into(),
+                                    c.bar.border_style == style,
+                                    Msg::BorderStyle(style),
+                                )
+                            })
+                            .collect(),
+                        ),
+                    );
+                    border.push(swatch_field(
+                        self,
+                        Field::BorderColor,
+                        "Colour (#rrggbb or #rrggbbaa)",
+                        c.bar.border_color,
+                        window,
+                        cx,
+                    ));
+                }
+                items.push(group("Border", border));
+                let mut shadow = vec![flag!(BarShadow, "Drop shadow", c.bar.shadow)];
+                if c.bar.shadow {
+                    shadow.push(number!(
+                        ShadowBlur,
+                        "Softness (0 for a hard edge)",
+                        c.bar.shadow_blur,
+                        0.,
+                        crate::config::BarConfig::MAX_SHADOW_BLUR,
+                        1.
+                    ));
+                    shadow.push(number!(
+                        ShadowOffset,
+                        "Distance below",
+                        c.bar.shadow_offset,
+                        0.,
+                        crate::config::BarConfig::MAX_SHADOW_OFFSET,
+                        1.
+                    ));
+                    shadow.push(swatch_field(
+                        self,
+                        Field::ShadowColor,
+                        "Colour (#rrggbb or #rrggbbaa)",
+                        c.bar.shadow_color,
+                        window,
+                        cx,
+                    ));
+                }
+                items.push(group("Shadow", shadow));
                 items.push(group(
                     "Spacing",
                     vec![
