@@ -21,6 +21,7 @@ pub mod stats;
 pub mod system;
 pub mod theme;
 pub mod tray;
+pub mod updates;
 pub mod visualizer;
 pub mod wallpaper;
 pub mod weather;

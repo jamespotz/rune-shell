@@ -33,6 +33,7 @@ pub(crate) struct Snapshot {
     pub battery: Option<Battery>,
     pub brightness: Option<u8>,
     pub calendar: cal::State,
+    pub updates: rune_services::updates::Updates,
 }
 
 impl Default for Snapshot {
@@ -58,6 +59,7 @@ impl Default for Snapshot {
             battery: None,
             brightness: None,
             calendar: cal::State::default(),
+            updates: rune_services::updates::Updates::default(),
         }
     }
 }

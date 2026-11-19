@@ -38,6 +38,7 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
         Widget::Power => Panel::Power,
         Widget::Capture => Panel::Capture,
         Widget::Stats => Panel::System,
+        Widget::Updates => Panel::Updates,
         _ => return None,
     })
 }
@@ -77,6 +78,7 @@ mod tests {
         use crate::{Panel, config::Widget};
         assert_eq!(widget_panel(Widget::Capture), Some(Panel::Capture));
         assert_eq!(widget_panel(Widget::Stats), Some(Panel::System));
+        assert_eq!(widget_panel(Widget::Updates), Some(Panel::Updates));
         let mut bar = Config::default().bar;
         assert!(!bar_has(&bar, Widget::Capture));
         bar.center.push(Widget::Capture);

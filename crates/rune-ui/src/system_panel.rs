@@ -72,9 +72,56 @@ pub fn uptime(duration: Duration) -> String {
     }
 }
 
+/// Time since a check, as "just now", "4 min ago", "3 h ago", "2 d ago".
+pub fn ago(since: Duration) -> String {
+    let minutes = since.as_secs() / 60;
+    match minutes {
+        0 => "just now".to_owned(),
+        1..60 => format!("{minutes} min ago"),
+        60..1440 => format!("{} h ago", minutes / 60),
+        _ => format!("{} d ago", minutes / 1440),
+    }
+}
+
+/// Pending updates over every source that could be checked.
+pub fn pending_total(updates: &rune_services::updates::Updates) -> u32 {
+    updates
+        .sources
+        .iter()
+        .filter_map(|s| s.pending.as_ref().ok())
+        .fold(0, |sum, n| sum.saturating_add(*n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ago_reads_as_minutes_hours_days() {
+        assert_eq!(ago(Duration::from_secs(30)), "just now");
+        assert_eq!(ago(Duration::from_secs(4 * 60)), "4 min ago");
+        assert_eq!(ago(Duration::from_secs(3 * 3600)), "3 h ago");
+        assert_eq!(ago(Duration::from_secs(2 * 86400)), "2 d ago");
+    }
+
+    #[test]
+    fn pending_total_skips_failed_sources_and_saturates() {
+        use rune_services::updates::{Source, SourceKind, Updates};
+        let source = |pending| Source {
+            kind: SourceKind::Dnf,
+            pending,
+        };
+        let updates = Updates {
+            sources: vec![source(Ok(12)), source(Err("offline".into())), source(Ok(3))],
+            ..Updates::default()
+        };
+        assert_eq!(pending_total(&updates), 15);
+        let huge = Updates {
+            sources: vec![source(Ok(u32::MAX)), source(Ok(1))],
+            ..Updates::default()
+        };
+        assert_eq!(pending_total(&huge), u32::MAX);
+    }
     use rune_services::stats::Usage;
 
     fn sample(cpu: u8, net_down: u64) -> Stats {

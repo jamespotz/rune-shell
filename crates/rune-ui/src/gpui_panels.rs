@@ -174,6 +174,7 @@ impl Render for PanelView {
             Panel::Sound => self.sound(app),
             Panel::Battery => battery(app, &self.dispatch),
             Panel::System => system(app),
+            Panel::Updates => updates(app, &self.dispatch),
             Panel::Launcher(_) => div().into_any_element(),
         };
         let dispatch = self.dispatch.clone();
@@ -188,7 +189,7 @@ impl Render for PanelView {
             Panel::TrayMenu => crate::tray::MENU_W,
             Panel::Wifi | Panel::Bluetooth | Panel::Sound | Panel::Launcher(_) => DROPDOWN_W,
             Panel::Battery => 260.,
-            Panel::System => crate::system_panel::SYSTEM_W,
+            Panel::System | Panel::Updates => crate::system_panel::SYSTEM_W,
         } + 2. * PANEL_PAD;
         let content =
             crate::gpui_widgets::surface(&app.config, crate::gpui_widgets::Material::Popover, 14.)
@@ -1101,6 +1102,159 @@ fn system(app: &Shell) -> AnyElement {
                 .child(pair(memory, network)),
         )
         .into_any_element()
+}
+
+fn updates(app: &Shell, dispatch: &Dispatch) -> AnyElement {
+    use crate::system_panel::ago;
+    use rune_services::updates::{Command, Run, SourceKind};
+    let c = &app.config;
+    let state = &app.snapshot.updates;
+    let busy = state.run == Run::Running;
+    let status = if state.checking {
+        "Checking…".to_owned()
+    } else if busy {
+        "Running".to_owned()
+    } else {
+        state.checked_at.map_or_else(
+            || "Not checked yet".to_owned(),
+            |at| {
+                let since = std::time::SystemTime::now()
+                    .duration_since(at)
+                    .unwrap_or_default();
+                format!("Checked {}", ago(since))
+            },
+        )
+    };
+    let mut body = column().gap(px(2.)).child(title_row(
+        app,
+        "Updates",
+        Some(
+            div()
+                .text_color(color(c.colors.muted))
+                .font_weight(gpui::FontWeight::NORMAL)
+                .child(status)
+                .into_any_element(),
+        ),
+    ));
+    for source in &state.sources {
+        let (glyph, label) = match source.kind {
+            SourceKind::Dnf => ("deployed_code", "System (dnf)"),
+            SourceKind::Flatpak => ("apps", "Flatpak"),
+            SourceKind::Firmware => ("memory", "Firmware"),
+        };
+        let (pending, text) = match &source.pending {
+            Ok(0) => (false, "Up to date".to_owned()),
+            Ok(n) => (true, n.to_string()),
+            Err(_) => (false, "Couldn't check".to_owned()),
+        };
+        let mut count = div().child(text);
+        if pending {
+            count = count
+                .text_color(color(c.colors.foreground))
+                .font_weight(gpui::FontWeight::SEMIBOLD);
+        } else if source.pending.is_err() {
+            count = count.text_color(color(c.colors.urgent));
+        }
+        body = body.child(menu_row(
+            format!("updates-{label}"),
+            c,
+            Some((glyph, pending)),
+            label,
+            Some(count.into_any_element()),
+        ));
+    }
+    if state.sources.is_empty() && state.checked_at.is_some() {
+        body = body.child(unavailable(app, "Update Checks"));
+    }
+    let failure = state.sources.iter().find_map(|s| s.pending.as_ref().err());
+    let failure = match &state.run {
+        Run::Failed(message) => Some(message),
+        _ => failure,
+    };
+    if let Some(message) = failure {
+        body = body.child(
+            div()
+                .px(px(6.))
+                .pt(px(4.))
+                .text_size(px(11.))
+                .text_color(color(c.colors.urgent))
+                .child(message.clone()),
+        );
+    }
+    let check = update_button(
+        app,
+        "updates-check",
+        ("refresh", "Check Now"),
+        false,
+        (!state.checking && !busy).then_some(Message::Updates(Command::Check)),
+        dispatch,
+    );
+    let run_label = if busy {
+        ("sync", "Running in terminal…")
+    } else if state.topgrade_installed {
+        ("terminal", "Run topgrade")
+    } else {
+        ("terminal", "topgrade not found")
+    };
+    let run = update_button(
+        app,
+        "updates-run",
+        run_label,
+        true,
+        (!busy && state.topgrade_installed).then(|| {
+            Message::Updates(Command::Run {
+                terminal: c.launcher.terminal.clone(),
+            })
+        }),
+        dispatch,
+    );
+    body.child(row().gap(px(8.)).pt(px(10.)).child(check).child(run))
+        .into_any_element()
+}
+
+/// A panel action button; `None` draws it dimmed and inert.
+fn update_button(
+    app: &Shell,
+    id: &'static str,
+    (glyph, label): (&str, &str),
+    primary: bool,
+    message: Option<Message>,
+    dispatch: &Dispatch,
+) -> AnyElement {
+    use crate::gpui_widgets::{corner, frame};
+    let c = &app.config;
+    let fg = color(c.colors.foreground);
+    let enabled = message.is_some();
+    let (bg, ink) = if primary {
+        (
+            gpui::Hsla::from(color(c.colors.accent)),
+            color(c.colors.on_accent),
+        )
+    } else {
+        (gpui::Hsla::from(fg).opacity(0.09), fg)
+    };
+    let base = frame(row()).bg(bg);
+    let button = base
+        .id(id)
+        .flex_1()
+        .justify_center()
+        .gap(px(6.))
+        .h(px(34.))
+        .rounded(corner(10.))
+        .text_color(ink)
+        .when(primary, |b| b.font_weight(gpui::FontWeight::SEMIBOLD))
+        .when(!enabled, |b| b.opacity(0.45))
+        .when(enabled, |b| {
+            b.cursor_pointer()
+                .hover(|style| style.opacity(0.9))
+                .active(|style| style.opacity(0.7))
+        })
+        .child(icon(c, glyph, 16.))
+        .child(label.to_owned());
+    match message {
+        Some(message) => clickable(button, message, dispatch),
+        None => button.into_any_element(),
+    }
 }
 
 /// A metric tile: icon, label and current value over its live graph.

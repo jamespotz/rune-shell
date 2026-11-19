@@ -104,6 +104,8 @@ pub enum Widget {
     Battery,
     /// CPU use, memory use and CPU temperature.
     Stats,
+    /// Pending package updates; click to check or run topgrade.
+    Updates,
     /// Opens quick settings (Wi-Fi, Bluetooth, DND, volume...).
     QuickSettings,
     /// Opens the power menu.
@@ -113,7 +115,7 @@ pub enum Widget {
 }
 
 impl Widget {
-    pub const ALL: [Widget; 16] = [
+    pub const ALL: [Widget; 17] = [
         Widget::Workspaces,
         Widget::WindowTitle,
         Widget::Clock,
@@ -126,6 +128,7 @@ impl Widget {
         Widget::Network,
         Widget::Battery,
         Widget::Stats,
+        Widget::Updates,
         Widget::QuickSettings,
         Widget::Power,
         Widget::Capture,
@@ -149,6 +152,7 @@ impl std::fmt::Display for Widget {
             Widget::Network => "Network",
             Widget::Battery => "Battery",
             Widget::Stats => "System stats",
+            Widget::Updates => "Updates",
             Widget::QuickSettings => "Quick settings",
             Widget::Power => "Power menu",
             Widget::Capture => "Capture",

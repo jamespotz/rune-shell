@@ -378,6 +378,17 @@ pub(crate) fn bar_button(
         })
 }
 
+fn update_badge(config: &Config, text: String, fill: Rgba) -> Div {
+    div()
+        .px(px(5.))
+        .rounded(crate::gpui_widgets::corner(8.))
+        .bg(color(fill))
+        .text_color(color(config.colors.on_accent))
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(text)
+}
+
 /// The red elapsed-time chip shown while recording; a click stops it.
 pub(crate) fn recording_chip(app: &Shell, id: String, dispatch: &Dispatch) -> AnyElement {
     let secs = app
@@ -457,6 +468,53 @@ pub(crate) fn bar_widget(
                 dispatch,
             )
             .into_any_element()
+        }
+        Widget::Updates => {
+            use rune_services::updates::Run;
+            let updates = &app.snapshot.updates;
+            let total = crate::system_panel::pending_total(updates);
+            let content = match &updates.run {
+                Run::Running => {
+                    let still = c.animations.reduce_motion || !c.animations.enabled;
+                    let pixel = pixel_look();
+                    let spinner = glyph("sync");
+                    let spinner =
+                        if still {
+                            spinner.into_any_element()
+                        } else {
+                            spinner
+                                .with_animation(
+                                    "updates-running",
+                                    gpui::Animation::new(std::time::Duration::from_millis(
+                                        if pixel { 1000 } else { 1600 },
+                                    ))
+                                    .repeat(),
+                                    move |icon, t| {
+                                        icon.opacity(if pixel {
+                                            if t < 0.5 { 1. } else { 0.3 }
+                                        } else {
+                                            1. - 0.6 * (t * std::f32::consts::PI).sin()
+                                        })
+                                    },
+                                )
+                                .into_any_element()
+                        };
+                    row().child(spinner)
+                }
+                Run::Failed(_) => row().child(glyph("system_update_alt")).child(update_badge(
+                    c,
+                    "!".into(),
+                    c.colors.urgent,
+                )),
+                Run::Idle if total > 0 => row()
+                    .child(glyph("system_update_alt"))
+                    .child(update_badge(c, total.to_string(), c.colors.accent)),
+                Run::Idle => row()
+                    .text_color(color(c.colors.muted))
+                    .child(glyph("system_update_alt")),
+            };
+            bar_button(app, widget, id, content, toggle(Panel::Updates), dispatch)
+                .into_any_element()
         }
         Widget::Stats => {
             let stats = app.snapshot.stats.as_ref()?;

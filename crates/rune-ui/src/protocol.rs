@@ -10,6 +10,7 @@ use rune_services::{
     notifications,
     system::{self, Battery, Network, NetworkList, PowerProfile},
     tray::{MenuEntry, TrayItem},
+    updates,
     weather::{Location, Query as WeatherQuery, Weather},
 };
 
@@ -55,6 +56,8 @@ pub enum Action {
     /// Search places; answered with [`UiEvent::Geocoded`].
     Geocode(String),
     Bluetooth(bluetooth::Command),
+    /// Check for updates or run topgrade; answered with [`UiEvent::Updates`].
+    Updates(updates::Command),
     Screenshot(capture::Target, capture::Options),
     /// Extract text from a selected region.
     Ocr(capture::Options),
@@ -117,6 +120,7 @@ pub enum UiEvent {
     OpenBluetooth,
     Weather(Option<Weather>),
     Bluetooth(bluetooth::State),
+    Updates(updates::Updates),
     Geocoded(Result<Vec<Location>, String>),
     Recording(Option<capture::Recording>),
     Calendar(cal::State),

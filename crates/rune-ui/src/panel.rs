@@ -23,10 +23,11 @@ pub enum Panel {
     Sound,
     Battery,
     System,
+    Updates,
 }
 
 /// Panels reachable from the CLI (`rune-shell toggle <name>`).
-const NAMED: [(&str, Panel); 15] = [
+const NAMED: [(&str, Panel); 16] = [
     ("launcher", Panel::Launcher(Kind::Apps)),
     ("keybinds", Panel::Launcher(Kind::Keybinds)),
     ("clipboard", Panel::Launcher(Kind::Clipboard)),
@@ -42,6 +43,7 @@ const NAMED: [(&str, Panel); 15] = [
     ("sound", Panel::Sound),
     ("battery", Panel::Battery),
     ("system", Panel::System),
+    ("updates", Panel::Updates),
 ];
 
 impl Panel {
@@ -210,6 +212,14 @@ fn left(x: Option<f32>, width: u32, screen: Option<f32>) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn updates_is_toggleable_by_name() {
+        assert_eq!(
+            super::Panel::from_name("updates"),
+            Some(super::Panel::Updates)
+        );
+    }
+
     #[test]
     fn capture_is_toggleable_by_name() {
         assert_eq!(
