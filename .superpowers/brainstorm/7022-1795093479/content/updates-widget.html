@@ -1,0 +1,144 @@
+<link href="https://fonts.googleapis.com/css2?family=Tiny5&family=Noto+Sans:wght@400;600&family=Material+Symbols+Rounded:opsz,wght,FILL@20..48,400,0..1" rel="stylesheet">
+<style>
+  .stage { background: linear-gradient(135deg,#3a3f4b,#1b1d22); padding: 0 24px 28px; border-radius: 10px; }
+  .ms { font-family: 'Material Symbols Rounded'; font-size: 17px; line-height: 1; vertical-align: middle; }
+  .r { --bg:#202227; --fg:#f5f5f7; --accent:#66b1ff; --on:#101a28; --muted:#a6aab5; --urgent:#ff7b81; color: var(--fg); }
+
+  /* bar */
+  .bar { height: 32px; background: var(--bg); display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 0 6px 0 16px; font: 13px 'Noto Sans'; width: 560px; margin: 0 auto; }
+  .smooth .bar { border-radius: 0 0 14px 14px; }
+  .bar .item { display: flex; align-items: center; gap: 4px; padding: 3px 7px; }
+  .smooth .bar .item.hot { background: rgba(102,177,255,.16); border-radius: 8px; }
+  .badge { background: var(--accent); color: var(--on); font-weight: 600; font-size: 11px; padding: 0 6px; border-radius: 8px; }
+  .dim { color: var(--muted); }
+
+  /* panel */
+  .panel { width: 400px; margin: 10px 0 0 auto; margin-right: 40px; background: var(--bg); padding: 16px; font: 13px 'Noto Sans'; }
+  .smooth .panel { border-radius: 18px; box-shadow: 0 12px 36px rgba(0,0,0,.45); }
+  .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  .head b { font-size: 16px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; }
+  .smooth .row { border-radius: 10px; }
+  .smooth .row:hover { background: rgba(255,255,255,.05); }
+  .row .name { flex: 1; } .row .count { font-weight: 600; }
+  .row .count.zero { color: var(--muted); font-weight: 400; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; }
+  .btn { flex: 1; text-align: center; padding: 9px 0; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; user-select: none; }
+  .smooth .btn { border-radius: 10px; background: rgba(255,255,255,.07); transition: transform .08s, background .15s; }
+  .smooth .btn.primary { background: var(--accent); color: var(--on); font-weight: 600; }
+  .smooth .btn:active { transform: scale(.97); }
+  .status { margin-top: 10px; font-size: 12px; }
+  .status.err { color: var(--urgent); }
+
+  /* pixel look: tiny5, square corners, frame = grey border + 3px black drop shadow, fill = 4px stripes every 6px */
+  .pixel .bar, .pixel .panel, .pixel .head b { font-family: 'Tiny5', monospace; letter-spacing: .5px; }
+  .pixel .panel, .pixel .btn, .pixel .bar .item.hot { border: 1px solid rgba(128,128,128,.48); box-shadow: 3px 3px 0 #000; }
+  .pixel .badge { border-radius: 0; font-family: 'Tiny5'; }
+  .pixel .btn { background: repeating-linear-gradient(90deg, rgba(255,255,255,.09) 0 4px, transparent 4px 6px); }
+  .pixel .btn.primary { background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 6px); color: var(--fg); }
+  .pixel .btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 #000; }
+  .pixel .row { border-bottom: 1px dashed rgba(128,128,128,.3); }
+  .pixel .sep { height: 1px; background: rgba(128,128,128,.48); margin: 0 -16px 8px; }
+
+  .running .spin { animation: spin 1s linear infinite; display: inline-block; }
+  .pixel .running .spin { animation: blink 1s steps(2) infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes blink { 50% { opacity: .2; } }
+  .cap { color:#aaa; font-size:12px; margin: 14px 0 6px; }
+</style>
+
+<h2>Updates widget — both looks</h2>
+<p class="subtitle">Bar item + panel, using the Graphite default colors. Hover rows, press buttons for press feedback. Bottom row shows the running and error states.</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">look = "smooth"</div>
+    <div class="mockup-body stage r smooth">
+      <div class="bar">
+        <div class="item dim"><span class="ms">wifi</span></div>
+        <div class="item dim"><span class="ms">volume_up</span></div>
+        <div class="item hot"><span class="ms">system_update_alt</span><span class="badge">15</span></div>
+        <div class="item">Thu 19 Nov  14:32</div>
+      </div>
+      <div class="panel">
+        <div class="head"><b>Updates</b><span class="dim">checked 4 min ago</span></div>
+        <div class="row"><span class="ms">deployed_code</span><span class="name">System (dnf)</span><span class="count">12</span></div>
+        <div class="row"><span class="ms">apps</span><span class="name">Flatpak</span><span class="count">3</span></div>
+        <div class="row"><span class="ms dim">memory</span><span class="name dim">Firmware</span><span class="count zero">up to date</span></div>
+        <div class="btns">
+          <div class="btn"><span class="ms">refresh</span>Check now</div>
+          <div class="btn primary"><span class="ms">terminal</span>Run topgrade</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">look = "pixel"</div>
+    <div class="mockup-body stage r pixel">
+      <div class="bar">
+        <div class="item dim"><span class="ms">wifi</span></div>
+        <div class="item dim"><span class="ms">volume_up</span></div>
+        <div class="item hot"><span class="ms">system_update_alt</span><span class="badge">15</span></div>
+        <div class="item">THU 19 NOV  14:32</div>
+      </div>
+      <div class="panel">
+        <div class="head"><b>UPDATES</b><span class="dim">CHECKED 4M AGO</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="ms">deployed_code</span><span class="name">SYSTEM (DNF)</span><span class="count">12</span></div>
+        <div class="row"><span class="ms">apps</span><span class="name">FLATPAK</span><span class="count">3</span></div>
+        <div class="row"><span class="ms dim">memory</span><span class="name dim">FIRMWARE</span><span class="count zero">OK</span></div>
+        <div class="btns">
+          <div class="btn"><span class="ms">refresh</span>CHECK NOW</div>
+          <div class="btn primary"><span class="ms">terminal</span>RUN TOPGRADE</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="cap">States: while topgrade runs in kitty (left: smooth) · after a failed run (right: pixel)</p>
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-body stage r smooth running">
+      <div class="bar"><div class="item hot"><span class="ms spin">sync</span><span class="dim">Updating…</span></div><div class="item">Thu 19 Nov  14:33</div></div>
+      <div class="panel">
+        <div class="head"><b>Updates</b><span class="dim">running</span></div>
+        <div class="row"><span class="ms">deployed_code</span><span class="name">System (dnf)</span><span class="count">12</span></div>
+        <div class="row"><span class="ms">apps</span><span class="name">Flatpak</span><span class="count">3</span></div>
+        <div class="btns">
+          <div class="btn" style="opacity:.4">Check now</div>
+          <div class="btn" style="opacity:.6"><span class="ms spin">sync</span>Running in kitty…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-body stage r pixel">
+      <div class="bar"><div class="item hot"><span class="ms">system_update_alt</span><span class="badge" style="background:#ff7b81">!</span></div><div class="item">THU 19 NOV  14:51</div></div>
+      <div class="panel">
+        <div class="head"><b>UPDATES</b><span class="dim">CHECKED JUST NOW</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="ms">deployed_code</span><span class="name">SYSTEM (DNF)</span><span class="count zero">OK</span></div>
+        <div class="row"><span class="ms">apps</span><span class="name">FLATPAK</span><span class="count">1</span></div>
+        <div class="status err">TOPGRADE EXITED WITH STATUS 1</div>
+        <div class="btns">
+          <div class="btn"><span class="ms">refresh</span>CHECK NOW</div>
+          <div class="btn primary"><span class="ms">terminal</span>RUN TOPGRADE</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 style="margin-top:28px">How should it count updates?</h3>
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Real counts per source (recommended)</h3><p>Background <code>dnf check-update</code> + <code>flatpak remote-ls --updates</code> roughly hourly. The panel looks like the mockups above.</p></div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>No counts, just "last updated"</h3><p>The rows are replaced by "Last topgrade run: 3 days ago". Simpler, but it can't tell whether anything is actually waiting.</p></div>
+  </div>
+</div>
