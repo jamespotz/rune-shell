@@ -289,6 +289,7 @@ impl App {
                 | UiEvent::Network(_)
                 | UiEvent::Battery(_)
                 | UiEvent::Stats(_)
+                | UiEvent::Updates(_)
                 | UiEvent::Recording(_)
                 | UiEvent::GameMode(_),
             ) => true,
@@ -670,6 +671,10 @@ impl App {
             }
             Message::Ui(UiEvent::Stats(s)) => {
                 self.snapshot.record_stats(s);
+                Effects::none()
+            }
+            Message::Ui(UiEvent::Updates(u)) => {
+                self.snapshot.updates = u;
                 Effects::none()
             }
             Message::Ui(UiEvent::Battery(b)) => {

@@ -8,7 +8,7 @@ use rune_services::{
     apps, audio, bluetooth, calendar, capture, clipboard, clock, equalizer,
     hyprland::Hyprland,
     icons::IconIndex,
-    lock, media, notifications, stats, system,
+    lock, media, notifications, stats, system, updates,
     theme::{self, Variant, backup::Backup, export},
     tray, visualizer, wallpaper, weather,
 };
@@ -185,6 +185,8 @@ fn daemon() -> Result<()> {
     );
     let (bt_state, bt_cmds) = rt.block_on(bluetooth::spawn());
     forward(bt_state, ui.clone(), UiEvent::Bluetooth);
+    let (updates_state, updates_cmds) = updates::spawn();
+    forward(updates_state, ui.clone(), UiEvent::Updates);
     let (calendar_urls, calendar_rx) = watch::channel(Vec::new());
     let calendar_refresh = Arc::new(tokio::sync::Notify::new());
     let calendar_state = calendar::spawn(calendar_rx, calendar_refresh.clone());
@@ -305,6 +307,9 @@ fn daemon() -> Result<()> {
                 }
                 Action::Bluetooth(cmd) => {
                     let _ = bt_cmds.send(cmd); // the service lives as long as the runtime
+                }
+                Action::Updates(cmd) => {
+                    let _ = updates_cmds.send(cmd); // the service lives as long as the runtime
                 }
                 Action::Screenshot(target, opts) => {
                     let conn = capture_conn.clone();
