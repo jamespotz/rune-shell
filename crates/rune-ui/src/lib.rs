@@ -91,6 +91,7 @@ pub(crate) enum Message {
     Launcher(launcher::Msg),
     /// Open, switch to, or close a panel (a bar widget was clicked).
     Toggle(Panel),
+    Updates(rune_services::updates::Command),
     MediaControl(Control),
     OpenSettingsPage(settings::Page),
     WifiDropdownPick(usize),
@@ -671,6 +672,10 @@ impl App {
             }
             Message::Ui(UiEvent::Stats(s)) => {
                 self.snapshot.record_stats(s);
+                Effects::none()
+            }
+            Message::Updates(cmd) => {
+                self.send(Action::Updates(cmd));
                 Effects::none()
             }
             Message::Ui(UiEvent::Updates(u)) => {
@@ -1258,6 +1263,7 @@ impl App {
             | Panel::Sound
             | Panel::Battery
             | Panel::System
+            | Panel::Updates
             | Panel::Capture => {}
         }
         Effects::none()

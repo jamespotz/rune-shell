@@ -855,6 +855,7 @@ fn widget_glyph(widget: Widget) -> &'static str {
         Widget::Network => "wifi",
         Widget::Battery => "battery_5_bar",
         Widget::Stats => "memory",
+        Widget::Updates => "system_update_alt",
         Widget::QuickSettings => "toggle_on",
         Widget::Power => "power_settings_new",
         Widget::Capture => "photo_camera",

@@ -8,9 +8,9 @@ use rune_services::{
     apps, audio, bluetooth, calendar, capture, clipboard, clock, equalizer,
     hyprland::Hyprland,
     icons::IconIndex,
-    lock, media, notifications, stats, system, updates,
+    lock, media, notifications, stats, system,
     theme::{self, Variant, backup::Backup, export},
-    tray, visualizer, wallpaper, weather,
+    tray, updates, visualizer, wallpaper, weather,
 };
 use rune_ui::config::{Colors, Rgba, ThemeSource};
 use rune_ui::{Action, Config, Surface, UiEvent};

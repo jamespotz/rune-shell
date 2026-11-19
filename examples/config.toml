@@ -21,7 +21,7 @@ pixel_font = "tiny5"      # pixel look font: "tiny5" or "monocraft"
 icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
 outputs = []              # e.g. ["DP-1"]; empty = every monitor
 # Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
-# "weather", "bluetooth", "volume", "network", "battery", "stats", "quick_settings", "power", "capture",
+# "weather", "bluetooth", "volume", "network", "battery", "stats", "updates", "quick_settings", "power", "capture",
 # "settings". Reorder freely;
 # the three lists are laid out left to right inside the notch.
 left = ["workspaces"]
