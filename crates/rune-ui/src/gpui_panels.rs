@@ -1221,19 +1221,20 @@ fn update_button(
     message: Option<Message>,
     dispatch: &Dispatch,
 ) -> AnyElement {
-    use crate::gpui_widgets::{corner, fill, frame, pixel_look};
+    use crate::gpui_widgets::{corner, frame};
     let c = &app.config;
     let fg = color(c.colors.foreground);
-    let (bg, ink) = if primary && !pixel_look() {
-        (color(c.colors.accent).into(), color(c.colors.on_accent))
-    } else if primary {
-        (color(c.colors.accent).into(), fg)
+    let enabled = message.is_some();
+    let (bg, ink) = if primary {
+        (
+            gpui::Hsla::from(color(c.colors.accent)),
+            color(c.colors.on_accent),
+        )
     } else {
         (gpui::Hsla::from(fg).opacity(0.09), fg)
     };
-    let enabled = message.is_some();
-    // Fill first: in the pixel look it paints a stripe layer that must sit under the label.
-    let button = fill(frame(row()), bg)
+    let base = frame(row()).bg(bg);
+    let button = base
         .id(id)
         .flex_1()
         .justify_center()
