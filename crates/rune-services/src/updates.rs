@@ -130,21 +130,36 @@ async fn check(kind: SourceKind) -> Option<Source> {
         SourceKind::Dnf => ("dnf", &["check-update", "-q"]),
         SourceKind::Flatpak => (
             "flatpak",
-            &["remote-ls", "--updates", "--columns=application"],
+            &["remote-ls", "--updates", "--columns=application,origin"],
         ),
         SourceKind::Firmware => ("fwupdmgr", &["get-updates", "--json"]),
     };
-    let pending = match capture(program, args, OUTPUT_LIMIT, TIMEOUT).await {
-        Err(Capture::NotFound) => return None,
-        Err(Capture::Failed(message)) => Err(message),
-        Ok((status, stdout)) => match (kind, status.code()) {
-            (SourceKind::Dnf, Some(0)) => Ok(0),
-            (SourceKind::Dnf, Some(100)) => Ok(dnf_pending(&stdout)),
-            (SourceKind::Flatpak, Some(0)) => Ok(flatpak_pending(&stdout)),
-            // fwupdmgr exits 2 with "no updates" and may print no JSON then.
-            (SourceKind::Firmware, Some(0 | 2)) if stdout.trim().is_empty() => Ok(0),
-            (SourceKind::Firmware, Some(0 | 2)) => fwupd_pending(&stdout),
-            _ => Err(format!("{program} {} exited with {status}", args.join(" "))),
+    let remotes = match kind {
+        SourceKind::Flatpak => {
+            let args = ["remotes", "--columns=name,url,options"];
+            match capture(program, &args, OUTPUT_LIMIT, TIMEOUT).await {
+                Err(Capture::NotFound) => return None,
+                Ok((status, stdout)) if status.success() => Ok(stdout),
+                Ok((status, _)) => Err(format!("flatpak {} exited with {status}", args.join(" "))),
+                Err(Capture::Failed(message)) => Err(message),
+            }
+        }
+        _ => Ok(String::new()),
+    };
+    let pending = match remotes {
+        Err(message) => Err(message),
+        Ok(remotes) => match capture(program, args, OUTPUT_LIMIT, TIMEOUT).await {
+            Err(Capture::NotFound) => return None,
+            Err(Capture::Failed(message)) => Err(message),
+            Ok((status, stdout)) => match (kind, status.code()) {
+                (SourceKind::Dnf, Some(0)) => Ok(0),
+                (SourceKind::Dnf, Some(100)) => Ok(dnf_pending(&stdout)),
+                (SourceKind::Flatpak, Some(0)) => Ok(flatpak_pending(&stdout, &remotes)),
+                // fwupdmgr exits 2 with "no updates" and may print no JSON then.
+                (SourceKind::Firmware, Some(0 | 2)) if stdout.trim().is_empty() => Ok(0),
+                (SourceKind::Firmware, Some(0 | 2)) => fwupd_pending(&stdout),
+                _ => Err(format!("{program} {} exited with {status}", args.join(" "))),
+            },
         },
     };
     if let Err(message) = &pending {
@@ -283,8 +298,26 @@ fn dnf_pending(stdout: &str) -> u32 {
     )
 }
 
-fn flatpak_pending(stdout: &str) -> u32 {
-    count(stdout.lines().filter(|line| !line.trim().is_empty()))
+/// `remote-ls --updates` rows (`application\torigin`), minus those from OCI remotes:
+/// their installed commit IDs are made locally and never match the remote's,
+/// so flatpak lists every installed OCI ref as outdated.
+fn flatpak_pending(stdout: &str, remotes: &str) -> u32 {
+    let oci: Vec<&str> = remotes
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let name = fields.next()?.trim();
+            fields
+                .any(|f| f.starts_with("oci+") || f.split(',').any(|o| o.trim() == "oci"))
+                .then_some(name)
+        })
+        .collect();
+    count(stdout.lines().filter(|line| {
+        let mut fields = line.split('\t');
+        let app = fields.next().unwrap_or_default().trim();
+        let origin = fields.next().unwrap_or_default().trim();
+        !app.is_empty() && !oci.contains(&origin)
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -334,13 +367,23 @@ grub2-tools.x86_64             1:2.12-9.fc45     updates\n\
         );
     }
 
+    const REMOTES: &str = "fedora\toci+https://registry.fedoraproject.org\tsystem,oci\n\
+flathub\thttps://dl.flathub.org/repo/\tsystem,filtered\n";
+
     #[test]
-    fn flatpak_counts_non_empty_lines() {
-        assert_eq!(
-            flatpak_pending("app.zen_browser.zen\n  \norg.gimp.GIMP\n"),
-            2
-        );
-        assert_eq!(flatpak_pending(""), 0);
+    fn flatpak_skips_oci_remotes_whose_commits_never_match() {
+        let updates = "com.github.tchx84.Flatseal\tfedora\n\
+app.zen_browser.zen\tflathub\n\
+  \n\
+org.fedoraproject.Platform\tfedora\n\
+org.gimp.GIMP\tflathub\n";
+        assert_eq!(flatpak_pending(updates, REMOTES), 2);
+        assert_eq!(flatpak_pending("", REMOTES), 0);
+    }
+
+    #[test]
+    fn flatpak_counts_every_ref_without_oci_remotes() {
+        assert_eq!(flatpak_pending("org.gimp.GIMP\tflathub\n", ""), 1);
     }
 
     #[test]
