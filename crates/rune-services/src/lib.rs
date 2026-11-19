@@ -14,6 +14,7 @@ pub mod equalizer;
 pub mod hyprland;
 pub mod hyprland_config;
 pub mod icons;
+pub mod lock;
 pub mod media;
 pub mod notifications;
 pub mod stats;

@@ -9,7 +9,11 @@ use rune_services::{
         self, Bezier, Curve, Leaf, Overrides, Settings as HyprSettings, Snapshot, Spring, Touched,
         Value,
     },
-    system::{Network, WifiNetwork},
+    lock,
+    system::{
+        self, DeviceKind, DeviceState, LinkState, NetDevice, Network, ProfileKind, SavedProfile,
+        WifiNetwork,
+    },
     theme::{self, Palette, Variant, export::App as ThemeApp},
     wallpaper::Wallpaper,
     weather::Location,
@@ -24,7 +28,7 @@ pub enum Page {
     Wallpaper,
     Bar,
     Weather,
-    Wifi,
+    Network,
     Bluetooth,
     Sound,
     Equalizer,
@@ -37,17 +41,18 @@ pub enum Page {
     HyprInput,
     HyprMotion,
     HyprReview,
+    Lock,
 }
 
 impl Page {
     #[cfg(test)]
-    const ALL: [Page; 18] = [
+    const ALL: [Page; 19] = [
         Page::Appearance,
         Page::Theme,
         Page::Wallpaper,
         Page::Bar,
         Page::Weather,
-        Page::Wifi,
+        Page::Network,
         Page::Bluetooth,
         Page::Sound,
         Page::Equalizer,
@@ -60,12 +65,13 @@ impl Page {
         Page::HyprInput,
         Page::HyprMotion,
         Page::HyprReview,
+        Page::Lock,
     ];
 
     const GROUPS: [(&'static str, &'static [Page]); 4] = [
         (
             "Connections",
-            &[Page::Wifi, Page::Bluetooth, Page::Sound, Page::Equalizer],
+            &[Page::Network, Page::Bluetooth, Page::Sound, Page::Equalizer],
         ),
         (
             "Rune",
@@ -88,6 +94,7 @@ impl Page {
                 Page::HyprEffects,
                 Page::HyprInput,
                 Page::HyprMotion,
+                Page::Lock,
                 Page::HyprReview,
             ],
         ),
@@ -110,7 +117,7 @@ impl Page {
 
     fn tint(self) -> u32 {
         match self {
-            Page::Wifi | Page::Bluetooth => 0x0a84ffff,
+            Page::Network | Page::Bluetooth => 0x0a84ffff,
             Page::Sound => 0xff375fff,
             Page::Equalizer => 0x5e5ce6ff,
             Page::Appearance => 0x3a3a3cff,
@@ -127,6 +134,16 @@ impl Page {
             Page::HyprInput => 0x8e8e93ff,
             Page::HyprMotion => 0xff9f0aff,
             Page::HyprReview => 0x636366ff,
+            Page::Lock => 0x5e5ce6ff,
+        }
+    }
+
+    /// Other names the sidebar search finds this page by, lowercase.
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Page::Network => &["wi-fi", "wifi", "ethernet", "lan", "wired", "vpn"],
+            Page::Lock => &["hyprlock", "lock", "password"],
+            _ => &[],
         }
     }
 
@@ -136,7 +153,7 @@ impl Page {
             Page::Theme => ("format_paint", "Theme"),
             Page::Wallpaper => ("wallpaper", "Wallpaper"),
             Page::Weather => ("partly_cloudy_day", "Weather"),
-            Page::Wifi => ("wifi", "Wi-Fi"),
+            Page::Network => ("lan", "Network"),
             Page::Bluetooth => ("bluetooth", "Bluetooth"),
             Page::Sound => ("volume_up", "Sound"),
             Page::Equalizer => ("equalizer", "Equalizer"),
@@ -150,6 +167,7 @@ impl Page {
             Page::HyprInput => ("keyboard", "Input"),
             Page::HyprMotion => ("motion_mode", "Window Motion"),
             Page::HyprReview => ("difference", "Review Changes"),
+            Page::Lock => ("lock", "Lock Screen"),
         }
     }
 }
@@ -165,7 +183,11 @@ pub fn visible_groups(query: &str) -> Vec<(&'static str, Vec<Page>)> {
             let pages = group
                 .iter()
                 .copied()
-                .filter(|page| whole || page.label().1.to_lowercase().contains(&query))
+                .filter(|page| {
+                    whole
+                        || page.label().1.to_lowercase().contains(&query)
+                        || page.aliases().iter().any(|alias| alias.contains(&query))
+                })
                 .collect::<Vec<_>>();
             (title, pages)
         })
@@ -192,6 +214,7 @@ pub enum Field {
     OnAccent,
     Muted,
     Urgent,
+    LockHint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +232,9 @@ pub enum Num {
     TitleChars,
     AnimDuration,
     Fps,
+    LockStrength,
+    LockDim,
+    LockGrace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +246,13 @@ pub enum Flag {
     RecordAudio,
     ThemeDark,
     ThemeApp(ThemeApp),
+    LockEnabled,
+    LockClock24,
+    LockDate,
+    LockUser,
+    LockMedia,
+    LockStatus,
+    LockHideCursor,
 }
 
 /// Work only the daemon can do (files, processes), asked for by a settings edit.
@@ -239,10 +272,26 @@ pub enum Request {
     /// Join a network, with a password for a new secured one.
     WifiConnect(WifiNetwork, Option<String>),
     /// Delete a saved profile.
-    WifiForget(String),
+    Forget(String),
+    DeviceDisconnect(String),
+    /// Saved profile and whether it connects automatically.
+    AutoConnect(String, bool),
+    /// Bring up a saved profile; `device` is `None` for VPNs.
+    Activate {
+        profile: String,
+        device: Option<String>,
+        name: String,
+    },
+    /// Take down an active connection, e.g. a VPN.
+    Deactivate(String),
+    WifiConnectHidden {
+        ssid: String,
+        password: Option<String>,
+    },
     Hypr(HyprSettings),
     /// Lua that previews the unsaved Hyprland settings.
     HyprPreview(String),
+    LockNow,
 }
 
 /// An edit on the Hyprland pages. Option keys are [`hyprland_config::OPTIONS`] keys.
@@ -747,10 +796,28 @@ pub enum Msg {
     WifiCancel,
     WifiForget(usize),
     WifiRescan,
+    DeviceDisconnect(String),
+    /// Saved profile and whether it connects automatically.
+    AutoConnect(String, bool),
+    /// Forget a saved profile by its path.
+    Forget(String),
+    /// Bring up a saved profile by its path.
+    Activate(String),
+    /// Take down an active connection by its path.
+    Deactivate(String),
+    WifiHiddenOpen,
+    WifiHiddenName(String),
+    WifiHiddenSecured(bool),
+    WifiHiddenPassword(String),
+    WifiHiddenJoin,
+    WifiHiddenCancel,
     NewLink(String),
     AddLink,
     RemoveLink(usize),
     Hypr(HyprEdit),
+    LockBackground(rune_services::lock::Background),
+    LockEffect(rune_services::lock::Effect),
+    LockNow,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -773,11 +840,52 @@ pub struct State {
     /// The secured network asking for a password, and what's typed.
     pub(crate) wifi_pick: Option<String>,
     wifi_password: String,
+    pub net_devices: Vec<NetDevice>,
+    pub net_profiles: Vec<SavedProfile>,
+    /// The "Other Network…" form while it is open.
+    pub(crate) wifi_hidden: Option<HiddenWifi>,
     /// Calendar link being typed, and fetch problems to show.
     new_link: String,
     pub cal_errors: Vec<String>,
     pub(crate) page_search: String,
     pub hypr: HyprUi,
+    /// From [`crate::UiEvent::LockPreview`].
+    pub lock_preview: Option<PathBuf>,
+}
+
+/// One line for a device's state, e.g. "Connected · Home" or "Cable unplugged".
+pub(crate) fn device_status(device: &NetDevice) -> String {
+    match device.state {
+        DeviceState::Connected => match &device.connection {
+            Some(name) => format!("Connected · {name}"),
+            None => "Connected".to_owned(),
+        },
+        DeviceState::Connecting => "Connecting…".to_owned(),
+        DeviceState::Disconnecting => "Disconnecting…".to_owned(),
+        DeviceState::Disconnected => "Not connected".to_owned(),
+        DeviceState::Unavailable => match device.kind {
+            DeviceKind::Ethernet => "Cable unplugged".to_owned(),
+            DeviceKind::Wifi => "Off".to_owned(),
+        },
+    }
+}
+
+/// A network that hides its name, as typed into the join form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HiddenWifi {
+    pub ssid: String,
+    pub secured: bool,
+    pub password: String,
+}
+
+impl Default for HiddenWifi {
+    fn default() -> Self {
+        Self {
+            ssid: String::new(),
+            secured: true,
+            password: String::new(),
+        }
+    }
 }
 
 static PRESETS: LazyLock<[Vec<Palette>; 2]> = LazyLock::new(|| {
@@ -867,7 +975,71 @@ impl State {
             }
             Msg::WifiForget(i) => {
                 let saved = self.wifi.get(i)?.saved.clone()?;
-                return Some(Request::WifiForget(saved));
+                return Some(Request::Forget(saved));
+            }
+            Msg::DeviceDisconnect(device) => return Some(Request::DeviceDisconnect(device)),
+            Msg::AutoConnect(profile, on) => return Some(Request::AutoConnect(profile, on)),
+            Msg::Forget(profile) => return Some(Request::Forget(profile)),
+            Msg::Activate(profile) => {
+                let saved = self.net_profiles.iter().find(|p| p.profile == profile)?;
+                let device = match saved.kind {
+                    system::ProfileKind::Vpn => None,
+                    kind => {
+                        let wanted = match kind {
+                            system::ProfileKind::Wifi => DeviceKind::Wifi,
+                            _ => DeviceKind::Ethernet,
+                        };
+                        let device = self
+                            .net_devices
+                            .iter()
+                            .find(|d| d.kind == wanted && d.state != DeviceState::Unavailable);
+                        let Some(device) = device else {
+                            self.wifi_status = format!("No device can connect {}.", saved.name);
+                            return None;
+                        };
+                        Some(device.path.clone())
+                    }
+                };
+                self.wifi_status = format!("Connecting {}…", saved.name);
+                return Some(Request::Activate {
+                    profile,
+                    device,
+                    name: saved.name.clone(),
+                });
+            }
+            Msg::Deactivate(active) => return Some(Request::Deactivate(active)),
+            Msg::WifiHiddenOpen => {
+                self.wifi_hidden.get_or_insert_default();
+            }
+            Msg::WifiHiddenName(name) => {
+                if let Some(hidden) = &mut self.wifi_hidden {
+                    hidden.ssid = name;
+                }
+            }
+            Msg::WifiHiddenSecured(on) => {
+                if let Some(hidden) = &mut self.wifi_hidden {
+                    hidden.secured = on;
+                }
+            }
+            Msg::WifiHiddenPassword(password) => {
+                if let Some(hidden) = &mut self.wifi_hidden {
+                    hidden.password = password;
+                }
+            }
+            Msg::WifiHiddenCancel => self.wifi_hidden = None,
+            Msg::WifiHiddenJoin => {
+                let hidden = self.wifi_hidden.as_ref()?;
+                let password = hidden.secured.then_some(hidden.password.as_str());
+                if let Err(problem) = system::check_hidden(&hidden.ssid, password) {
+                    self.wifi_status = problem;
+                    return None;
+                }
+                let hidden = self.wifi_hidden.take()?;
+                self.wifi_status = format!("Connecting to {}…", hidden.ssid);
+                return Some(Request::WifiConnectHidden {
+                    password: hidden.secured.then_some(hidden.password),
+                    ssid: hidden.ssid,
+                });
             }
             Msg::NewLink(l) => self.new_link = l,
             Msg::AddLink => {
@@ -906,6 +1078,16 @@ impl State {
                 config.theme.dark = on;
                 return Some(Request::ApplyTheme);
             }
+            Msg::Flag(Flag::LockEnabled, on) => config.lock.enabled = on,
+            Msg::Flag(Flag::LockClock24, on) => config.lock.clock_24h = on,
+            Msg::Flag(Flag::LockDate, on) => config.lock.show_date = on,
+            Msg::Flag(Flag::LockUser, on) => config.lock.show_user = on,
+            Msg::Flag(Flag::LockMedia, on) => config.lock.show_media = on,
+            Msg::Flag(Flag::LockStatus, on) => config.lock.show_status = on,
+            Msg::Flag(Flag::LockHideCursor, on) => config.lock.hide_cursor = on,
+            Msg::LockBackground(background) => config.lock.background = background,
+            Msg::LockEffect(effect) => config.lock.effect = Some(effect),
+            Msg::LockNow => return Some(Request::LockNow),
             Msg::Flag(Flag::ThemeApp(app), on) => {
                 let apps = &mut config.theme.apps;
                 apps.retain(|a| a != app.id());
@@ -1024,6 +1206,7 @@ fn text_of(config: &Config, field: Field) -> String {
         Field::ScreenshotDir => config.capture.screenshot_dir.clone(),
         Field::RecordDir => config.capture.record_dir.clone(),
         Field::OcrLang => config.capture.ocr_lang.clone(),
+        Field::LockHint => config.lock.hint.clone(),
         _ => color_of(config, field).into(),
     }
 }
@@ -1044,6 +1227,10 @@ fn apply_text(config: &mut Config, field: Field, value: &str) -> bool {
         }
         Field::ClockFormat => {
             return valid_clock_format(value) && set(&mut config.clock.format, value);
+        }
+        Field::LockHint => {
+            config.lock.hint = lock::clean_hint(value);
+            return true;
         }
         Field::Background => &mut c.background,
         Field::Foreground => &mut c.foreground,
@@ -1081,7 +1268,15 @@ fn set_num(config: &mut Config, num: Num, v: f32) {
         Num::TitleChars => config.window_title.max_chars = v.round() as usize,
         Num::AnimDuration => config.animations.duration_ms = v.round() as u64,
         Num::Fps => config.capture.fps = v.round() as u32,
+        Num::LockStrength => config.lock.strength = clamp_u8(v, lock::MAX_STRENGTH),
+        Num::LockDim => config.lock.dim = clamp_u8(v, lock::MAX_DIM),
+        Num::LockGrace => config.lock.grace_seconds = clamp_u8(v, lock::MAX_GRACE_SECONDS),
     }
+}
+
+fn clamp_u8(v: f32, max: u8) -> u8 {
+    // Float-to-int `as` saturates and maps NaN to 0; the clamp keeps it in range.
+    v.round().clamp(0., f32::from(max)) as u8
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1101,12 +1296,15 @@ mod tests {
         let pages =
             |q: &str| -> Vec<Vec<Page>> { visible_groups(q).into_iter().map(|(_, p)| p).collect() };
         assert_eq!(visible_groups("").len(), 4);
-        assert_eq!(pages("").iter().map(Vec::len).sum::<usize>(), 18);
+        assert_eq!(pages("").iter().map(Vec::len).sum::<usize>(), 19);
         assert_eq!(pages("motion"), [vec![Page::HyprMotion]]);
-        assert_eq!(pages("wi-"), [vec![Page::Wifi]]);
+        assert_eq!(pages("wi-"), [vec![Page::Network]]);
+        assert_eq!(pages("vpn"), [vec![Page::Network]]);
+        assert_eq!(pages("ethernet"), [vec![Page::Network]]);
         assert_eq!(pages("SOUND"), [vec![Page::Sound]]);
         assert_eq!(pages("equal"), [vec![Page::Equalizer]]);
-        assert_eq!(pages("hyprland").concat().len(), 5);
+        assert_eq!(pages("hyprland").concat().len(), 6);
+        assert_eq!(pages("hyprlock"), [vec![Page::Lock]]);
         assert!(visible_groups("zzz").is_empty());
         let mut config = Config::default();
         let mut state = State::default();
@@ -1119,6 +1317,48 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn lock_edits_stay_in_range_and_lock_now_uses_the_lock_command() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(&mut config, Msg::Num(Num::LockStrength, 1e9));
+        state.update(&mut config, Msg::Num(Num::LockDim, f32::NAN));
+        state.update(&mut config, Msg::Num(Num::LockGrace, -5.));
+        assert_eq!(
+            (
+                config.lock.strength,
+                config.lock.dim,
+                config.lock.grace_seconds
+            ),
+            (100, 0, 0)
+        );
+        state.update(&mut config, Msg::Text(Field::LockHint, "x\n".repeat(100)));
+        assert_eq!(config.lock.hint, "x".repeat(lock::MAX_HINT_CHARS));
+        assert!(state.drafts.is_empty());
+        state.update(&mut config, Msg::LockEffect(lock::Effect::Pixelate));
+        assert_eq!(config.lock.effect, Some(lock::Effect::Pixelate));
+        assert_eq!(
+            state.update(&mut config, Msg::LockNow),
+            Some(Request::LockNow)
+        );
+
+        assert_eq!(config.lock_command(), config.power.lock_command);
+        state.update(&mut config, Msg::Flag(Flag::LockEnabled, true));
+        assert!(config.lock_command().contains("hyprlock --config"));
+        let reparsed = Config::parse(&config.to_toml()).unwrap();
+        assert_eq!(reparsed.lock, config.lock);
+        let hostile =
+            Config::parse("[lock]\nstrength = 255\ndim = 99\ngrace_seconds = 200\n").unwrap();
+        assert_eq!(
+            (
+                hostile.lock.strength,
+                hostile.lock.dim,
+                hostile.lock.grace_seconds
+            ),
+            (100, 90, 30)
+        );
+    }
 
     #[test]
     fn invalid_text_stays_a_draft() {
@@ -1230,6 +1470,110 @@ mod tests {
         state.update(&mut config, Msg::WifiCancel);
         assert!(state.wifi_pick.is_none());
         assert!(state.wifi_password.is_empty());
+    }
+
+    #[test]
+    fn hidden_wifi_validates_then_sends_and_clears_the_form() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        assert_eq!(state.update(&mut config, Msg::WifiHiddenJoin), None);
+        state.update(&mut config, Msg::WifiHiddenOpen);
+        state.update(&mut config, Msg::WifiHiddenName("Lab".into()));
+        state.update(&mut config, Msg::WifiHiddenPassword("short".into()));
+        assert_eq!(state.update(&mut config, Msg::WifiHiddenJoin), None);
+        assert!(state.wifi_status.contains("8 to 64"));
+        assert!(state.wifi_hidden.is_some());
+        state.update(&mut config, Msg::WifiHiddenPassword("long-password".into()));
+        assert_eq!(
+            state.update(&mut config, Msg::WifiHiddenJoin),
+            Some(Request::WifiConnectHidden {
+                ssid: "Lab".into(),
+                password: Some("long-password".into()),
+            })
+        );
+        assert!(state.wifi_hidden.is_none());
+        state.update(&mut config, Msg::WifiHiddenOpen);
+        state.update(&mut config, Msg::WifiHiddenName("Open lab".into()));
+        state.update(
+            &mut config,
+            Msg::WifiHiddenPassword("ignored-secret".into()),
+        );
+        state.update(&mut config, Msg::WifiHiddenSecured(false));
+        assert_eq!(
+            state.update(&mut config, Msg::WifiHiddenJoin),
+            Some(Request::WifiConnectHidden {
+                ssid: "Open lab".into(),
+                password: None,
+            })
+        );
+    }
+
+    fn profile(kind: system::ProfileKind, name: &str) -> SavedProfile {
+        SavedProfile {
+            name: name.into(),
+            profile: format!("/settings/{name}"),
+            kind,
+            ssid: None,
+            vpn_type: None,
+            auto_connect: true,
+            active: None,
+        }
+    }
+
+    fn device(kind: DeviceKind, state: DeviceState, path: &str) -> NetDevice {
+        NetDevice {
+            path: path.into(),
+            interface: path.trim_start_matches('/').into(),
+            kind,
+            state,
+            connection: None,
+            link: system::LinkDetails::default(),
+        }
+    }
+
+    #[test]
+    fn activating_picks_a_usable_device_and_vpns_need_none() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        assert_eq!(
+            state.update(&mut config, Msg::Activate("/settings/missing".into())),
+            None
+        );
+        state.net_profiles = vec![
+            profile(system::ProfileKind::Wired, "Office"),
+            profile(system::ProfileKind::Vpn, "Work"),
+        ];
+        state.net_devices = vec![device(
+            DeviceKind::Ethernet,
+            DeviceState::Unavailable,
+            "/eth0",
+        )];
+        assert_eq!(
+            state.update(&mut config, Msg::Activate("/settings/Office".into())),
+            None
+        );
+        assert!(state.wifi_status.contains("No device"));
+        state.net_devices.push(device(
+            DeviceKind::Ethernet,
+            DeviceState::Disconnected,
+            "/eth1",
+        ));
+        assert_eq!(
+            state.update(&mut config, Msg::Activate("/settings/Office".into())),
+            Some(Request::Activate {
+                profile: "/settings/Office".into(),
+                device: Some("/eth1".into()),
+                name: "Office".into(),
+            })
+        );
+        assert_eq!(
+            state.update(&mut config, Msg::Activate("/settings/Work".into())),
+            Some(Request::Activate {
+                profile: "/settings/Work".into(),
+                device: None,
+                name: "Work".into(),
+            })
+        );
     }
 
     #[test]

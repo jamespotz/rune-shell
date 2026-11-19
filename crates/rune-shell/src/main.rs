@@ -8,7 +8,7 @@ use rune_services::{
     apps, audio, bluetooth, calendar, capture, clipboard, clock, equalizer,
     hyprland::Hyprland,
     icons::IconIndex,
-    media, notifications, stats, system,
+    lock, media, notifications, stats, system,
     theme::{self, Variant, backup::Backup, export},
     tray, visualizer, wallpaper, weather,
 };
@@ -38,6 +38,8 @@ Without a command, starts the shell. Commands for the running shell:
   ocr              copy the text in a selected area
   game-mode [on|off|toggle]
   lock             lock the screen
+  lock-media       now playing, as hyprlock shows it
+  lock-status      network and volume icons, as hyprlock shows them
   volume up|down|mute|set N      (shows the OSD)
   brightness up|down|set N
   toggle settings  show or hide the settings window
@@ -114,7 +116,9 @@ fn daemon() -> Result<()> {
     }
     forward(clock::spawn(), ui.clone(), UiEvent::Clock);
     forward(stats::spawn(), ui.clone(), UiEvent::Stats);
+    let mut feeds = ipc::Feeds::default();
     let media = rt.block_on(media::spawn()).map(|(state, handle)| {
+        feeds.media = Some(state.clone());
         // The visualizer (cava) only runs while something is playing.
         let (playing_tx, playing) = watch::channel(false);
         let mut watch_state = state.clone();
@@ -164,6 +168,9 @@ fn daemon() -> Result<()> {
         }
     };
     let theme_jobs = theme_worker(ui.clone());
+    let lock_jobs = lock_worker(ui.clone());
+    send_lock(&lock_jobs, &config);
+    let lock_reload = lock_jobs.clone();
     if config.bar.blur
         && let Some(h) = hypr.clone()
     {
@@ -194,15 +201,14 @@ fn daemon() -> Result<()> {
         equalizer.send(equalizer::Command::Enable);
     }
     let (volume, audio_devices) = audio::spawn_volume(equalizer.output());
+    feeds.volume = Some(volume.clone());
     forward(volume.clone(), ui.clone(), UiEvent::Volume);
     forward(audio_devices, ui.clone(), UiEvent::AudioDevices);
     let system_conn = rt.block_on(zbus::Connection::system()).ok();
     if let Some(system) = &system_conn {
-        forward(
-            system::spawn_network(system.clone()),
-            ui.clone(),
-            UiEvent::Network,
-        );
+        let network = system::spawn_network(system.clone());
+        feeds.network = Some(network.clone());
+        forward(network, ui.clone(), UiEvent::Network);
         forward(
             system::spawn_battery(system.clone()),
             ui.clone(),
@@ -251,6 +257,7 @@ fn daemon() -> Result<()> {
             );
             match action {
                 Action::SaveConfig(config) => {
+                    send_lock(&lock_jobs, &config);
                     let _ = save.send(Some(*config)); // writer lives as long as the runtime
                 }
                 Action::HyprPreview(lua) => {
@@ -403,8 +410,9 @@ fn daemon() -> Result<()> {
         path.clone(),
         ui.clone(),
         actions.clone(),
+        feeds,
     ));
-    let _watcher = watch_config(&path, ui)
+    let _watcher = watch_config(&path, ui, lock_reload)
         .inspect_err(|e| warn!("{e:#}; config hot reload disabled"))
         .ok();
 
@@ -506,7 +514,11 @@ pub(crate) fn load_config(path: &Path) -> Result<Config> {
 
 /// Reloads the config whenever it is saved. Watches the directory because
 /// editors save by replacing the file, which would end a watch on the file.
-fn watch_config(path: &Path, ui: UnboundedSender<UiEvent>) -> Result<notify::RecommendedWatcher> {
+fn watch_config(
+    path: &Path,
+    ui: UnboundedSender<UiEvent>,
+    lock_jobs: watch::Sender<Option<LockInputs>>,
+) -> Result<notify::RecommendedWatcher> {
     use notify::Watcher;
     let dir = path.parent().context("config path has no parent")?;
     std::fs::create_dir_all(dir)?;
@@ -527,6 +539,7 @@ fn watch_config(path: &Path, ui: UnboundedSender<UiEvent>) -> Result<notify::Rec
             match load_config(&path) {
                 Ok(config) => {
                     info!("config reloaded");
+                    send_lock(&lock_jobs, &config);
                     if ui.send(UiEvent::Config(Box::new(config))).is_err() {
                         return;
                     }
@@ -592,6 +605,129 @@ async fn launch(hypr: Option<Hyprland>, command: String) {
         Ok(mut child) => drop(tokio::task::spawn_blocking(move || child.wait())),
         Err(e) => warn!("launch {command:?}: {e}"),
     }
+}
+
+/// What the lock screen files are made from; a config change elsewhere leaves them alone.
+#[derive(Debug, Clone, PartialEq)]
+struct LockInputs {
+    lock: lock::Settings,
+    pixel: bool,
+    reduce_motion: bool,
+    font: String,
+    icon_font: String,
+    colors: Colors,
+    wallpaper: String,
+}
+
+impl LockInputs {
+    fn of(config: &Config) -> Self {
+        let pixel = config.bar.look == rune_ui::config::Look::Pixel;
+        Self {
+            lock: config.lock.clone(),
+            pixel,
+            reduce_motion: config.animations.reduce_motion,
+            font: if pixel {
+                config.bar.pixel_font.family().to_owned()
+            } else {
+                config.bar.font.clone()
+            },
+            icon_font: config.bar.icon_font.clone(),
+            colors: config.colors,
+            wallpaper: config.wallpaper.current.clone(),
+        }
+    }
+}
+
+/// Queues a lock screen rewrite if `config` changed anything it is made from.
+fn send_lock(jobs: &watch::Sender<Option<LockInputs>>, config: &Config) {
+    let inputs = LockInputs::of(config);
+    jobs.send_if_modified(|current| {
+        let changed = current.as_ref() != Some(&inputs);
+        if changed {
+            *current = Some(inputs);
+        }
+        changed
+    });
+}
+
+/// Rewrites the lock screen files one change at a time; a slider drag collapses to its latest value.
+fn lock_worker(ui: UnboundedSender<UiEvent>) -> watch::Sender<Option<LockInputs>> {
+    let (tx, mut rx) = watch::channel(None::<LockInputs>);
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let Some(inputs) = rx.borrow_and_update().clone() else {
+                continue;
+            };
+            match tokio::task::spawn_blocking(move || write_lock(&inputs)).await {
+                Ok(Ok(preview)) => {
+                    if ui.send(UiEvent::LockPreview(preview)).is_err() {
+                        warn!("lock screen: UI closed, stopping");
+                        return;
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("lock screen: {e}");
+                    let _ = ui.send(UiEvent::Status(e));
+                }
+                Err(e) => warn!("lock screen worker: {e}"),
+            }
+        }
+        warn!("lock screen: config channel closed, stopping");
+    });
+    tx
+}
+
+/// Makes the preview picture and, when Rune's lock screen is on, the pixelated
+/// background and `rune-hyprlock.conf`. Blocking.
+fn write_lock(inputs: &LockInputs) -> std::result::Result<Option<PathBuf>, String> {
+    let settings = &inputs.lock;
+    let wallpaper = Some(PathBuf::from(&inputs.wallpaper))
+        .filter(|p| !inputs.wallpaper.is_empty() && p.is_file());
+    let effect = settings.effect(inputs.pixel);
+    let preview = wallpaper
+        .as_deref()
+        .and_then(wallpaper::thumbnail)
+        .map(|thumb| lock::preview(&thumb, effect, settings.strength))
+        .transpose()?;
+    if !settings.enabled {
+        return Ok(preview);
+    }
+    let still = wallpaper.and_then(|p| {
+        if wallpaper::is_video(&p) {
+            wallpaper::video_frame(&p)
+        } else {
+            Some(p)
+        }
+    });
+    let image = match (still, effect) {
+        (Some(path), lock::Effect::Pixelate) => {
+            Some(lock::pixelated(&path, settings.block_size())?)
+        }
+        (still, _) => still,
+    };
+    let avatar = lock::avatar();
+    let rune = std::env::current_exe()
+        .map_err(|e| format!("cannot find the rune-shell executable: {e}"))?;
+    let c = &inputs.colors;
+    let conf = lock::render(
+        settings,
+        &lock::Theme {
+            pixel: inputs.pixel,
+            reduce_motion: inputs.reduce_motion,
+            font: &inputs.font,
+            icon_font: &inputs.icon_font,
+            foreground: c.foreground.0,
+            background: c.background.0,
+            accent: c.accent.0,
+            urgent: c.urgent.0,
+            image: image.as_deref(),
+            avatar: avatar.as_deref(),
+            rune: &rune,
+        },
+    );
+    let path = lock::save(&conf)?;
+    info!("lock screen written to {}", path.display());
+    Ok(preview)
 }
 
 /// Applies themes one at a time; rapid clicks collapse to the latest choice.

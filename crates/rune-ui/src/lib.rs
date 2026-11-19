@@ -33,6 +33,7 @@ mod quick;
 mod settings;
 mod state;
 mod status;
+pub use status::wifi_icon;
 mod surface;
 mod surfaces;
 mod system_panel;
@@ -526,7 +527,7 @@ impl App {
                 }
                 self.send(Action::System(system::Command::Power {
                     action,
-                    lock_command: self.config.power.lock_command.clone(),
+                    lock_command: self.config.lock_command(),
                 }));
                 self.close_panel()
             }
@@ -635,11 +636,11 @@ impl App {
             Message::Ui(UiEvent::Network(n)) => {
                 // Joining or leaving changes the list's "Connected" marks.
                 let key = |n: &Option<Network>| n.as_ref().map(|n| (n.connected, n.name.clone()));
-                if self.settings_ui.page() == settings::Page::Wifi
+                if self.settings_ui.page() == settings::Page::Network
                     && self.surfaces.is_open(&Surface::Settings)
                     && key(&n) != key(&self.snapshot.network)
                 {
-                    self.send(Action::System(system::Command::WifiScan));
+                    self.send(Action::System(system::Command::NetworkRefresh));
                 }
                 self.settings_ui.network = n.clone();
                 self.snapshot.network = n;
@@ -656,11 +657,14 @@ impl App {
                 }
                 Effects::none()
             }
-            Message::Ui(UiEvent::WifiNetworks(list)) => {
-                self.settings_ui.wifi = list;
+            Message::Ui(UiEvent::Networks(list)) => {
+                let list = *list;
+                self.settings_ui.wifi = list.nearby;
+                self.settings_ui.net_devices = list.devices;
+                self.settings_ui.net_profiles = list.profiles;
                 Effects::none()
             }
-            Message::Ui(UiEvent::WifiStatus(status)) => {
+            Message::Ui(UiEvent::NetworkStatus(status)) => {
                 self.settings_ui.wifi_status = status;
                 Effects::none()
             }
@@ -771,14 +775,16 @@ impl App {
                 }
                 Effects::batch([
                     pick,
-                    self.update(Message::OpenSettingsPage(settings::Page::Wifi)),
+                    self.update(Message::OpenSettingsPage(settings::Page::Network)),
                 ])
             }
             Message::Settings(msg) => {
                 let mut config = self.config.clone();
                 let was = self.settings_ui.page();
                 let request = self.settings_ui.update(&mut config, msg);
-                if was != settings::Page::Wifi && self.settings_ui.page() == settings::Page::Wifi {
+                if was != settings::Page::Network
+                    && self.settings_ui.page() == settings::Page::Network
+                {
                     self.send(Action::System(system::Command::WifiScan));
                 }
                 if let Some(request) = request {
@@ -807,13 +813,43 @@ impl App {
                         settings::Request::WifiConnect(net, pw) => {
                             self.send(Action::System(system::Command::WifiConnect(net, pw)))
                         }
-                        settings::Request::WifiForget(p) => {
-                            self.send(Action::System(system::Command::WifiForget(p)))
+                        settings::Request::Forget(p) => {
+                            self.send(Action::System(system::Command::Forget(p)))
+                        }
+                        settings::Request::DeviceDisconnect(device) => {
+                            self.send(Action::System(system::Command::DeviceDisconnect(device)))
+                        }
+                        settings::Request::AutoConnect(profile, on) => {
+                            self.send(Action::System(system::Command::AutoConnect(profile, on)))
+                        }
+                        settings::Request::Activate {
+                            profile,
+                            device,
+                            name,
+                        } => self.send(Action::System(system::Command::Activate {
+                            profile,
+                            device,
+                            name,
+                        })),
+                        settings::Request::Deactivate(active) => {
+                            self.send(Action::System(system::Command::Deactivate(active)))
+                        }
+                        settings::Request::WifiConnectHidden { ssid, password } => {
+                            self.send(Action::System(system::Command::WifiConnectHidden {
+                                ssid,
+                                password,
+                            }))
                         }
                         settings::Request::Hypr(request) => {
                             self.send(Action::Hypr(hyprland::Command::Settings(request)))
                         }
                         settings::Request::HyprPreview(lua) => self.send(Action::HyprPreview(lua)),
+                        settings::Request::LockNow => {
+                            self.send(Action::System(system::Command::Power {
+                                action: system::PowerAction::Lock,
+                                lock_command: config.lock_command(),
+                            }))
+                        }
                         settings::Request::SetWallpaper(path) => {
                             self.send(Action::SetWallpaper(path));
                             if config.theme.source == config::ThemeSource::Wallpaper {
@@ -830,6 +866,10 @@ impl App {
             }
             Message::Ui(UiEvent::HyprSettings(result)) => {
                 self.settings_ui.hypr.received(result);
+                Effects::none()
+            }
+            Message::Ui(UiEvent::LockPreview(path)) => {
+                self.settings_ui.lock_preview = path;
                 Effects::none()
             }
             Message::Ui(UiEvent::Wallpapers(list)) => {
@@ -1079,7 +1119,7 @@ impl App {
         if self.settings_ui.page() == settings::Page::Bluetooth {
             self.send(Action::Bluetooth(bluetooth::Command::Scan(true)));
         }
-        if self.settings_ui.page() == settings::Page::Wifi {
+        if self.settings_ui.page() == settings::Page::Network {
             self.send(Action::System(system::Command::WifiScan));
         }
         self.surfaces.open(
@@ -1756,7 +1796,7 @@ mod tests {
         app.update(Message::Toggle(Panel::Wifi));
         app.update(Message::WifiDropdownPick(0));
         assert_eq!(app.settings_ui.wifi_pick.as_deref(), Some("Office"));
-        assert_eq!(app.settings_ui.page(), settings::Page::Wifi);
+        assert_eq!(app.settings_ui.page(), settings::Page::Network);
         assert!(app.surfaces.is_open(&Surface::Settings));
         assert_eq!(app.panels.current(), None);
     }

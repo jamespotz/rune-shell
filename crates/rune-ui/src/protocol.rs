@@ -8,7 +8,7 @@ use rune_services::{
     hyprland::{self, Bind, HyprState},
     media::{Control, Media},
     notifications,
-    system::{self, Battery, Network, PowerProfile, WifiNetwork},
+    system::{self, Battery, Network, NetworkList, PowerProfile},
     tray::{MenuEntry, TrayItem},
     weather::{Location, Query as WeatherQuery, Weather},
 };
@@ -67,8 +67,8 @@ pub enum Action {
 impl From<system::Reply> for UiEvent {
     fn from(reply: system::Reply) -> Self {
         match reply {
-            system::Reply::WifiNetworks(list) => Self::WifiNetworks(list),
-            system::Reply::WifiStatus(status) => Self::WifiStatus(status),
+            system::Reply::Networks(list) => Self::Networks(Box::new(list)),
+            system::Reply::NetworkStatus(status) => Self::NetworkStatus(status),
             system::Reply::KeepAwake(state) => Self::KeepAwake(state),
             system::Reply::NightLight(state) => Self::NightLight(state),
         }
@@ -125,13 +125,13 @@ pub enum UiEvent {
     /// New backlight level after a brightness change (shows the OSD).
     Brightness(Option<u8>),
     Network(Option<Network>),
-    WifiNetworks(Vec<WifiNetwork>),
+    Networks(Box<NetworkList>),
     /// Whether night light / keep awake is now on, or why it couldn't start.
     NightLight(Result<bool, String>),
     KeepAwake(Result<bool, String>),
     PowerProfile(Option<PowerProfile>),
-    /// Result of joining a network (empty on success).
-    WifiStatus(String),
+    /// Result of joining or connecting (empty on success).
+    NetworkStatus(String),
     Battery(Option<Battery>),
     Stats(Option<rune_services::stats::Stats>),
     Clipboard(Vec<clipboard::Entry>),
@@ -142,6 +142,8 @@ pub enum UiEvent {
     /// An app's tray menu (item key, entries), answering [`TrayRequest::LoadMenu`].
     TrayMenu(String, Vec<MenuEntry>),
     Wallpapers(Vec<rune_services::wallpaper::Wallpaper>),
+    /// The background picture for the Lock Screen preview, effect applied.
+    LockPreview(Option<std::path::PathBuf>),
     /// Outcome of a theme or wallpaper job, shown in settings.
     Status(String),
     Quit,

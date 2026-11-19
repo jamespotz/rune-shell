@@ -798,8 +798,8 @@ fn wifi(app: &Shell, dispatch: &Dispatch) -> AnyElement {
     let c = &app.config;
     let link = settings_link(
         app,
-        "Wi-Fi Settings…",
-        Message::OpenSettingsPage(crate::settings::Page::Wifi),
+        "Network Settings…",
+        Message::OpenSettingsPage(crate::settings::Page::Network),
         dispatch,
     );
     let Some(network) = &app.snapshot.network else {
@@ -867,6 +867,59 @@ fn wifi(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                 dispatch,
             ));
         }
+    }
+    let ui = &app.settings_ui;
+    let wired: Vec<_> = ui
+        .net_devices
+        .iter()
+        .filter(|d| d.kind == rune_services::system::DeviceKind::Ethernet)
+        .collect();
+    if !wired.is_empty() {
+        body = body.child(section_label(c, "Ethernet"));
+    }
+    for device in wired {
+        body = body.child(menu_row(
+            format!("eth:{}", device.path),
+            c,
+            Some((
+                "lan",
+                device.state == rune_services::system::DeviceState::Connected,
+            )),
+            device.interface.clone(),
+            Some(
+                crate::gpui_widgets::muted(c, crate::settings::device_status(device))
+                    .into_any_element(),
+            ),
+        ));
+    }
+    let vpns: Vec<_> = ui
+        .net_profiles
+        .iter()
+        .filter(|p| p.kind == rune_services::system::ProfileKind::Vpn)
+        .collect();
+    if !vpns.is_empty() {
+        body = body.child(section_label(c, "VPN"));
+    }
+    for vpn in vpns {
+        let toggle = match &vpn.active {
+            Some((active, _)) => crate::settings::Msg::Deactivate(active.clone()),
+            None => crate::settings::Msg::Activate(vpn.profile.clone()),
+        };
+        let connecting = matches!(
+            vpn.active,
+            Some((_, rune_services::system::LinkState::Activating))
+        );
+        body = body.child(clickable(
+            menu_row(
+                format!("vpn:{}", vpn.profile),
+                c,
+                Some(("vpn_key", vpn.active.is_some())),
+                vpn.name.clone(),
+                connecting.then(|| crate::gpui_widgets::muted(c, "Connecting…").into_any_element()),
+            ),
+            Message::Settings(toggle),
+            dispatch,
+        ));
     }
     body.child(link).into_any_element()
 }

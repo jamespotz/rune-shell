@@ -93,6 +93,21 @@ The same read-only scan follows `hyprland.lua` and its `require`s in
 load order to label which file sets each value. Only literal assignments count. Display settings are left out: per-monitor VRR, bit depth and
 colour mode can't be read over IPC, and an override would silently reset them.
 
+The lock screen (Settings → Lock Screen) follows the same rule. Settings live in
+`[lock]` in `config.toml`; Rune generates `~/.config/hypr/rune-hyprlock.conf` from
+them plus the theme colors, look and wallpaper, and never touches the user's
+`hyprlock.conf`. When `lock.enabled` is on, Lock runs
+`hyprlock --config rune-hyprlock.conf --grace N`, otherwise `power.lock_command`.
+A daemon worker regenerates the file only when one of those inputs changes.
+hyprlock can only blur, so the pixel effect is a pixelated copy of the wallpaper
+cached under `~/.cache/rune-shell/wallpaper/`. Screenshots are taken by hyprlock
+at lock time, too late to pixelate, so they always blur. Now playing and status
+icons are hyprlock `cmd[]` labels polling `rune-shell lock-media` and
+`rune-shell lock-status`, which read the daemon's service snapshots; their text is
+escaped as Pango markup because track titles come from D-Bus. Every text value
+written to the file is stripped of control characters with `#` escaped, so
+stored config can't add hyprlang lines.
+
 Calendar, notifications, tray, Bluetooth, audio, NetworkManager, UPower, weather,
 capture, wallpaper and theme exports remain service responsibilities. Optional
 backends publish unavailable states so the corresponding controls can hide or

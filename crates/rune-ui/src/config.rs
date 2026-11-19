@@ -35,6 +35,8 @@ pub struct Config {
     pub colors: Colors,
     /// Hyprland settings Rune writes to `~/.config/hypr/modules/rune.lua`.
     pub hyprland: rune_services::hyprland_config::Overrides,
+    /// Lock screen Rune writes to `~/.config/hypr/rune-hyprlock.conf`.
+    pub lock: rune_services::lock::Settings,
 }
 
 impl Config {
@@ -50,7 +52,17 @@ impl Config {
         let bands = &mut config.equalizer.bands;
         *bands = bands.map(rune_services::equalizer::clamp_gain);
         config.hyprland.sanitize();
+        config.lock.sanitize();
         Ok(config)
+    }
+
+    /// What "Lock" runs: Rune's hyprlock config when the lock screen is on.
+    pub fn lock_command(&self) -> String {
+        self.lock
+            .enabled
+            .then(|| rune_services::lock::command(self.lock.grace_seconds))
+            .flatten()
+            .unwrap_or_else(|| self.power.lock_command.clone())
     }
 
     /// Serializes back to TOML (comments in the original file are not kept).

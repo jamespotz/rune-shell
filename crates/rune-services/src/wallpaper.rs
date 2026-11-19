@@ -25,6 +25,10 @@ fn ext_in(path: &Path, list: &[&str]) -> bool {
         .is_some_and(|e| list.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
+pub fn is_image(path: &Path) -> bool {
+    ext_in(path, &IMAGES)
+}
+
 pub fn is_video(path: &Path) -> bool {
     ext_in(path, &VIDEOS)
 }
@@ -92,7 +96,7 @@ pub fn video_frame(path: &Path) -> Option<PathBuf> {
 }
 
 /// `$XDG_CACHE_HOME/rune-shell/wallpaper/<kind>-<hash of path, size, mtime>.png`
-fn cache_path(path: &Path, kind: &str) -> Option<PathBuf> {
+pub(crate) fn cache_path(path: &Path, kind: &str) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
     let mut h = DefaultHasher::new();
     path.hash(&mut h);

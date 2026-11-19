@@ -33,6 +33,8 @@ pub(crate) struct SettingsView {
     hypr_select: Option<String>,
     /// "Not now" on the setup card.
     hypr_later: bool,
+    /// The Network status card shows DNS, security and MAC.
+    net_details: bool,
 }
 impl SettingsView {
     pub fn new(
@@ -58,6 +60,7 @@ impl SettingsView {
             hypr_drag: None,
             hypr_select: None,
             hypr_later: false,
+            net_details: false,
             focus,
             page,
             shell,
@@ -272,7 +275,7 @@ impl SettingsView {
                 input.set_text_size(13.);
                 input
             });
-            if id == "wifi-password" {
+            if id.ends_with("password") {
                 entity.update(cx, |input, cx| input.set_password(true, cx));
             }
             let dispatch = self.dispatch.clone();
@@ -577,6 +580,9 @@ fn swatch(value: crate::config::Rgba, size: f32) -> gpui::Div {
         .bg(color(value))
 }
 fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
+    section(title, None, children)
+}
+fn section(title: &str, trailing: Option<AnyElement>, children: Vec<AnyElement>) -> AnyElement {
     let count = children.len();
     let mut list = crate::gpui_widgets::frame(column())
         .gap_0()
@@ -601,15 +607,101 @@ fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
     column()
         .gap(px(6.))
         .child(
-            crate::gpui_widgets::heading(div())
+            row()
+                .w_full()
+                .justify_between()
                 .px(px(4.))
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .opacity(0.6)
-                .child(title.to_owned()),
+                .child(
+                    crate::gpui_widgets::heading(div())
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .opacity(0.6)
+                        .child(title.to_owned()),
+                )
+                .children(trailing),
         )
         .child(list)
         .into_any_element()
+}
+/// The connected device carrying the summary connection.
+fn primary_link<'a>(devices: &'a [NetDevice], n: &system::Network) -> Option<&'a NetDevice> {
+    if !n.connected {
+        return None;
+    }
+    let kind = match n.kind {
+        system::NetKind::Wifi => Some(DeviceKind::Wifi),
+        system::NetKind::Wired => Some(DeviceKind::Ethernet),
+        system::NetKind::Other => None,
+    };
+    devices
+        .iter()
+        .filter(|d| d.state == DeviceState::Connected)
+        .find(|d| kind.is_none_or(|kind| d.kind == kind))
+}
+fn signal_level(strength: u8) -> usize {
+    match strength {
+        0..=24 => 1,
+        25..=49 => 2,
+        50..=74 => 3,
+        _ => 4,
+    }
+}
+fn signal_bars(c: &Config, strength: u8) -> gpui::Div {
+    let lit = signal_level(strength);
+    row()
+        .flex_none()
+        .items_end()
+        .gap(px(2.))
+        .w(px(18.))
+        .h(px(14.))
+        .children(
+            [5., 8., 11., 14.]
+                .into_iter()
+                .enumerate()
+                .map(|(bar, height)| {
+                    div()
+                        .w(px(3.))
+                        .h(px(height))
+                        .rounded(crate::gpui_widgets::corner(1.))
+                        .bg(color(c.colors.foreground))
+                        .when(bar >= lit, |bar| bar.opacity(0.22))
+                }),
+        )
+}
+fn pill(c: &Config, label: &'static str, on: bool) -> gpui::Div {
+    let tone = if on { c.colors.accent } else { c.colors.muted };
+    crate::gpui_widgets::heading(div())
+        .flex_none()
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(crate::gpui_widgets::corner(9999.))
+        .text_size(px(10.5))
+        .text_color(color(tone))
+        .bg(color(tone).opacity(0.16))
+        .when(crate::gpui_widgets::pixel_look(), |pill| {
+            pill.border_1().border_color(color(tone))
+        })
+        .child(label)
+}
+fn fact_tile(c: &Config, label: &'static str, value: String) -> gpui::Div {
+    column()
+        .flex_1()
+        .min_w_0()
+        .gap(px(1.))
+        .px(px(10.))
+        .py(px(7.))
+        .rounded(crate::gpui_widgets::corner(8.))
+        .bg(gpui::rgba(0xffffff0a))
+        .when(crate::gpui_widgets::pixel_look(), |tile| {
+            tile.border_1().border_color(gpui::rgba(0x8080807a))
+        })
+        .child(
+            crate::gpui_widgets::heading(div())
+                .text_size(px(10.))
+                .text_color(color(c.colors.muted))
+                .child(label),
+        )
+        .child(div().truncate().text_size(px(12.5)).child(value))
 }
 impl SettingsView {
     fn eq_presets(&self, c: &Config) -> AnyElement {
@@ -1795,6 +1887,553 @@ impl SettingsView {
             _ => items.push(self.hypr_review(c, hypr)),
         }
     }
+    fn network_page(
+        &mut self,
+        c: &Config,
+        s: &State,
+        items: &mut Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(n) = &s.network else {
+            items.push(hero(
+                c,
+                Page::Network,
+                "Unavailable. NetworkManager isn't running.",
+                None,
+            ));
+            return;
+        };
+        items.push(self.network_status(c, s, n, cx));
+        if !s.wifi_status.is_empty() {
+            items.push(note(c, s.wifi_status.clone()));
+        }
+        let ethernet: Vec<AnyElement> = s
+            .net_devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::Ethernet)
+            .map(|device| self.ethernet_row(c, s, device))
+            .collect();
+        if !ethernet.is_empty() {
+            items.push(group("Ethernet", ethernet));
+        }
+        let has_wifi =
+            s.net_devices.is_empty() || s.net_devices.iter().any(|d| d.kind == DeviceKind::Wifi);
+        if has_wifi {
+            items.push(self.wifi_section(c, s, n, window, cx));
+        }
+        items.push(self.vpn_group(c, s));
+        if !s.net_profiles.is_empty() {
+            items.push(self.saved_profiles_group(c, s));
+        }
+    }
+
+    fn network_status(
+        &self,
+        c: &Config,
+        s: &State,
+        n: &system::Network,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let link = primary_link(&s.net_devices, n).map(|device| &device.link);
+        let (glyph, kind) = match n.kind {
+            system::NetKind::Wifi => (crate::status::wifi_icon(n.strength.unwrap_or(0)), "Wi-Fi"),
+            system::NetKind::Wired => ("lan", "Ethernet"),
+            system::NetKind::Other => ("lan", "Network"),
+        };
+        let (glyph, title, dot, status) = match (n.connected, n.online) {
+            (true, true) => (
+                glyph,
+                n.name.as_str(),
+                Some(0x30d158ff),
+                format!("{kind} · Online"),
+            ),
+            (true, false) => (
+                glyph,
+                n.name.as_str(),
+                Some(0xff9f0aff),
+                format!("{kind} · No internet"),
+            ),
+            (false, _) => (
+                "signal_disconnected",
+                "Not connected",
+                None,
+                if n.wifi_enabled {
+                    "Choose a network below".to_owned()
+                } else {
+                    "Wi-Fi is off".to_owned()
+                },
+            ),
+        };
+        let mut card = crate::gpui_widgets::frame(column())
+            .w_full()
+            .gap(px(12.))
+            .p(px(14.))
+            .rounded(crate::gpui_widgets::corner(12.))
+            .bg(gpui::rgba(0xffffff0d))
+            .child(
+                row()
+                    .w_full()
+                    .gap(px(14.))
+                    .child(
+                        crate::gpui_widgets::frame(div())
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(52.))
+                            .rounded(crate::gpui_widgets::corner(12.))
+                            .bg(gpui::rgba(Page::Network.tint()))
+                            .text_color(gpui::rgb(0xffffff))
+                            .child(crate::gpui_widgets::icon(c, glyph, 30.)),
+                    )
+                    .child(
+                        column()
+                            .gap(px(2.))
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                crate::gpui_widgets::heading(div())
+                                    .truncate()
+                                    .text_size(px(17.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(title.to_owned()),
+                            )
+                            .child(
+                                row()
+                                    .children(dot.map(|dot| {
+                                        div()
+                                            .flex_none()
+                                            .size(px(7.))
+                                            .rounded(crate::gpui_widgets::corner(9999.))
+                                            .bg(gpui::rgba(dot))
+                                    }))
+                                    .child(crate::gpui_widgets::muted(c, status)),
+                            ),
+                    ),
+            );
+        let Some(link) = link else {
+            return card.into_any_element();
+        };
+        let facts = [
+            ("IP", link.ip.clone()),
+            ("ROUTER", link.router.clone()),
+            ("BAND", link.band().map(str::to_owned)),
+            ("SPEED", link.speed_mbps.map(|m| format!("{m} Mb/s"))),
+        ];
+        if facts.iter().any(|(_, value)| value.is_some()) {
+            card = card.child(
+                row().w_full().gap(px(8.)).children(
+                    facts
+                        .into_iter()
+                        .filter_map(|(label, value)| Some(fact_tile(c, label, value?))),
+                ),
+            );
+        }
+        let details: Vec<(&str, String)> = [
+            (
+                "DNS",
+                Some(link.dns.join(", ")).filter(|dns| !dns.is_empty()),
+            ),
+            ("Security", link.security.map(str::to_owned)),
+            (
+                "Frequency",
+                link.frequency_mhz.map(|mhz| format!("{mhz} MHz")),
+            ),
+            ("MAC Address", link.mac.clone()),
+        ]
+        .into_iter()
+        .filter_map(|(label, value)| Some((label, value?)))
+        .collect();
+        if details.is_empty() {
+            return card.into_any_element();
+        }
+        let open = self.net_details;
+        card = card.child(
+            crate::gpui_widgets::heading(div())
+                .id("network-details")
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_size(px(12.))
+                .text_color(color(c.colors.accent))
+                .cursor_pointer()
+                .active(|style| style.opacity(0.6))
+                .child(if open { "Hide details" } else { "Details" })
+                .child(crate::gpui_widgets::icon(
+                    c,
+                    if open { "expand_less" } else { "chevron_right" },
+                    16.,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.net_details = !this.net_details;
+                    cx.notify();
+                })),
+        );
+        if open {
+            card = card.children(details.into_iter().map(|(label, value)| {
+                self.labeled(
+                    label,
+                    crate::gpui_widgets::muted(c, value)
+                        .text_size(px(13.))
+                        .into_any_element(),
+                )
+            }));
+        }
+        card.into_any_element()
+    }
+
+    fn ethernet_row(&self, c: &Config, s: &State, device: &NetDevice) -> AnyElement {
+        let action = match device.state {
+            DeviceState::Connected | DeviceState::Connecting => Some(self.action(
+                format!("eth-disconnect:{}", device.path),
+                "Disconnect",
+                Msg::DeviceDisconnect(device.path.clone()),
+            )),
+            DeviceState::Disconnected => s
+                .net_profiles
+                .iter()
+                .find(|p| p.kind == ProfileKind::Wired)
+                .map(|profile| {
+                    self.action(
+                        format!("eth-connect:{}", device.path),
+                        "Connect",
+                        Msg::Activate(profile.profile.clone()),
+                    )
+                }),
+            DeviceState::Unavailable | DeviceState::Disconnecting => None,
+        };
+        let status = match (&device.link.ip, device.state) {
+            (Some(ip), DeviceState::Connected) => format!("{} · {ip}", device_status(device)),
+            _ => device_status(device),
+        };
+        row()
+            .w_full()
+            .gap(px(10.))
+            .child(crate::gpui_widgets::status_circle(
+                c,
+                "lan",
+                device.state == DeviceState::Connected,
+                26.,
+            ))
+            .child(
+                column()
+                    .gap_0()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().child(device.interface.clone()))
+                    .child(crate::gpui_widgets::muted(c, status).text_size(px(11.))),
+            )
+            .children(action)
+            .into_any_element()
+    }
+
+    fn icon_action(
+        &self,
+        c: &Config,
+        id: impl Into<String>,
+        glyph: &str,
+        msg: Msg,
+    ) -> gpui::Stateful<gpui::Div> {
+        crate::gpui_widgets::frame(button(
+            id.into(),
+            crate::gpui_widgets::icon(c, glyph, 16.),
+            crate::Message::Settings(msg),
+            &self.dispatch,
+        ))
+        .flex_none()
+        .size(px(26.))
+        .rounded(crate::gpui_widgets::corner(7.))
+        .bg(gpui::rgba(0xffffff0d))
+    }
+
+    fn wifi_section(
+        &mut self,
+        c: &Config,
+        s: &State,
+        n: &system::Network,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut header = row().gap(px(4.));
+        if n.wifi_enabled {
+            header = header
+                .child(self.icon_action(c, "wifi-other", "add", Msg::WifiHiddenOpen))
+                .child(self.icon_action(c, "wifi-scan", "refresh", Msg::WifiRescan));
+        }
+        let header = header.child(div().ml(px(6.)).child(self.toggle_switch(
+            "wifi-power",
+            n.wifi_enabled,
+            Msg::WifiPower(!n.wifi_enabled),
+        )));
+        if !n.wifi_enabled {
+            let off = crate::gpui_widgets::muted(c, "Turn on Wi-Fi to see networks nearby.")
+                .into_any_element();
+            return section("Wi-Fi", Some(header.into_any_element()), vec![off]);
+        }
+        let mut rows = Vec::new();
+        if let Some(hidden) = &s.wifi_hidden {
+            rows.push(self.hidden_wifi_form(hidden, window, cx));
+        }
+        for (i, w) in s.wifi.iter().enumerate() {
+            let tag = if w.active {
+                Some(pill(c, "Connected", true))
+            } else if w.saved.is_some() {
+                Some(pill(c, "Saved", false))
+            } else if !w.secured {
+                Some(pill(c, "Open", false))
+            } else {
+                None
+            };
+            let dispatch = self.dispatch.clone();
+            let entry = row()
+                .id(gpui::SharedString::from(format!("wifi:{}", w.ap)))
+                .w_full()
+                .min_h(px(26.))
+                .gap(px(10.))
+                .child(signal_bars(c, w.strength))
+                .child(div().flex_1().min_w_0().truncate().child(w.ssid.clone()))
+                .children(tag)
+                .when(w.secured, |entry| {
+                    entry.child(
+                        crate::gpui_widgets::icon(c, "lock", 14.).text_color(color(c.colors.muted)),
+                    )
+                })
+                .when(w.saved.is_some() && !w.active, |entry| {
+                    entry.child(
+                        self.icon_action(
+                            c,
+                            format!("forget-wifi:{}", w.ap),
+                            "delete",
+                            Msg::WifiForget(i),
+                        )
+                        .text_color(color(c.colors.urgent)),
+                    )
+                })
+                .map(|entry| {
+                    if w.active {
+                        entry.child(self.action(
+                            format!("disconnect-wifi:{}", w.ap),
+                            "Disconnect",
+                            Msg::DeviceDisconnect(w.device.clone()),
+                        ))
+                    } else {
+                        entry
+                            .cursor_pointer()
+                            .active(|style| style.opacity(0.7))
+                            .on_click(move |_, window, cx| {
+                                dispatch(crate::Message::Settings(Msg::WifiPick(i)), window, cx)
+                            })
+                    }
+                });
+            if s.wifi_pick.as_ref() != Some(&w.ssid) {
+                rows.push(entry.into_any_element());
+                continue;
+            }
+            let password = self.input(
+                "wifi-password".into(),
+                s.wifi_password.clone(),
+                "Password",
+                (Msg::WifiPassword, Some(Msg::WifiJoin)),
+                window,
+                cx,
+            );
+            rows.push(
+                column()
+                    .w_full()
+                    .gap(px(8.))
+                    .child(entry)
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(px(8.))
+                            .pl(px(28.))
+                            .child(div().flex_1().min_w_0().child(password))
+                            .child(self.action("wifi-cancel", "Cancel", Msg::WifiCancel))
+                            .child(self.primary("wifi-submit", "Join", Msg::WifiJoin)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if s.wifi.is_empty() {
+            rows.push(crate::gpui_widgets::muted(c, "Looking for networks…").into_any_element());
+        }
+        section("Wi-Fi", Some(header.into_any_element()), rows)
+    }
+
+    fn hidden_wifi_form(
+        &mut self,
+        hidden: &HiddenWifi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = self.input(
+            "wifi-hidden-name".into(),
+            hidden.ssid.clone(),
+            "Network name",
+            (Msg::WifiHiddenName, Some(Msg::WifiHiddenJoin)),
+            window,
+            cx,
+        );
+        let mut form = column()
+            .w_full()
+            .gap(px(8.))
+            .child(
+                crate::gpui_widgets::heading(div())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Join Other Network"),
+            )
+            .child(self.labeled(
+                "Network Name",
+                div().w(px(240.)).child(name).into_any_element(),
+            ))
+            .child(self.labeled(
+                "Password Protected (WPA or WPA2/WPA3 Personal)",
+                self.toggle_switch(
+                    "wifi-hidden-secured",
+                    hidden.secured,
+                    Msg::WifiHiddenSecured(!hidden.secured),
+                ),
+            ));
+        if hidden.secured {
+            let password = self.input(
+                "wifi-hidden-password".into(),
+                hidden.password.clone(),
+                "Password",
+                (Msg::WifiHiddenPassword, Some(Msg::WifiHiddenJoin)),
+                window,
+                cx,
+            );
+            form = form.child(self.labeled(
+                "Password",
+                div().w(px(240.)).child(password).into_any_element(),
+            ));
+        }
+        form.child(
+            row()
+                .w_full()
+                .justify_end()
+                .gap(px(8.))
+                .child(self.action("wifi-hidden-cancel", "Cancel", Msg::WifiHiddenCancel))
+                .child(self.primary("wifi-hidden-join", "Join", Msg::WifiHiddenJoin)),
+        )
+        .into_any_element()
+    }
+
+    fn vpn_group(&self, c: &Config, s: &State) -> AnyElement {
+        let mut rows: Vec<AnyElement> = s
+            .net_profiles
+            .iter()
+            .filter(|p| p.kind == ProfileKind::Vpn)
+            .map(|vpn| {
+                let state = match &vpn.active {
+                    Some((_, LinkState::Active)) => "Connected",
+                    Some((_, LinkState::Activating)) => "Connecting…",
+                    None => "Not connected",
+                };
+                let detail = match vpn.vpn_type {
+                    Some(kind) => format!("{kind} · {state}"),
+                    None => state.to_owned(),
+                };
+                let toggle = match &vpn.active {
+                    Some((active, _)) => Msg::Deactivate(active.clone()),
+                    None => Msg::Activate(vpn.profile.clone()),
+                };
+                row()
+                    .w_full()
+                    .gap(px(10.))
+                    .child(crate::gpui_widgets::status_circle(
+                        c,
+                        "vpn_key",
+                        vpn.active.is_some(),
+                        26.,
+                    ))
+                    .child(
+                        column()
+                            .gap_0()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(vpn.name.clone()))
+                            .child(crate::gpui_widgets::muted(c, detail).text_size(px(11.))),
+                    )
+                    .child(self.toggle_switch(
+                        &format!("vpn:{}", vpn.profile),
+                        vpn.active.is_some(),
+                        toggle,
+                    ))
+                    .into_any_element()
+            })
+            .collect();
+        if rows.is_empty() {
+            rows.push(
+                crate::gpui_widgets::muted(
+                    c,
+                    "No VPN connections. Import one with nmcli connection import, or add it in nm-connection-editor.",
+                )
+                .into_any_element(),
+            );
+        }
+        group("VPN", rows)
+    }
+
+    fn saved_profiles_group(&self, c: &Config, s: &State) -> AnyElement {
+        let rows = s
+            .net_profiles
+            .iter()
+            .map(|p| {
+                let (glyph, kind) = match p.kind {
+                    ProfileKind::Wifi => ("wifi", "Wi-Fi"),
+                    ProfileKind::Wired => ("lan", "Ethernet"),
+                    ProfileKind::Vpn => ("vpn_key", p.vpn_type.unwrap_or("VPN")),
+                };
+                let in_range = p
+                    .ssid
+                    .as_ref()
+                    .map(|ssid| s.wifi.iter().any(|w| &w.ssid == ssid));
+                let detail = match (in_range, &p.active) {
+                    (_, Some(_)) => format!("{kind} · In use"),
+                    (Some(true), None) => format!("{kind} · In range"),
+                    (Some(false), None) => format!("{kind} · Not in range"),
+                    (None, None) => kind.to_owned(),
+                };
+                row()
+                    .w_full()
+                    .gap(px(12.))
+                    .child(crate::gpui_widgets::status_circle(
+                        c,
+                        glyph,
+                        p.active.is_some(),
+                        26.,
+                    ))
+                    .child(
+                        column()
+                            .gap_0()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(p.name.clone()))
+                            .child(crate::gpui_widgets::muted(c, detail).text_size(px(11.))),
+                    )
+                    .child(crate::gpui_widgets::muted(c, "Auto"))
+                    .child(self.toggle_switch(
+                        &format!("auto-connect:{}", p.profile),
+                        p.auto_connect,
+                        Msg::AutoConnect(p.profile.clone(), !p.auto_connect),
+                    ))
+                    .child(
+                        self.icon_action(
+                            c,
+                            format!("forget-profile:{}", p.profile),
+                            "delete",
+                            Msg::Forget(p.profile.clone()),
+                        )
+                        .text_color(color(c.colors.urgent)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        group("Saved Connections", rows)
+    }
+
     fn hypr_bezier_editor(
         &mut self,
         c: &Config,
@@ -2547,6 +3186,127 @@ impl SettingsView {
     }
 }
 /// A settings group whose heading has text on the right, like "from modules/animations.lua".
+/// The lock screen at settings size: 576×324, a 0.3 scale of 1920×1080.
+fn lock_preview(c: &Config, s: &State) -> AnyElement {
+    use rune_services::lock::Background;
+    let lock = &c.lock;
+    let pixel = crate::gpui_widgets::pixel_look();
+    let fg = color(c.colors.foreground);
+    let now = chrono::Local::now();
+    let time = now
+        .format(if lock.clock_24h { "%H:%M" } else { "%-I:%M" })
+        .to_string();
+    let date = now.format("%A, %B %-d").to_string();
+    let date = if pixel { date.to_uppercase() } else { date };
+    let user = std::env::var("USER").unwrap_or_default();
+    let backdrop = match (&s.lock_preview, lock.background) {
+        (Some(path), Background::Wallpaper | Background::Screenshot) => img(path.clone())
+            .size_full()
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element(),
+        _ => div()
+            .size_full()
+            .bg(color(c.colors.background))
+            .into_any_element(),
+    };
+    let dim = if lock.background == Background::Color {
+        0
+    } else {
+        u32::from(lock.dim) * 255 / 100
+    };
+    let dot = |_| {
+        div()
+            .size(px(4.))
+            .rounded(crate::gpui_widgets::corner(9999.))
+            .bg(fg)
+    };
+    let status_icon = |glyph: &str| crate::gpui_widgets::icon(c, glyph, 11.);
+    crate::gpui_widgets::frame(div())
+        .relative()
+        .w(px(576.))
+        .h(px(324.))
+        .overflow_hidden()
+        .rounded(crate::gpui_widgets::corner(12.))
+        .text_color(fg)
+        .child(div().absolute().inset_0().child(backdrop))
+        .child(div().absolute().inset_0().bg(gpui::rgba(dim)))
+        .child(
+            column()
+                .absolute()
+                .inset_0()
+                .items_center()
+                .gap_0()
+                .pt(px(48.))
+                .child(
+                    crate::gpui_widgets::heading(div())
+                        .text_size(px(if pixel { 44. } else { 40. }))
+                        .font_weight(if pixel {
+                            gpui::FontWeight::NORMAL
+                        } else {
+                            gpui::FontWeight::LIGHT
+                        })
+                        .child(time),
+                )
+                .when(lock.show_date, |col| {
+                    col.child(
+                        crate::gpui_widgets::heading(div())
+                            .text_size(px(8.))
+                            .opacity(0.85)
+                            .child(date),
+                    )
+                })
+                .child(div().h(px(if lock.show_date { 22. } else { 34. })))
+                .when(lock.show_user, |col| {
+                    col.child(crate::gpui_widgets::status_circle(c, "person", false, 24.))
+                        .child(
+                            crate::gpui_widgets::heading(div())
+                                .mt(px(3.))
+                                .text_size(px(6.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(user),
+                        )
+                })
+                .child(
+                    crate::gpui_widgets::frame(row())
+                        .mt(px(8.))
+                        .w(px(90.))
+                        .h(px(15.))
+                        .justify_center()
+                        .gap(px(3.))
+                        .rounded(crate::gpui_widgets::corner(9999.))
+                        .border_1()
+                        .border_color(color(c.colors.accent))
+                        .bg(color(c.colors.background).opacity(if pixel { 0.85 } else { 0.45 }))
+                        .children((0..6).map(dot)),
+                ),
+        )
+        .when(lock.show_media, |preview| {
+            preview.child(
+                row()
+                    .absolute()
+                    .bottom(px(12.))
+                    .w_full()
+                    .justify_center()
+                    .gap(px(3.))
+                    .text_size(px(7.))
+                    .child(crate::gpui_widgets::icon(c, "music_note", 8.))
+                    .child(crate::gpui_widgets::heading(div()).child("Now playing")),
+            )
+        })
+        .when(lock.show_status, |preview| {
+            preview.child(
+                row()
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(10.))
+                    .gap(px(4.))
+                    .child(status_icon("keyboard"))
+                    .child(status_icon("wifi"))
+                    .child(status_icon("volume_up")),
+            )
+        })
+        .into_any_element()
+}
 fn group_with(
     c: &Config,
     title: &str,
@@ -2748,6 +3508,97 @@ impl Render for SettingsView {
             | Page::HyprInput
             | Page::HyprMotion
             | Page::HyprReview => self.hypr_page(&c, &s, &mut items, window, cx),
+            Page::Lock => {
+                use rune_services::lock::{Background, Effect};
+                let lock = &c.lock;
+                let effect = lock.effect(crate::gpui_widgets::pixel_look());
+                items.push(hero(
+                    &c,
+                    Page::Lock,
+                    "hyprlock, drawn in your theme colors and look.",
+                    Some(self.primary("lock-now", "Lock Now", Msg::LockNow)),
+                ));
+                items.push(group(
+                    "Rune Lock Screen",
+                    vec![flag!(
+                        LockEnabled,
+                        "Use this lock screen (Lock and rune-shell lock run it)",
+                        lock.enabled
+                    )],
+                ));
+                items.push(lock_preview(&c, &s));
+                let sources = [
+                    (Background::Wallpaper, "Wallpaper"),
+                    (Background::Screenshot, "Screenshot"),
+                    (Background::Color, "Color"),
+                ]
+                .map(|(source, label)| {
+                    (
+                        label.to_owned(),
+                        lock.background == source,
+                        Msg::LockBackground(source),
+                    )
+                });
+                let mut background =
+                    vec![self.labeled("Source", self.segmented("lock-source", sources.to_vec()))];
+                if lock.background == Background::Wallpaper {
+                    let effects = [(Effect::Blur, "Blur"), (Effect::Pixelate, "Pixelate")].map(
+                        |(choice, label)| {
+                            (label.to_owned(), effect == choice, Msg::LockEffect(choice))
+                        },
+                    );
+                    background.push(
+                        self.labeled("Effect", self.segmented("lock-effect", effects.to_vec())),
+                    );
+                }
+                if lock.background != Background::Color {
+                    let strength = match effect {
+                        Effect::Blur => "Blur",
+                        Effect::Pixelate => "Pixel size",
+                    };
+                    background.push(number!(LockStrength, strength, lock.strength, 0., 100., 1.));
+                    background.push(number!(LockDim, "Dim", lock.dim, 0., 90., 1.));
+                }
+                items.push(group("Background", background));
+                items.push(group(
+                    "Clock",
+                    vec![
+                        flag!(LockClock24, "24-hour clock", lock.clock_24h),
+                        flag!(LockDate, "Show date", lock.show_date),
+                    ],
+                ));
+                items.push(group(
+                    "Show",
+                    vec![
+                        flag!(LockUser, "Picture and name (from ~/.face)", lock.show_user),
+                        flag!(LockMedia, "Now playing", lock.show_media),
+                        flag!(
+                            LockStatus,
+                            "Status icons (keyboard layout, network, volume)",
+                            lock.show_status
+                        ),
+                    ],
+                ));
+                items.push(group(
+                    "Password",
+                    vec![
+                        field!(LockHint, "Hint"),
+                        number!(
+                            LockGrace,
+                            "Grace period (seconds after locking when any key unlocks)",
+                            lock.grace_seconds,
+                            0.,
+                            30.,
+                            1.
+                        ),
+                        flag!(LockHideCursor, "Hide cursor", lock.hide_cursor),
+                    ],
+                ));
+                items.push(note(
+                    &c,
+                    "Rune writes ~/.config/hypr/rune-hyprlock.conf and leaves your hyprlock.conf alone. To lock when idle, set hypridle's lock_cmd to rune-shell lock.",
+                ));
+            }
             Page::Appearance => {
                 items.push(hero(
                     &c,
@@ -3230,130 +4081,7 @@ impl Render for SettingsView {
                     "Forecasts from Open-Meteo. Only the selected place is sent, never your position.",
                 ));
             }
-            Page::Wifi => {
-                if let Some(n) = &s.network {
-                    let status = if !n.wifi_enabled {
-                        "Off".into()
-                    } else if n.connected {
-                        format!("Connected to {}", n.name)
-                    } else {
-                        "On, not connected".into()
-                    };
-                    items.push(hero(
-                        &c,
-                        Page::Wifi,
-                        status,
-                        Some(self.toggle_switch(
-                            "wifi-power",
-                            n.wifi_enabled,
-                            Msg::WifiPower(!n.wifi_enabled),
-                        )),
-                    ));
-                    if !s.wifi_status.is_empty() {
-                        items.push(note(&c, s.wifi_status.clone()));
-                    }
-                    if n.wifi_enabled {
-                        let mut rows = Vec::new();
-                        for (i, w) in s.wifi.iter().enumerate() {
-                            let detail = [
-                                w.active.then_some("Connected"),
-                                w.saved.as_ref().map(|_| "Saved"),
-                                Some(if w.secured { "Secured" } else { "Open" }),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join(" · ");
-                            let mut entry = row()
-                                .w_full()
-                                .gap(px(10.))
-                                .child(crate::gpui_widgets::status_circle(
-                                    &c,
-                                    crate::status::wifi_icon(w.strength),
-                                    w.active,
-                                    26.,
-                                ))
-                                .child(
-                                    column()
-                                        .gap_0()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(div().truncate().child(w.ssid.clone()))
-                                        .child(
-                                            crate::gpui_widgets::muted(&c, detail)
-                                                .text_size(px(11.)),
-                                        ),
-                                );
-                            if w.saved.is_some() {
-                                entry = entry.child(self.destructive(
-                                    format!("forget-wifi:{i}"),
-                                    "Forget",
-                                    Msg::WifiForget(i),
-                                ));
-                            }
-                            if !w.active {
-                                entry = entry.child(self.action(
-                                    format!("join-wifi:{i}"),
-                                    "Join",
-                                    Msg::WifiPick(i),
-                                ));
-                            }
-                            rows.push(entry.into_any_element());
-                        }
-                        if s.wifi.is_empty() {
-                            rows.push(
-                                crate::gpui_widgets::muted(&c, "Looking for networks…")
-                                    .into_any_element(),
-                            );
-                        }
-                        rows.push(
-                            row()
-                                .w_full()
-                                .justify_end()
-                                .child(self.action("wifi-scan", "Scan Again", Msg::WifiRescan))
-                                .into_any_element(),
-                        );
-                        items.push(group("Networks", rows));
-                        if let Some(pick) = &s.wifi_pick {
-                            let password = self.input(
-                                "wifi-password".into(),
-                                s.wifi_password.clone(),
-                                "Password",
-                                (Msg::WifiPassword, Some(Msg::WifiJoin)),
-                                window,
-                                cx,
-                            );
-                            items.push(group(
-                                &format!("Join “{pick}”"),
-                                vec![
-                                    self.labeled(
-                                        "Password",
-                                        div().w(px(240.)).child(password).into_any_element(),
-                                    ),
-                                    row()
-                                        .w_full()
-                                        .justify_end()
-                                        .gap(px(8.))
-                                        .child(self.action(
-                                            "wifi-cancel",
-                                            "Cancel",
-                                            Msg::WifiCancel,
-                                        ))
-                                        .child(self.primary("wifi-submit", "Join", Msg::WifiJoin))
-                                        .into_any_element(),
-                                ],
-                            ));
-                        }
-                    }
-                } else {
-                    items.push(hero(
-                        &c,
-                        Page::Wifi,
-                        "Unavailable. NetworkManager isn't running.",
-                        None,
-                    ));
-                }
-            }
+            Page::Network => self.network_page(&c, &s, &mut items, window, cx),
             Page::Bluetooth => {
                 let bt = &s.bt;
                 if !bt.available {
@@ -3985,6 +4713,50 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn net_device(kind: DeviceKind, state: DeviceState, path: &str) -> NetDevice {
+        NetDevice {
+            path: path.into(),
+            interface: path.into(),
+            kind,
+            state,
+            connection: None,
+            link: system::LinkDetails::default(),
+        }
+    }
+
+    #[test]
+    fn primary_link_picks_the_connected_device_of_the_summary_kind() {
+        let devices = [
+            net_device(DeviceKind::Ethernet, DeviceState::Connected, "eth"),
+            net_device(DeviceKind::Wifi, DeviceState::Disconnected, "wlan-idle"),
+            net_device(DeviceKind::Wifi, DeviceState::Connected, "wlan"),
+        ];
+        let mut network = Network {
+            connected: true,
+            online: true,
+            kind: system::NetKind::Wifi,
+            name: "Home".into(),
+            strength: Some(80),
+            wifi_enabled: true,
+        };
+        let path = |n: &Network| primary_link(&devices, n).map(|d| d.path.as_str());
+        assert_eq!(path(&network), Some("wlan"));
+        network.kind = system::NetKind::Wired;
+        assert_eq!(path(&network), Some("eth"));
+        network.kind = system::NetKind::Other;
+        assert_eq!(path(&network), Some("eth"));
+        network.connected = false;
+        assert_eq!(path(&network), None);
+    }
+
+    #[test]
+    fn signal_level_covers_the_full_strength_range() {
+        assert_eq!(
+            [0, 24, 25, 49, 50, 74, 75, 100, u8::MAX].map(signal_level),
+            [1, 1, 2, 2, 3, 3, 4, 4, 4]
+        );
+    }
 
     #[test]
     fn bezier_editor_fits_overshooting_handles_inside_the_box() {
