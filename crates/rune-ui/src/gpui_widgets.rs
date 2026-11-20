@@ -605,6 +605,7 @@ pub(crate) fn bar_widget(
                 Run::Idle if total > 0 => row()
                     .child(glyph("system_update_alt"))
                     .child(update_badge(c, total.to_string(), c.colors.accent)),
+                _ if item.auto_hide => return None,
                 Run::Idle => row()
                     .text_color(color(c.colors.muted))
                     .child(glyph("system_update_alt")),
@@ -705,7 +706,21 @@ pub(crate) fn bar_widget(
         )
         .into_any_element(),
         Widget::Media => {
-            let media = app.snapshot.media.as_ref()?;
+            let media = app
+                .snapshot
+                .media
+                .as_ref()
+                .filter(|media| media.status != rune_services::media::Status::Stopped);
+            let Some(media) = media else {
+                if item.auto_hide {
+                    return None;
+                }
+                let idle = item_icon(c, item, "music_note", size * 0.9);
+                return Some(
+                    bar_button(app, item, id, idle, toggle(Panel::Media), dispatch)
+                        .into_any_element(),
+                );
+            };
             let art = media
                 .art
                 .as_ref()
@@ -768,7 +783,19 @@ pub(crate) fn bar_widget(
             tray.into_any_element()
         }
         Widget::DeviceBattery => {
-            let device = crate::status::device_for(&app.snapshot.peripherals, &item.device)?;
+            let Some(device) = crate::status::device_for(&app.snapshot.peripherals, &item.device)
+            else {
+                if item.auto_hide {
+                    return None;
+                }
+                let idle = row()
+                    .text_color(color(c.colors.muted))
+                    .child(glyph("battery_unknown"));
+                return Some(
+                    bar_button(app, item, id, idle, toggle(Panel::Battery), dispatch)
+                        .into_any_element(),
+                );
+            };
             let low = device.percent <= LOW_DEVICE_BATTERY;
             let percent = div()
                 .when(low, |text| text.text_color(color(c.colors.urgent)))

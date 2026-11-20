@@ -1263,6 +1263,14 @@ impl SettingsView {
                 ));
             }
         }
+        if item.widget.can_auto_hide() {
+            rows.push(self.toggle(
+                &format!("item-auto-hide:{slot}"),
+                "Hide when idle",
+                item.auto_hide,
+                edit(ItemEdit::AutoHide(!item.auto_hide)),
+            ));
+        }
         if item.widget == Widget::DeviceBattery {
             let peripherals = self.shell.read(cx).snapshot.peripherals.clone();
             let choices = crate::settings::device_choices(&peripherals, &item.device);

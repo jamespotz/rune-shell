@@ -223,10 +223,30 @@ pub struct BarItem {
     pub style: WidgetStyle,
     /// Device battery only: UPower serial (or native path); empty picks the first device.
     pub device: String,
+    /// Widgets with [`Widget::can_auto_hide`]: hide while there is nothing to show.
+    pub auto_hide: bool,
 }
 
 impl BarItem {
     const MAX_DEVICE_CHARS: usize = 128;
+}
+
+impl Widget {
+    /// Widgets that can hide while idle: no updates, no player, no connected device.
+    pub fn can_auto_hide(self) -> bool {
+        matches!(
+            self,
+            Widget::Updates | Widget::Media | Widget::DeviceBattery
+        )
+    }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl From<Widget> for BarItem {
@@ -235,6 +255,7 @@ impl From<Widget> for BarItem {
             widget,
             style: WidgetStyle::default(),
             device: String::new(),
+            auto_hide: true,
         }
     }
 }
@@ -252,6 +273,8 @@ struct BarItemTable {
     widget: Widget,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     device: String,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    auto_hide: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     icon: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +294,7 @@ impl From<BarItemRepr> for BarItem {
             BarItemRepr::Table(t) => Self {
                 widget: t.widget,
                 device: t.device,
+                auto_hide: t.auto_hide,
                 style: WidgetStyle {
                     icon: t.icon,
                     icon_color: t.icon_color,
@@ -285,7 +309,7 @@ impl From<BarItemRepr> for BarItem {
 
 impl From<BarItem> for BarItemRepr {
     fn from(item: BarItem) -> Self {
-        if item.style == WidgetStyle::default() && item.device.is_empty() {
+        if item.style == WidgetStyle::default() && item.device.is_empty() && item.auto_hide {
             return Self::Name(item.widget);
         }
         let WidgetStyle {
@@ -298,6 +322,7 @@ impl From<BarItem> for BarItemRepr {
         Self::Table(BarItemTable {
             widget: item.widget,
             device: item.device,
+            auto_hide: item.auto_hide,
             icon,
             icon_color,
             border_width,
@@ -985,6 +1010,17 @@ right = ["clock", { widget = "device_battery", device = "F4:73", icon = "mouse",
         assert!(
             Config::parse("[bar]\nright = [{ widget = \"clock\", colour = \"#fff\" }]").is_err()
         );
+    }
+
+    #[test]
+    fn auto_hide_defaults_on_and_round_trips_when_off() {
+        let c = Config::parse(
+            "[bar]\nright = [\"updates\", { widget = \"media\", icon = \"x\" }, { widget = \"device_battery\", auto_hide = false }]",
+        )
+        .unwrap();
+        assert!(c.bar.right[0].auto_hide && c.bar.right[1].auto_hide);
+        assert!(!c.bar.right[2].auto_hide);
+        assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
     }
 
     #[test]

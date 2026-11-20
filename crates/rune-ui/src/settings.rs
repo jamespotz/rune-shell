@@ -851,6 +851,7 @@ pub enum ItemEdit {
     BorderColor(Option<Rgba>),
     Radius(Option<f32>),
     Device(String),
+    AutoHide(bool),
 }
 
 /// Which colour of a bar item a picker edits.
@@ -1236,6 +1237,7 @@ impl State {
                     ItemEdit::BorderColor(border) => item.style.border_color = border,
                     ItemEdit::Radius(radius) => item.style.radius = radius,
                     ItemEdit::Device(device) => item.device = device,
+                    ItemEdit::AutoHide(on) => item.auto_hide = on,
                 }
                 config.bar.sanitize();
             }
