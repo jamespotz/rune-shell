@@ -7,8 +7,8 @@ use rune_services::{
     audio, bluetooth, calendar as cal, capture, clipboard, equalizer,
     hyprland::{self, Bind, HyprState},
     media::{Control, Media},
-    notifications,
-    system::{self, Battery, Network, NetworkList, PowerProfile},
+    notifications, polkit,
+    system::{self, Battery, Network, NetworkList, Peripheral, PowerProfile},
     tray::{MenuEntry, TrayItem},
     updates,
     weather::{Location, Query as WeatherQuery, Weather},
@@ -65,6 +65,8 @@ pub enum Action {
     /// Calendar links to follow and the reminder lead time.
     Calendar(crate::config::CalendarConfig),
     RefreshCalendar,
+    /// Answer or dismiss the open polkit authentication.
+    Polkit(polkit::Command),
 }
 
 impl From<system::Reply> for UiEvent {
@@ -137,6 +139,7 @@ pub enum UiEvent {
     /// Result of joining or connecting (empty on success).
     NetworkStatus(String),
     Battery(Option<Battery>),
+    Peripherals(Vec<Peripheral>),
     Stats(Option<rune_services::stats::Stats>),
     Clipboard(Vec<clipboard::Entry>),
     /// Turn game mode on, off, or (`None`) toggle it.
@@ -148,6 +151,8 @@ pub enum UiEvent {
     Wallpapers(Vec<rune_services::wallpaper::Wallpaper>),
     /// The background picture for the Lock Screen preview, effect applied.
     LockPreview(Option<std::path::PathBuf>),
+    /// The polkit authentication to show, or `None` to close the dialog.
+    Polkit(Option<polkit::Request>),
     /// Outcome of a theme or wallpaper job, shown in settings.
     Status(String),
     Quit,

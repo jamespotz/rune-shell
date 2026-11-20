@@ -1,7 +1,7 @@
 //! Settings window: a sidebar of categories and a page of controls per category.
 //! Every edit updates the config immediately; `App` saves it to disk.
 
-use crate::config::{Config, Rgba, ThemeSource, Widget, valid_clock_format};
+use crate::config::{BarItem, Config, Rgba, ThemeSource, Widget, valid_clock_format};
 use rune_services::{
     audio::{DeviceCommand, Devices},
     bluetooth::{Command as BtCommand, State as BtState},
@@ -723,37 +723,46 @@ pub enum Section {
 pub enum BarShape {
     Notch,
     Floating,
+    Pill,
     Edge,
 }
 
 impl BarShape {
-    pub const ALL: [BarShape; 3] = [BarShape::Notch, BarShape::Floating, BarShape::Edge];
+    pub const ALL: [BarShape; 4] = [
+        BarShape::Notch,
+        BarShape::Floating,
+        BarShape::Pill,
+        BarShape::Edge,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             BarShape::Notch => "Notch",
             BarShape::Floating => "Floating",
+            BarShape::Pill => "Pill",
             BarShape::Edge => "Edge",
         }
     }
 
     /// `(margin_top, margin_x, width, radius)`
-    fn fields(self) -> (u32, u32, u32, f32) {
+    fn fields(self, height: u32) -> (u32, u32, u32, f32) {
+        let half_height = height as f32 / 2.;
         match self {
-            BarShape::Notch => (0, 0, 1200, 14.),
-            BarShape::Floating => (8, 12, 0, 12.),
+            BarShape::Notch => (0, 0, 1200, 14_f32.min(half_height)),
+            BarShape::Floating => (8, 12, 0, 12_f32.min(half_height)),
+            BarShape::Pill => (8, 16, 0, half_height),
             BarShape::Edge => (0, 0, 0, 0.),
         }
     }
 
     fn apply(self, bar: &mut crate::config::BarConfig) {
-        (bar.margin_top, bar.margin_x, bar.width, bar.radius) = self.fields();
+        (bar.margin_top, bar.margin_x, bar.width, bar.radius) = self.fields(bar.height);
     }
 
     pub fn of(bar: &crate::config::BarConfig) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|shape| shape.fields() == (bar.margin_top, bar.margin_x, bar.width, bar.radius))
+        Self::ALL.into_iter().find(|shape| {
+            shape.fields(bar.height) == (bar.margin_top, bar.margin_x, bar.width, bar.radius)
+        })
     }
 }
 
@@ -765,11 +774,15 @@ pub enum Msg {
     Num(Num, f32),
     Flag(Flag, bool),
     Remove(Section, usize),
-    Add(Section, Widget),
+    Add(Section, BarItem),
     /// Drag result: move the widget at `from` to slot `to`, counted before it was lifted.
     Place((Section, usize), (Section, usize)),
     /// Drop a new widget at a slot; past the end appends.
-    Insert(Section, usize, Widget),
+    Insert(Section, usize, BarItem),
+    /// Change the style or device of the bar item at a slot.
+    Item(Section, usize, ItemEdit),
+    /// Select the bar item whose settings are shown, or none.
+    Select(Option<(Section, usize)>),
     Shape(BarShape),
     EqEnabled(bool),
     /// Index into `equalizer::PRESETS`.
@@ -780,7 +793,9 @@ pub enum Msg {
     Source(ThemeSource),
     Look(crate::config::Look),
     BorderStyle(crate::config::BorderStyle),
+    BorderEdges(crate::config::BorderEdges),
     PixelFont(crate::config::PixelFont),
+    FontWeight(crate::config::Look, crate::config::TextWeight),
     RemindMinutes(u32),
     Preset(String),
     Scheme(Variant),
@@ -827,9 +842,62 @@ pub enum Msg {
     LockNow,
 }
 
+/// One change to a placed bar item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ItemEdit {
+    Icon(String),
+    IconColor(Option<Rgba>),
+    BorderWidth(f32),
+    BorderColor(Option<Rgba>),
+    Radius(Option<f32>),
+    Device(String),
+}
+
+/// Which colour of a bar item a picker edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemColor {
+    Icon,
+    Border,
+}
+
+/// The setting a colour picker edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorTarget {
+    Field(Field),
+    Item(Section, usize, ItemColor),
+}
+
+/// The settings message that stores a picked colour.
+pub fn color_message(target: ColorTarget, value: Rgba) -> Msg {
+    match target {
+        ColorTarget::Field(field) => Msg::Text(field, value.into()),
+        ColorTarget::Item(section, index, ItemColor::Icon) => {
+            Msg::Item(section, index, ItemEdit::IconColor(Some(value)))
+        }
+        ColorTarget::Item(section, index, ItemColor::Border) => {
+            Msg::Item(section, index, ItemEdit::BorderColor(Some(value)))
+        }
+    }
+}
+
+/// `(key, label)` choices for a device battery: first available, each device, then a saved absent one.
+pub(crate) fn device_choices(
+    peripherals: &[rune_services::system::Peripheral],
+    saved: &str,
+) -> Vec<(String, String)> {
+    let mut choices = vec![(String::new(), "First available".to_owned())];
+    choices.extend(peripherals.iter().map(|p| (p.key.clone(), p.name.clone())));
+    if !saved.is_empty() && !peripherals.iter().any(|p| p.key == saved) {
+        choices.push((saved.to_owned(), format!("{saved} (not connected)")));
+    }
+    choices
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct State {
     page: Page,
+    /// Bar item whose settings are open in Settings → Bar.
+    selected: Option<(Section, usize)>,
     drafts: HashMap<Field, String>,
     pub wallpapers: Vec<Wallpaper>,
     /// Result of the last theme/wallpaper job.
@@ -1106,7 +1174,12 @@ impl State {
             }
             Msg::Look(look) => config.bar.look = look,
             Msg::BorderStyle(style) => config.bar.border_style = style,
+            Msg::BorderEdges(edges) => config.bar.border_edges = edges,
             Msg::PixelFont(font) => config.bar.pixel_font = font,
+            Msg::FontWeight(crate::config::Look::Smooth, weight) => config.bar.font_weight = weight,
+            Msg::FontWeight(crate::config::Look::Pixel, weight) => {
+                config.bar.pixel_font_weight = weight
+            }
             Msg::RemindMinutes(minutes) => config.calendar.remind_minutes = minutes,
             Msg::Source(source) => {
                 config.theme.source = source;
@@ -1130,6 +1203,7 @@ impl State {
                 return Some(Request::SetWallpaper(path));
             }
             Msg::Remove(section, i) => {
+                self.selected = None;
                 let list = section_mut(config, section);
                 if i < list.len() {
                     list.remove(i);
@@ -1137,6 +1211,7 @@ impl State {
             }
             Msg::Add(section, w) => section_mut(config, section).push(w),
             Msg::Place((from, index), (to, mut at)) => {
+                self.selected = None;
                 if index >= section_mut(config, from).len() {
                     return None;
                 }
@@ -1148,9 +1223,23 @@ impl State {
                 list.insert(at.min(list.len()), widget);
             }
             Msg::Insert(section, at, w) => {
+                self.selected = None;
                 let list = section_mut(config, section);
                 list.insert(at.min(list.len()), w);
             }
+            Msg::Item(section, index, edit) => {
+                let item = section_mut(config, section).get_mut(index)?;
+                match edit {
+                    ItemEdit::Icon(icon) => item.style.icon = icon,
+                    ItemEdit::IconColor(tint) => item.style.icon_color = tint,
+                    ItemEdit::BorderWidth(width) => item.style.border_width = width,
+                    ItemEdit::BorderColor(border) => item.style.border_color = border,
+                    ItemEdit::Radius(radius) => item.style.radius = radius,
+                    ItemEdit::Device(device) => item.device = device,
+                }
+                config.bar.sanitize();
+            }
+            Msg::Select(selected) => self.selected = selected,
             Msg::Shape(shape) => shape.apply(&mut config.bar),
             Msg::EqEnabled(on) => config.equalizer.enabled = on,
             Msg::EqPreset(index) => {
@@ -1179,12 +1268,16 @@ impl State {
     pub fn page(&self) -> Page {
         self.page
     }
+
+    pub fn selected(&self) -> Option<(Section, usize)> {
+        self.selected
+    }
 }
 
 #[path = "gpui_settings.rs"]
 pub(crate) mod gpui_view;
 
-fn section_mut(config: &mut Config, section: Section) -> &mut Vec<Widget> {
+fn section_mut(config: &mut Config, section: Section) -> &mut Vec<BarItem> {
     match section {
         Section::Left => &mut config.bar.left,
         Section::Center => &mut config.bar.center,
@@ -1268,7 +1361,13 @@ fn set(slot: &mut String, value: &str) -> bool {
 
 fn set_num(config: &mut Config, num: Num, v: f32) {
     match num {
-        Num::Height => config.bar.height = v.round() as u32,
+        Num::Height => {
+            let pill = BarShape::of(&config.bar) == Some(BarShape::Pill);
+            config.bar.height = v.round() as u32;
+            if pill {
+                config.bar.radius = config.bar.height as f32 / 2.;
+            }
+        }
         Num::Width => config.bar.width = v.round() as u32,
         Num::Radius => config.bar.radius = v,
         Num::MarginTop => config.bar.margin_top = v.round() as u32,
@@ -1308,6 +1407,33 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pill_shape_follows_height_and_preserves_border_preferences() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(
+            &mut config,
+            Msg::BorderEdges(crate::config::BorderEdges::All),
+        );
+        state.update(&mut config, Msg::Shape(BarShape::Pill));
+        assert_eq!(config.bar.radius, 16.);
+        assert!(config.bar.margin_top > 0);
+        state.update(&mut config, Msg::Num(Num::Height, 48.));
+        assert_eq!(config.bar.radius, 24.);
+        assert_eq!(BarShape::of(&config.bar), Some(BarShape::Pill));
+        assert_eq!(config.bar.border_edges, crate::config::BorderEdges::All);
+    }
+
+    #[test]
+    fn bar_radius_edits_are_bounded_by_height() {
+        let mut state = State::default();
+        let mut config = Config::default();
+        state.update(&mut config, Msg::Num(Num::Radius, 1000.));
+        assert_eq!(config.bar.radius, 16.);
+        state.update(&mut config, Msg::Num(Num::Radius, f32::NAN));
+        assert_eq!(config.bar.radius, 0.);
+    }
+
     #[test]
     fn page_search_filters_groups() {
         let pages =
@@ -1423,6 +1549,33 @@ mod tests {
 
         state.update(&mut config, Msg::Text(Field::ClockFormat, "%Q".into()));
         assert_eq!(config.clock.format, Config::default().clock.format);
+    }
+
+    #[test]
+    fn font_weight_edits_survive_switching_looks() {
+        use crate::config::{Look, TextWeight};
+
+        let mut state = State::default();
+        let mut config = Config::default();
+        assert_eq!(config.bar.text_weight(), TextWeight::Automatic);
+        state.update(
+            &mut config,
+            Msg::FontWeight(Look::Smooth, TextWeight::Light),
+        );
+        state.update(&mut config, Msg::FontWeight(Look::Pixel, TextWeight::Bold));
+        assert_eq!(config.bar.text_weight(), TextWeight::Light);
+        state.update(&mut config, Msg::Look(Look::Pixel));
+        assert_eq!(config.bar.text_weight(), TextWeight::Bold);
+        state.update(&mut config, Msg::Look(Look::Smooth));
+        assert_eq!(config.bar.text_weight(), TextWeight::Light);
+        state.update(
+            &mut config,
+            Msg::FontWeight(Look::Pixel, TextWeight::Automatic),
+        );
+        assert_eq!(config.bar.text_weight(), TextWeight::Light);
+        state.update(&mut config, Msg::Look(Look::Pixel));
+        assert_eq!(config.bar.text_weight(), TextWeight::Automatic);
+        assert_eq!(Config::parse(&config.to_toml()).unwrap(), config);
     }
 
     #[test]
@@ -1672,66 +1825,178 @@ mod tests {
         assert!(!state.drafts.contains_key(&Field::ClockFormat));
     }
 
+    fn items(widgets: &[Widget]) -> Vec<crate::config::BarItem> {
+        widgets.iter().copied().map(Into::into).collect()
+    }
+
+    fn widgets(items: &[crate::config::BarItem]) -> Vec<Widget> {
+        items.iter().map(|item| item.widget).collect()
+    }
+
+    #[test]
+    fn color_targets_map_to_messages() {
+        let c = Rgba([1, 2, 3, 4]);
+        assert!(matches!(
+            color_message(ColorTarget::Field(Field::Accent), c),
+            Msg::Text(Field::Accent, ref s) if s == "#01020304"
+        ));
+        assert!(matches!(
+            color_message(ColorTarget::Item(Section::Left, 2, ItemColor::Border), c),
+            Msg::Item(Section::Left, 2, ItemEdit::BorderColor(Some(x))) if x == c
+        ));
+        assert!(matches!(
+            color_message(ColorTarget::Item(Section::Right, 0, ItemColor::Icon), c),
+            Msg::Item(Section::Right, 0, ItemEdit::IconColor(Some(x))) if x == c
+        ));
+    }
+
+    #[test]
+    fn item_edits_apply_and_bound() {
+        let (mut state, mut config) = (State::default(), Config::default());
+        state.update(
+            &mut config,
+            Msg::Item(Section::Right, 0, ItemEdit::BorderWidth(9.)),
+        );
+        assert_eq!(config.bar.right[0].style.border_width, 4.);
+        state.update(
+            &mut config,
+            Msg::Item(
+                Section::Right,
+                0,
+                ItemEdit::IconColor(Some(Rgba([1, 2, 3, 4]))),
+            ),
+        );
+        assert_eq!(
+            config.bar.right[0].style.icon_color,
+            Some(Rgba([1, 2, 3, 4]))
+        );
+        let before = config.clone();
+        state.update(
+            &mut config,
+            Msg::Item(Section::Right, 999, ItemEdit::Icon("x".into())),
+        );
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn place_keeps_item_style() {
+        let (mut state, mut config) = (State::default(), Config::default());
+        state.update(
+            &mut config,
+            Msg::Item(Section::Right, 0, ItemEdit::Icon("star".into())),
+        );
+        let moved = config.bar.right[0].clone();
+        state.update(
+            &mut config,
+            Msg::Place((Section::Right, 0), (Section::Left, 0)),
+        );
+        assert_eq!(config.bar.left[0], moved);
+    }
+
+    #[test]
+    fn selection_clears_on_layout_change() {
+        let (mut state, mut config) = (State::default(), Config::default());
+        for msg in [
+            Msg::Remove(Section::Right, 0),
+            Msg::Place((Section::Right, 0), (Section::Left, 0)),
+            Msg::Insert(Section::Left, 0, BarItem::from(Widget::Clock)),
+        ] {
+            state.update(&mut config, Msg::Select(Some((Section::Right, 1))));
+            assert_eq!(state.selected(), Some((Section::Right, 1)));
+            state.update(&mut config, msg);
+            assert_eq!(state.selected(), None);
+        }
+    }
+
+    #[test]
+    fn device_choices_include_absent_saved_key() {
+        let choices = device_choices(&[], "F4:73");
+        assert_eq!(choices[0], (String::new(), "First available".into()));
+        assert_eq!(
+            choices.last().unwrap(),
+            &("F4:73".into(), "F4:73 (not connected)".into())
+        );
+        assert_eq!(device_choices(&[], "").len(), 1);
+    }
+
     #[test]
     fn edits_widget_sections() {
         let mut state = State::default();
         let mut config = Config::default();
-        config.bar.right = vec![Widget::Clock, Widget::Settings];
+        config.bar.right = items(&[Widget::Clock, Widget::Settings]);
         state.update(
             &mut config,
             Msg::Place((Section::Right, 0), (Section::Right, 2)),
         );
-        assert_eq!(config.bar.right, [Widget::Settings, Widget::Clock]);
+        assert_eq!(
+            widgets(&config.bar.right),
+            [Widget::Settings, Widget::Clock]
+        );
         state.update(
             &mut config,
             Msg::Place((Section::Right, 1), (Section::Right, 9)),
         );
-        assert_eq!(config.bar.right, [Widget::Settings, Widget::Clock]);
+        assert_eq!(
+            widgets(&config.bar.right),
+            [Widget::Settings, Widget::Clock]
+        );
         state.update(&mut config, Msg::Remove(Section::Right, 0));
-        state.update(&mut config, Msg::Add(Section::Left, Widget::Clock));
-        assert_eq!(config.bar.right, [Widget::Clock]);
-        assert_eq!(config.bar.left, [Widget::Workspaces, Widget::Clock]);
+        state.update(&mut config, Msg::Add(Section::Left, Widget::Clock.into()));
+        assert_eq!(widgets(&config.bar.right), [Widget::Clock]);
+        assert_eq!(
+            widgets(&config.bar.left),
+            [Widget::Workspaces, Widget::Clock]
+        );
     }
 
     #[test]
     fn places_dragged_widgets_and_ignores_hostile_indices() {
         let mut state = State::default();
         let mut config = Config::default();
-        config.bar.left = vec![Widget::Workspaces];
-        config.bar.right = vec![Widget::Clock, Widget::Battery, Widget::Power];
+        config.bar.left = items(&[Widget::Workspaces]);
+        config.bar.right = items(&[Widget::Clock, Widget::Battery, Widget::Power]);
         // Within a section, `at` is the slot before the drag lifted the item.
         state.update(
             &mut config,
             Msg::Place((Section::Right, 0), (Section::Right, 2)),
         );
         assert_eq!(
-            config.bar.right,
+            widgets(&config.bar.right),
             [Widget::Battery, Widget::Clock, Widget::Power]
         );
         state.update(
             &mut config,
             Msg::Place((Section::Right, 2), (Section::Left, 0)),
         );
-        assert_eq!(config.bar.left, [Widget::Power, Widget::Workspaces]);
-        assert_eq!(config.bar.right, [Widget::Battery, Widget::Clock]);
+        assert_eq!(
+            widgets(&config.bar.left),
+            [Widget::Power, Widget::Workspaces]
+        );
+        assert_eq!(widgets(&config.bar.right), [Widget::Battery, Widget::Clock]);
         state.update(
             &mut config,
             Msg::Place((Section::Right, 0), (Section::Center, usize::MAX)),
         );
-        assert_eq!(config.bar.center.last(), Some(&Widget::Battery));
+        assert_eq!(
+            config.bar.center.last().map(|item| item.widget),
+            Some(Widget::Battery)
+        );
         let before = config.bar.clone();
         state.update(
             &mut config,
             Msg::Place((Section::Left, 99), (Section::Right, 0)),
         );
         assert_eq!(config.bar, before);
-        state.update(&mut config, Msg::Insert(Section::Left, 1, Widget::Stats));
         state.update(
             &mut config,
-            Msg::Insert(Section::Left, usize::MAX, Widget::Capture),
+            Msg::Insert(Section::Left, 1, Widget::Stats.into()),
+        );
+        state.update(
+            &mut config,
+            Msg::Insert(Section::Left, usize::MAX, Widget::Capture.into()),
         );
         assert_eq!(
-            config.bar.left,
+            widgets(&config.bar.left),
             [
                 Widget::Power,
                 Widget::Stats,
@@ -2050,9 +2315,13 @@ mod tests {
         let mut state = State::default();
         let mut config = Config::default();
         assert_eq!(BarShape::of(&config.bar), Some(BarShape::Edge));
-        for shape in BarShape::ALL {
-            state.update(&mut config, Msg::Shape(shape));
-            assert_eq!(BarShape::of(&config.bar), Some(shape));
+        for height in [24, 32, 56] {
+            state.update(&mut config, Msg::Num(Num::Height, height as f32));
+            for shape in BarShape::ALL {
+                state.update(&mut config, Msg::Shape(shape));
+                assert_eq!(BarShape::of(&config.bar), Some(shape));
+                assert_eq!(Config::parse(&config.to_toml()).unwrap(), config);
+            }
         }
         state.update(&mut config, Msg::Num(Num::Radius, 3.));
         assert_eq!(BarShape::of(&config.bar), None);

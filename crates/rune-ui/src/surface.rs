@@ -11,6 +11,8 @@ pub enum Surface {
     Popups,
     Osd,
     Settings,
+    /// The polkit password dialog over a dimmed screen.
+    Polkit,
 }
 
 impl Surface {
@@ -23,6 +25,7 @@ impl Surface {
             Self::Popups => "rune-notifications",
             Self::Osd => "rune-osd",
             Self::Settings => "rune-settings",
+            Self::Polkit => "rune-polkit",
         }
     }
 }

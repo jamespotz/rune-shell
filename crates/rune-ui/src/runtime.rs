@@ -188,11 +188,11 @@ mod tests {
                 let (actions, _) = tokio::sync::mpsc::unbounded_channel();
                 let (_, events) = tokio::sync::mpsc::unbounded_channel();
                 let mut config = Config::default();
-                config.bar.left = vec![crate::config::Widget::Workspaces];
-                config.bar.center = vec![crate::config::Widget::WindowTitle];
+                config.bar.left = vec![crate::config::Widget::Workspaces.into()];
+                config.bar.center = vec![crate::config::Widget::WindowTitle.into()];
                 config.bar.right = vec![
-                    crate::config::Widget::Clock,
-                    crate::config::Widget::Settings,
+                    crate::config::Widget::Clock.into(),
+                    crate::config::Widget::Settings.into(),
                 ];
                 let (shell, _) = crate::App::new(config, events, actions, false);
                 cx.new(|_| shell)

@@ -63,6 +63,13 @@ pub(crate) fn options(
             None,
             KeyboardInteractivity::None,
         ),
+        // -1 covers the bar too: nothing else takes input while polkit asks.
+        Surface::Polkit => (
+            Layer::Overlay,
+            Anchor::all(),
+            Some(px(-1.)),
+            KeyboardInteractivity::Exclusive,
+        ),
     };
     WindowOptions {
         titlebar: None,
@@ -256,6 +263,22 @@ mod tests {
             assert_eq!(layer.exclusive_zone, Some(px(-1.)));
             assert_eq!(layer.margin.map(|m| m.0), Some(px(40.)));
         }
+    }
+
+    #[test]
+    fn polkit_covers_the_screen_and_takes_the_keyboard() {
+        let WindowKind::LayerShell(layer) = options(&Surface::Polkit, (0, 0), None, false, 0).kind
+        else {
+            panic!("expected layer shell")
+        };
+        assert_eq!(layer.namespace, "rune-polkit");
+        assert_eq!(layer.layer, Layer::Overlay);
+        assert_eq!(layer.anchor, Anchor::all());
+        assert_eq!(layer.exclusive_zone, Some(px(-1.)));
+        assert_eq!(
+            layer.keyboard_interactivity,
+            KeyboardInteractivity::Exclusive
+        );
     }
 
     fn options_for_settings() -> gpui::layer_shell::LayerShellOptions {

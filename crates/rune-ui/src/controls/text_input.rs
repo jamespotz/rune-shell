@@ -93,6 +93,10 @@ impl TextInput {
         }
     }
 
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
     pub fn set_password(&mut self, password: bool, cx: &mut Context<Self>) {
         self.password = password;
         cx.notify();

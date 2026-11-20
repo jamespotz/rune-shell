@@ -1032,6 +1032,209 @@ async fn read_battery(conn: &Connection) -> zbus::Result<Option<Battery>> {
     }))
 }
 
+/// What a UPower peripheral is, from its `Type` property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeripheralKind {
+    Mouse,
+    Keyboard,
+    Phone,
+    Tablet,
+    GamingInput,
+    Pen,
+    Touchpad,
+    Headset,
+    Speakers,
+    Headphones,
+    Other,
+}
+
+impl PeripheralKind {
+    /// `None` for mains power, the laptop battery and UPSes, which are not peripherals.
+    pub fn from_upower(kind: u32) -> Option<Self> {
+        Some(match kind {
+            1..=3 => return None,
+            5 => Self::Mouse,
+            6 => Self::Keyboard,
+            8 => Self::Phone,
+            10 => Self::Tablet,
+            12 => Self::GamingInput,
+            13 => Self::Pen,
+            14 => Self::Touchpad,
+            17 => Self::Headset,
+            18 => Self::Speakers,
+            19 => Self::Headphones,
+            _ => Self::Other,
+        })
+    }
+
+    /// Material Symbols name for the automatic icon.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Mouse => "mouse",
+            Self::Keyboard => "keyboard",
+            Self::Phone => "smartphone",
+            Self::Tablet => "tablet",
+            Self::GamingInput => "sports_esports",
+            Self::Pen => "stylus",
+            Self::Touchpad => "touchpad_mouse",
+            Self::Headset => "headset_mic",
+            Self::Speakers => "speaker",
+            Self::Headphones => "headphones",
+            Self::Other => "battery_full",
+        }
+    }
+}
+
+/// A wireless device with a battery, as UPower reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Peripheral {
+    /// Stable identity: the serial (a MAC address over Bluetooth), else the native path.
+    pub key: String,
+    pub name: String,
+    pub kind: PeripheralKind,
+    /// 0-100.
+    pub percent: f64,
+    pub charging: bool,
+}
+
+pub const MAX_PERIPHERALS: usize = 32;
+const MAX_PERIPHERAL_CHARS: usize = 128;
+
+/// Builds a peripheral from UPower device properties, bounding every value.
+pub fn peripheral_from(
+    kind: u32,
+    present: bool,
+    serial: &str,
+    native_path: &str,
+    model: &str,
+    percent: f64,
+    state: u32,
+) -> Option<Peripheral> {
+    let kind = PeripheralKind::from_upower(kind)?;
+    let key = [serial, native_path].into_iter().find(|k| !k.is_empty())?;
+    if !present {
+        return None;
+    }
+    let cut = |text: &str| text.chars().take(MAX_PERIPHERAL_CHARS).collect::<String>();
+    let name = if model.is_empty() {
+        format!("{kind:?}")
+    } else {
+        cut(model)
+    };
+    Some(Peripheral {
+        key: cut(key),
+        name,
+        kind,
+        percent: if percent.is_finite() {
+            percent.clamp(0.0, 100.0)
+        } else {
+            0.0
+        },
+        charging: matches!(state, 1 | 5),
+    })
+}
+
+/// Watches UPower's peripheral batteries. Empty when there are none or UPower is missing.
+pub fn spawn_peripherals(conn: Connection) -> watch::Receiver<Vec<Peripheral>> {
+    let (tx, rx) = watch::channel(Vec::new());
+    tokio::spawn(async move {
+        let rule =
+            format!("type='signal',sender='{UPOWER}',path_namespace='/org/freedesktop/UPower'");
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let mut events =
+                match MessageStream::for_match_rule(rule.as_str(), &conn, Some(64)).await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        tracing::warn!("UPower peripherals: subscribing to {rule:?} failed: {e}");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        continue;
+                    }
+                };
+            let mut verify = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                match read_peripherals(&conn).await {
+                    Ok(list) => {
+                        backoff = Duration::from_secs(1);
+                        tx.send_if_modified(|current| {
+                            let changed = *current != list;
+                            if changed {
+                                *current = list;
+                            }
+                            changed
+                        });
+                    }
+                    Err(e) => tracing::warn!("UPower peripherals: reading devices failed: {e}"),
+                }
+                tokio::select! {
+                    event = events.next() => match event {
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            tracing::warn!("UPower peripherals: signal stream failed: {e}");
+                            break;
+                        }
+                        None => {
+                            tracing::warn!("UPower peripherals: signal stream closed");
+                            break;
+                        }
+                    },
+                    _ = verify.tick() => {}
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(30));
+        }
+    });
+    rx
+}
+
+async fn read_peripherals(conn: &Connection) -> zbus::Result<Vec<Peripheral>> {
+    let upower = Proxy::new(conn, UPOWER, "/org/freedesktop/UPower", UPOWER).await?;
+    let paths: Vec<OwnedObjectPath> = upower.call("EnumerateDevices", &()).await?;
+    let mut list = Vec::new();
+    for path in paths {
+        if list.len() >= MAX_PERIPHERALS {
+            break;
+        }
+        let props = Proxy::new(
+            conn,
+            UPOWER,
+            path.as_str(),
+            "org.freedesktop.DBus.Properties",
+        )
+        .await?;
+        let Ok(map): zbus::Result<HashMap<String, OwnedValue>> = props
+            .call("GetAll", &("org.freedesktop.UPower.Device",))
+            .await
+        else {
+            continue;
+        };
+        let get = |k: &str| map.get(k).and_then(|v| v.try_clone().ok());
+        let number = |k: &str| get(k).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+        let text = |k: &str| {
+            get(k)
+                .and_then(|v| String::try_from(v).ok())
+                .unwrap_or_default()
+        };
+        let peripheral = peripheral_from(
+            number("Type"),
+            get("IsPresent")
+                .and_then(|v| bool::try_from(v).ok())
+                .unwrap_or(false),
+            &text("Serial"),
+            &text("NativePath"),
+            &text("Model"),
+            get("Percentage")
+                .and_then(|v| f64::try_from(v).ok())
+                .unwrap_or(0.0),
+            number("State"),
+        );
+        list.extend(peripheral);
+    }
+    Ok(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,6 +1249,59 @@ mod tests {
             device: "/d".into(),
             ap: format!("/ap/{strength}"),
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "reads the real system bus; needs UPower"]
+    async fn reads_upower_peripherals_live() {
+        let conn = Connection::system().await.unwrap();
+        let list = read_peripherals(&conn).await.unwrap();
+        assert!(list.len() <= MAX_PERIPHERALS);
+        let mut feed = spawn_peripherals(conn);
+        tokio::time::timeout(Duration::from_secs(5), feed.changed())
+            .await
+            .ok();
+        assert_eq!(*feed.borrow(), list);
+    }
+
+    #[test]
+    fn maps_upower_peripheral_kinds() {
+        assert_eq!(PeripheralKind::from_upower(2), None);
+        assert_eq!(PeripheralKind::from_upower(5), Some(PeripheralKind::Mouse));
+        assert_eq!(
+            PeripheralKind::from_upower(17).map(PeripheralKind::icon),
+            Some("headset_mic")
+        );
+        assert_eq!(
+            PeripheralKind::from_upower(u32::MAX),
+            Some(PeripheralKind::Other)
+        );
+    }
+
+    #[test]
+    fn bounds_hostile_peripheral_values() {
+        let long = "m".repeat(1000);
+        let p = peripheral_from(6, true, "", "/dev/hid", &long, f64::NAN, 1).unwrap();
+        assert_eq!(
+            (p.key.as_str(), p.percent, p.charging),
+            ("/dev/hid", 0.0, true)
+        );
+        assert_eq!(p.name.chars().count(), 128);
+        assert_eq!(
+            peripheral_from(6, true, "AA", "", "K", 250.0, 2)
+                .unwrap()
+                .percent,
+            100.0
+        );
+        assert!(peripheral_from(6, false, "AA", "", "K", 50.0, 2).is_none());
+        assert!(peripheral_from(6, true, "", "", "K", 50.0, 2).is_none());
+        assert!(peripheral_from(2, true, "BAT0", "", "", 50.0, 2).is_none());
+        assert_eq!(
+            peripheral_from(19, true, "AA", "", "", 50.0, 2)
+                .unwrap()
+                .name,
+            "Headphones"
+        );
     }
 
     #[test]

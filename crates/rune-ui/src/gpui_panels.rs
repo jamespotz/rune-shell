@@ -301,7 +301,7 @@ impl PanelView {
                 crate::gpui_widgets::heading(div())
                     .truncate()
                     .text_size(px(15.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .child(if media.title.is_empty() {
                         media.identity.clone()
                     } else {
@@ -549,7 +549,9 @@ impl PanelView {
                         div()
                             .px(px(2.))
                             .pb(px(6.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                             .child("Display"),
                     )
                     .child(self.brightness.clone()),
@@ -562,7 +564,9 @@ impl PanelView {
                         div()
                             .px(px(2.))
                             .pb(px(6.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                             .child("Sound"),
                     )
                     .child(self.volume.clone()),
@@ -575,7 +579,9 @@ impl PanelView {
                         div()
                             .px(px(2.))
                             .pb(px(6.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                             .child("Microphone"),
                     )
                     .child(self.mic_volume.clone()),
@@ -607,7 +613,9 @@ impl PanelView {
                             .child(
                                 div()
                                     .truncate()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(crate::gpui_widgets::font_weight(
+                                        gpui::FontWeight::SEMIBOLD,
+                                    ))
                                     .child(media.title.clone()),
                             )
                             .child(crate::gpui_widgets::muted(c, media.artist.clone()).truncate()),
@@ -657,7 +665,7 @@ fn quick_tile(
                 .min_w_0()
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                         .text_size(px(12.))
                         .child(label.to_owned()),
                 )
@@ -755,7 +763,7 @@ fn title_row(app: &Shell, title: &str, trailing: Option<AnyElement>) -> gpui::Di
         .px(px(6.))
         .pt(px(2.))
         .pb(px(4.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
         .child(title.to_owned())
         .children(trailing)
         .text_color(color(app.config.colors.foreground))
@@ -1090,7 +1098,7 @@ fn system(app: &Shell) -> AnyElement {
             Some(
                 div()
                     .text_color(color(app.config.colors.muted))
-                    .font_weight(gpui::FontWeight::NORMAL)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
                     .child(format!("Up {}", uptime(stats.uptime)))
                     .into_any_element(),
             ),
@@ -1131,7 +1139,7 @@ fn updates(app: &Shell, dispatch: &Dispatch) -> AnyElement {
         Some(
             div()
                 .text_color(color(c.colors.muted))
-                .font_weight(gpui::FontWeight::NORMAL)
+                .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
                 .child(status)
                 .into_any_element(),
         ),
@@ -1151,7 +1159,7 @@ fn updates(app: &Shell, dispatch: &Dispatch) -> AnyElement {
         if pending {
             count = count
                 .text_color(color(c.colors.foreground))
-                .font_weight(gpui::FontWeight::SEMIBOLD);
+                .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD));
         } else if source.pending.is_err() {
             count = count.text_color(color(c.colors.urgent));
         }
@@ -1216,15 +1224,28 @@ fn updates(app: &Shell, dispatch: &Dispatch) -> AnyElement {
 fn update_button(
     app: &Shell,
     id: &'static str,
-    (glyph, label): (&str, &str),
+    label: (&str, &str),
     primary: bool,
     message: Option<Message>,
     dispatch: &Dispatch,
 ) -> AnyElement {
+    let button = action_button(&app.config, id, label, primary, message.is_some());
+    match message {
+        Some(message) => clickable(button, message, dispatch),
+        None => button.into_any_element(),
+    }
+}
+
+/// A solid action button in either look, without a click handler.
+pub(crate) fn action_button(
+    c: &crate::Config,
+    id: &'static str,
+    (glyph, label): (&str, &str),
+    primary: bool,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     use crate::gpui_widgets::{corner, frame};
-    let c = &app.config;
     let fg = color(c.colors.foreground);
-    let enabled = message.is_some();
     let (bg, ink) = if primary {
         (
             gpui::Hsla::from(color(c.colors.accent)),
@@ -1233,8 +1254,8 @@ fn update_button(
     } else {
         (gpui::Hsla::from(fg).opacity(0.09), fg)
     };
-    let base = frame(row()).bg(bg);
-    let button = base
+    frame(row())
+        .bg(bg)
         .id(id)
         .flex_1()
         .justify_center()
@@ -1242,7 +1263,9 @@ fn update_button(
         .h(px(34.))
         .rounded(corner(10.))
         .text_color(ink)
-        .when(primary, |b| b.font_weight(gpui::FontWeight::SEMIBOLD))
+        .when(primary, |b| {
+            b.font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
+        })
         .when(!enabled, |b| b.opacity(0.45))
         .when(enabled, |b| {
             b.cursor_pointer()
@@ -1250,11 +1273,7 @@ fn update_button(
                 .active(|style| style.opacity(0.7))
         })
         .child(icon(c, glyph, 16.))
-        .child(label.to_owned());
-    match message {
-        Some(message) => clickable(button, message, dispatch),
-        None => button.into_any_element(),
-    }
+        .child(label.to_owned())
 }
 
 /// A metric tile: icon, label and current value over its live graph.
@@ -1285,14 +1304,16 @@ fn stat_card(
                         .child(
                             crate::gpui_widgets::heading(div())
                                 .text_size(px(11.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(crate::gpui_widgets::font_weight(
+                                    gpui::FontWeight::SEMIBOLD,
+                                ))
                                 .child(label.to_owned()),
                         ),
                 )
                 .child(
                     crate::gpui_widgets::heading(div())
                         .text_size(px(15.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                         .child(value),
                 ),
         )
@@ -1375,7 +1396,7 @@ fn battery(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                 Some(
                     div()
                         .text_color(color(c.colors.muted))
-                        .font_weight(gpui::FontWeight::NORMAL)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
                         .child(format!("{:.0}%", battery.percent))
                         .into_any_element(),
                 ),
@@ -1407,10 +1428,41 @@ fn battery(app: &Shell, dispatch: &Dispatch) -> AnyElement {
             );
         }
         None => {
-            body = body
-                .child(title_row(app, "Battery", None))
-                .child(unavailable(app, "Battery"));
+            body = body.child(title_row(app, "Battery", None));
+            if app.snapshot.peripherals.is_empty() {
+                body = body.child(unavailable(app, "Battery"));
+            }
         }
+    }
+    if !app.snapshot.peripherals.is_empty() {
+        let mut devices = column().gap(px(4.)).child(
+            div()
+                .text_size(px(11.))
+                .text_color(color(c.colors.muted))
+                .child("Devices"),
+        );
+        for device in &app.snapshot.peripherals {
+            devices = devices.child(
+                row()
+                    .id(gpui::SharedString::from(format!("device:{}", device.key)))
+                    .w_full()
+                    .gap(px(8.))
+                    .child(crate::gpui_widgets::icon(c, device.kind.icon(), 16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(device.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(color(c.colors.muted))
+                            .child(format!("{:.0}%", device.percent)),
+                    ),
+            );
+        }
+        body = body.child(crate::gpui_widgets::module(c).w_full().child(devices));
     }
     body.child(settings_link(
         app,
@@ -1505,7 +1557,7 @@ fn capture(app: &Shell, dispatch: &Dispatch) -> AnyElement {
             } else {
                 item.bg(fg.opacity(0.16))
                     .text_color(fg)
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
             };
         }
         modes = modes.child(clickable(item, Message::CaptureMode(item_mode), dispatch));
@@ -1675,12 +1727,18 @@ fn weather(app: &Shell) -> AnyElement {
             .child(
                 column()
                     .gap_0()
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(place))
+                    .child(
+                        div()
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
+                            .child(place),
+                    )
                     .child(
                         div()
                             .text_size(px(40.))
                             .line_height(px(46.))
-                            .font_weight(gpui::FontWeight::LIGHT)
+                            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::LIGHT))
                             .child(format!("{:.0}°", current.temperature)),
                     ),
             )
@@ -1793,7 +1851,7 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
             .px(px(6.))
             .child(
                 div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .child(month.format("%B %Y").to_string()),
             )
             .child(
@@ -1826,7 +1884,7 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                     .flex()
                     .justify_center()
                     .text_size(px(10.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .text_color(color(c.colors.muted))
                     .child(day)
             })),
@@ -1851,7 +1909,7 @@ fn calendar(app: &Shell, dispatch: &Dispatch) -> AnyElement {
                 number = number
                     .bg(color(c.colors.urgent))
                     .text_color(color(c.colors.on_accent))
-                    .font_weight(gpui::FontWeight::BOLD);
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::BOLD));
             } else if day == app.cal_day {
                 number = number.bg(fg.opacity(0.18));
             }
@@ -2005,7 +2063,7 @@ pub(crate) fn notification(
         .child(
             crate::gpui_widgets::heading(div())
                 .line_height(px(19.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::MEDIUM))
                 .truncate()
                 .child(crate::notify::cut(&notification.summary, 48)),
         )
@@ -2059,7 +2117,7 @@ pub(crate) fn notification(
             .px(px(8.))
             .rounded(crate::gpui_widgets::corner(4.))
             .text_size(px(12.))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::MEDIUM))
             .when(primary, |action| {
                 action
                     .bg(color(c.colors.foreground))
@@ -2158,7 +2216,7 @@ fn notifications(app: &Shell, dispatch: &Dispatch, images: &mut Images) -> AnyEl
                 ))
                 .child(
                     menu_row("clear-notifications", c, None, "Clear", None)
-                        .font_weight(gpui::FontWeight::NORMAL)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
                         .on_click({
                             let dispatch = dispatch.clone();
                             move |_, window, cx| dispatch(Message::NotifClear, window, cx)
@@ -2321,6 +2379,13 @@ pub(crate) mod tests {
                     uptime: Duration::from_secs(3 * 3600 + 120),
                 }));
         }
+        shell.snapshot.peripherals = vec![rune_services::system::Peripheral {
+            key: "F4:73:35:00:00:01".into(),
+            name: "MX Master 3S".into(),
+            kind: rune_services::system::PeripheralKind::Mouse,
+            percent: 12.,
+            charging: true,
+        }];
         shell.snapshot.battery = Some(rune_services::system::Battery {
             percent: 70.,
             charging: false,

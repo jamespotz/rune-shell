@@ -8,7 +8,7 @@ use rune_services::{
     apps, audio, bluetooth, calendar, capture, clipboard, clock, equalizer,
     hyprland::Hyprland,
     icons::IconIndex,
-    lock, media, notifications, stats, system,
+    lock, media, notifications, polkit, stats, system,
     theme::{self, Variant, backup::Backup, export},
     tray, updates, visualizer, wallpaper, weather,
 };
@@ -207,6 +207,14 @@ fn daemon() -> Result<()> {
     forward(volume.clone(), ui.clone(), UiEvent::Volume);
     forward(audio_devices, ui.clone(), UiEvent::AudioDevices);
     let system_conn = rt.block_on(zbus::Connection::system()).ok();
+    let polkit_cmds = match &system_conn {
+        Some(system) => {
+            let (requests, cmds) = rt.block_on(polkit::spawn(system.clone()));
+            forward(requests, ui.clone(), UiEvent::Polkit);
+            Some(cmds)
+        }
+        None => None,
+    };
     if let Some(system) = &system_conn {
         let network = system::spawn_network(system.clone());
         feeds.network = Some(network.clone());
@@ -215,6 +223,11 @@ fn daemon() -> Result<()> {
             system::spawn_battery(system.clone()),
             ui.clone(),
             UiEvent::Battery,
+        );
+        forward(
+            system::spawn_peripherals(system.clone()),
+            ui.clone(),
+            UiEvent::Peripherals,
         );
         forward(
             system::spawn_power_profile(system.clone()),
@@ -245,6 +258,7 @@ fn daemon() -> Result<()> {
     let (recording, record_cmds) = capture::spawn_recorder(hypr.clone(), capture_conn.clone());
     forward(recording, ui.clone(), UiEvent::Recording);
     let preview = hypr.clone().map(|h| spawn_preview(h, ui.clone()));
+    let borders = hypr.clone().map(spawn_border_colors);
     let actions_ui = ui.clone();
     let media_handle = media;
     let eq = equalizer.clone();
@@ -265,6 +279,11 @@ fn daemon() -> Result<()> {
                 Action::HyprPreview(lua) => {
                     if let Some(preview) = &preview {
                         preview.send_replace(lua);
+                    }
+                }
+                Action::Hypr(rune_services::hyprland::Command::BorderColors(active, inactive)) => {
+                    if let Some(borders) = &borders {
+                        borders.send_replace(Some((active, inactive)));
                     }
                 }
                 Action::Hypr(cmd) => {
@@ -307,6 +326,13 @@ fn daemon() -> Result<()> {
                 }
                 Action::Bluetooth(cmd) => {
                     let _ = bt_cmds.send(cmd); // the service lives as long as the runtime
+                }
+                Action::Polkit(cmd) => {
+                    if let Some(cmds) = &polkit_cmds
+                        && cmds.send(cmd).is_err()
+                    {
+                        warn!("polkit: agent stopped; dropping a dialog response");
+                    }
                 }
                 Action::Updates(cmd) => {
                     let _ = updates_cmds.send(cmd); // the service lives as long as the runtime
@@ -476,6 +502,24 @@ fn spawn_preview(hypr: Hyprland, ui: UnboundedSender<UiEvent>) -> watch::Sender<
                 return;
             }
         }
+    });
+    tx
+}
+
+/// Applies window border colours one at a time; a colour-picker drag collapses to its latest value.
+fn spawn_border_colors(hypr: Hyprland) -> watch::Sender<Option<([u8; 4], [u8; 4])>> {
+    let (tx, mut rx) = watch::channel(None);
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let Some((active, inactive)) = *rx.borrow_and_update() else {
+                continue;
+            };
+            let command = rune_services::hyprland::Command::BorderColors(active, inactive);
+            if let Err(e) = hypr.handle(command, |_| {}).await {
+                warn!("hyprland border colours: {e}");
+            }
+        }
+        warn!("hyprland border colours: action channel closed, stopping");
     });
     tx
 }

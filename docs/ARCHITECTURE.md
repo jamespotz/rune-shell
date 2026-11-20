@@ -108,6 +108,31 @@ escaped as Pango markup because track titles come from D-Bus. Every text value
 written to the file is stripped of control characters with `#` escaped, so
 stored config can't add hyprlang lines.
 
+Rune is the polkit authentication agent for its login session (`polkit.rs`). It
+registers on the system bus for `XDG_SESSION_ID`, or logind's display session
+when that is unset, and serves one request at a time. Only calls from the owner of
+`org.freedesktop.PolicyKit1` are accepted, so other bus clients can't raise a
+fake dialog. Rune never checks passwords: the typed response goes to the setuid
+`polkit-agent-helper-1`, which runs PAM and reports to polkitd itself. The helper
+starts on the first submit, so PAM modules that act before a prompt (fingerprint)
+wait for Enter. Responses travel as `polkit::Secret`, whose `Debug` is redacted.
+The dialog is the `rune-polkit` surface: full screen, exclusive keyboard, over the
+bar. If another agent already serves the session, registration fails and Rune's
+dialog stays off.
+
+Wireless peripheral batteries come from UPower: `system::spawn_peripherals` lists
+devices with `EnumerateDevices`, re-reads on any UPower signal and every 60 s to
+catch missed signals, and resubscribes with 1–30 s backoff when the stream ends.
+Results are bounded (32 devices, 128-char strings, 0–100 %) and reach the UI as
+`UiEvent::Peripherals`. Each `device_battery` bar item picks one by `Peripheral::key`.
+
+Bar lists hold `BarItem`s: a widget plus its own `WidgetStyle` (icon, icon colour,
+border, radius) and, for device batteries, a device key. A plain widget name still
+parses and default items serialize back to names. Settings → Menu Bar selects an
+item to edit it; its colours, like every colour in Settings, open the
+`controls::color_picker` popover, which reports through the same settings
+messages as the hex fields.
+
 Calendar, notifications, tray, Bluetooth, audio, NetworkManager, UPower, weather,
 capture, wallpaper and theme exports remain service responsibilities. Optional
 backends publish unavailable states so the corresponding controls can hide or

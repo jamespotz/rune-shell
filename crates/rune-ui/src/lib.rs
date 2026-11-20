@@ -11,6 +11,7 @@ mod gpui_images;
 mod gpui_notch;
 mod gpui_overlays;
 mod gpui_panels;
+mod gpui_polkit;
 mod gpui_surfaces;
 mod gpui_widgets;
 mod outputs;
@@ -92,6 +93,7 @@ pub(crate) enum Message {
     /// Open, switch to, or close a panel (a bar widget was clicked).
     Toggle(Panel),
     Updates(rune_services::updates::Command),
+    Polkit(rune_services::polkit::Command),
     MediaControl(Control),
     OpenSettingsPage(settings::Page),
     WifiDropdownPick(usize),
@@ -289,6 +291,7 @@ impl App {
                 | UiEvent::Volume(_)
                 | UiEvent::Network(_)
                 | UiEvent::Battery(_)
+                | UiEvent::Peripherals(_)
                 | UiEvent::Stats(_)
                 | UiEvent::Updates(_)
                 | UiEvent::Recording(_)
@@ -678,12 +681,36 @@ impl App {
                 self.send(Action::Updates(cmd));
                 Effects::none()
             }
+            Message::Ui(UiEvent::Polkit(request)) => {
+                let open = request.is_some();
+                self.snapshot.polkit = request;
+                if open {
+                    self.surfaces.open(
+                        Surface::Polkit,
+                        WindowSpec {
+                            size: Some((0, 0)),
+                            output_option: OutputOption::Active,
+                            ..Default::default()
+                        },
+                    )
+                } else {
+                    self.surfaces.close(&Surface::Polkit)
+                }
+            }
+            Message::Polkit(command) => {
+                self.send(Action::Polkit(command));
+                Effects::none()
+            }
             Message::Ui(UiEvent::Updates(u)) => {
                 self.snapshot.updates = u;
                 Effects::none()
             }
             Message::Ui(UiEvent::Battery(b)) => {
                 self.snapshot.battery = b;
+                Effects::none()
+            }
+            Message::Ui(UiEvent::Peripherals(list)) => {
+                self.snapshot.peripherals = list;
                 Effects::none()
             }
             Message::SeekDrag(secs) => {
@@ -1050,7 +1077,8 @@ impl App {
                 self.send_border_colors(&config.colors);
             }
         }
-        if config.colors != self.config.colors {
+        let (new, old) = (&config.colors, &self.config.colors);
+        if (new.accent, new.muted) != (old.accent, old.muted) {
             self.send_border_colors(&config.colors);
         }
         self.config = config;
@@ -1597,6 +1625,34 @@ mod tests {
     }
 
     #[test]
+    fn only_border_colour_edits_reach_hyprland() {
+        let (mut app, mut rx) = test_app();
+        while rx.try_recv().is_ok() {}
+        let border_updates = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Action>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|action| {
+                    matches!(
+                        action,
+                        Action::Hypr(rune_services::hyprland::Command::BorderColors(..))
+                    )
+                })
+                .count()
+        };
+        for field in [settings::Field::Background, settings::Field::Foreground] {
+            let _ = app.update(Message::Settings(settings::Msg::Text(
+                field,
+                "#123456".into(),
+            )));
+        }
+        assert_eq!(border_updates(&mut rx), 0);
+        let _ = app.update(Message::Settings(settings::Msg::Text(
+            settings::Field::Accent,
+            "#123456".into(),
+        )));
+        assert_eq!(border_updates(&mut rx), 1);
+    }
+
+    #[test]
     fn microphone_slider_routes_bounded_values_and_ignores_invalid_input() {
         let (mut app, mut rx) = test_app();
         while rx.try_recv().is_ok() {}
@@ -1801,6 +1857,26 @@ mod tests {
             gpui::px(400.),
         )));
         assert_eq!(app.surfaces.desired[&Surface::Panel].margin, None);
+    }
+
+    #[test]
+    fn polkit_requests_open_the_dialog_and_relay_answers() {
+        use rune_services::polkit::{Command, Request};
+        let (mut app, mut received) = test_app();
+        app.update(Message::Ui(UiEvent::Polkit(Some(Request {
+            cookie: "c1".into(),
+            users: vec!["ana".into()],
+            ..Request::default()
+        }))));
+        assert!(app.surfaces.is_open(&Surface::Polkit));
+        while received.try_recv().is_ok() {}
+        let cancel = Command::Cancel {
+            cookie: "c1".into(),
+        };
+        app.update(Message::Polkit(cancel.clone()));
+        assert_eq!(received.try_recv().ok(), Some(Action::Polkit(cancel)));
+        app.update(Message::Ui(UiEvent::Polkit(None)));
+        assert!(!app.surfaces.is_open(&Surface::Polkit));
     }
 
     #[test]

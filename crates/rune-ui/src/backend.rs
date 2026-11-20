@@ -98,7 +98,7 @@ fn dispatch(shell: Entity<Shell>, backend: Shared, message: Message, cx: &mut gp
 }
 fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
     let bar = &shell.read(cx).config.bar;
-    crate::gpui_widgets::set_look(bar.look, bar.pixel_font);
+    crate::gpui_widgets::set_look(bar);
     let reduce = shell.read(cx).config.animations.duration().is_zero();
     if cx.reduce_motion() != reduce {
         cx.set_reduce_motion(reduce);
@@ -129,6 +129,7 @@ fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
         Surface::Settings => 3,
         Surface::Popups => 4,
         Surface::Osd => 5,
+        Surface::Polkit => 6,
     });
     for (surface, spec) in ordered {
         let display = match &spec.output_option {
@@ -237,6 +238,15 @@ fn reconcile(shell: Entity<Shell>, backend: Shared, cx: &mut gpui::App) {
                             crate::settings::gpui_view::SettingsView::new(
                                 view_shell, callback, window, cx,
                             )
+                        })
+                    })
+            }
+            Surface::Polkit => {
+                state
+                    .windows
+                    .open(surface.clone(), options, cx, move |window, cx| {
+                        cx.new(|cx| {
+                            crate::gpui_polkit::PolkitView::new(view_shell, callback, window, cx)
                         })
                     })
             }

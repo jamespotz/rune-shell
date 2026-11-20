@@ -6,7 +6,7 @@ use rune_services::{
     hyprland::HyprState,
     media::Media,
     notifications,
-    system::{Battery, Network, PowerProfile},
+    system::{Battery, Network, Peripheral, PowerProfile},
     tray::TrayItem,
     weather::Weather,
 };
@@ -31,9 +31,11 @@ pub(crate) struct Snapshot {
     pub stats_history: std::collections::VecDeque<rune_services::stats::Stats>,
     pub network: Option<Network>,
     pub battery: Option<Battery>,
+    pub peripherals: Vec<Peripheral>,
     pub brightness: Option<u8>,
     pub calendar: cal::State,
     pub updates: rune_services::updates::Updates,
+    pub polkit: Option<rune_services::polkit::Request>,
 }
 
 impl Default for Snapshot {
@@ -57,9 +59,11 @@ impl Default for Snapshot {
             stats_history: std::collections::VecDeque::with_capacity(STATS_HISTORY),
             network: None,
             battery: None,
+            peripherals: Vec::new(),
             brightness: None,
             calendar: cal::State::default(),
             updates: rune_services::updates::Updates::default(),
+            polkit: None,
         }
     }
 }

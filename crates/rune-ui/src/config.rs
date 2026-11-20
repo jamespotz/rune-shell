@@ -113,10 +113,12 @@ pub enum Widget {
     Power,
     /// Screenshots, recording and text capture; the recording timer while recording.
     Capture,
+    /// Battery of one wireless peripheral (mouse, keyboard, headset...) from UPower.
+    DeviceBattery,
 }
 
 impl Widget {
-    pub const ALL: [Widget; 17] = [
+    pub const ALL: [Widget; 18] = [
         Widget::Workspaces,
         Widget::WindowTitle,
         Widget::Clock,
@@ -133,8 +135,30 @@ impl Widget {
         Widget::QuickSettings,
         Widget::Power,
         Widget::Capture,
+        Widget::DeviceBattery,
         Widget::Settings,
     ];
+}
+
+/// Which icon settings a widget honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconSupport {
+    /// One glyph: both a custom icon and an icon colour apply.
+    Full,
+    /// Several glyphs: only the colour applies.
+    ColorOnly,
+    /// No glyphs of its own.
+    None,
+}
+
+impl Widget {
+    pub fn icon_support(self) -> IconSupport {
+        match self {
+            Widget::Workspaces | Widget::WindowTitle | Widget::Tray => IconSupport::None,
+            Widget::Stats => IconSupport::ColorOnly,
+            _ => IconSupport::Full,
+        }
+    }
 }
 
 impl std::fmt::Display for Widget {
@@ -157,7 +181,142 @@ impl std::fmt::Display for Widget {
             Widget::QuickSettings => "Quick settings",
             Widget::Power => "Power menu",
             Widget::Capture => "Capture",
+            Widget::DeviceBattery => "Device battery",
         })
+    }
+}
+
+/// Per-placement look of a bar widget. Every field defaults to the shared bar style.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WidgetStyle {
+    /// Icon name replacing the automatic one; empty keeps it automatic.
+    pub icon: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<Rgba>,
+    /// Outline width; 0 turns it off.
+    pub border_width: f32,
+    /// Outline colour; unset uses the text colour at 20 % opacity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<Rgba>,
+    /// Corner radius; unset keeps the bar's default item radius.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+}
+
+impl WidgetStyle {
+    pub const MAX_BORDER_WIDTH: f32 = 4.0;
+    const MAX_ICON_CHARS: usize = 64;
+
+    fn sanitize(&mut self, max_radius: f32) {
+        self.icon = truncate_chars(&self.icon, Self::MAX_ICON_CHARS);
+        self.border_width = bound(self.border_width, Self::MAX_BORDER_WIDTH);
+        self.radius = self.radius.map(|r| bound(r, max_radius));
+    }
+}
+
+/// One placement in `bar.left/center/right`: a widget name, or a table with its own style.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(from = "BarItemRepr", into = "BarItemRepr")]
+pub struct BarItem {
+    pub widget: Widget,
+    pub style: WidgetStyle,
+    /// Device battery only: UPower serial (or native path); empty picks the first device.
+    pub device: String,
+}
+
+impl BarItem {
+    const MAX_DEVICE_CHARS: usize = 128;
+}
+
+impl From<Widget> for BarItem {
+    fn from(widget: Widget) -> Self {
+        Self {
+            widget,
+            style: WidgetStyle::default(),
+            device: String::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum BarItemRepr {
+    Name(Widget),
+    Table(BarItemTable),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BarItemTable {
+    widget: Widget,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    device: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    icon: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_color: Option<Rgba>,
+    #[serde(default)]
+    border_width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    border_color: Option<Rgba>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    radius: Option<f32>,
+}
+
+impl From<BarItemRepr> for BarItem {
+    fn from(repr: BarItemRepr) -> Self {
+        match repr {
+            BarItemRepr::Name(widget) => widget.into(),
+            BarItemRepr::Table(t) => Self {
+                widget: t.widget,
+                device: t.device,
+                style: WidgetStyle {
+                    icon: t.icon,
+                    icon_color: t.icon_color,
+                    border_width: t.border_width,
+                    border_color: t.border_color,
+                    radius: t.radius,
+                },
+            },
+        }
+    }
+}
+
+impl From<BarItem> for BarItemRepr {
+    fn from(item: BarItem) -> Self {
+        if item.style == WidgetStyle::default() && item.device.is_empty() {
+            return Self::Name(item.widget);
+        }
+        let WidgetStyle {
+            icon,
+            icon_color,
+            border_width,
+            border_color,
+            radius,
+        } = item.style;
+        Self::Table(BarItemTable {
+            widget: item.widget,
+            device: item.device,
+            icon,
+            icon_color,
+            border_width,
+            border_color,
+            radius,
+        })
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// Clamps to `0..=max`; non-finite values become 0.
+fn bound(value: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, max)
+    } else {
+        0.0
     }
 }
 
@@ -182,17 +341,23 @@ pub struct BarConfig {
     pub gap: u32,
     pub font: String,
     pub font_size: f32,
+    /// Smooth-look text weight; automatic preserves each component's typography.
+    pub font_weight: TextWeight,
+    /// Pixel-look text weight, saved independently of the smooth look.
+    pub pixel_font_weight: TextWeight,
     /// Blur what's behind the notch and panels (visible when `colors.background` has transparency).
     pub blur: bool,
     /// Overall look: `smooth` (rounded, soft) or `pixel` (square frames, pixel font).
     pub look: Look,
-    /// Font used everywhere in the pixel look: `tiny5` or `monocraft`.
+    /// Font used everywhere in the pixel look.
     pub pixel_font: PixelFont,
     /// Icon font; icons are written by name, e.g. `"schedule"`.
     pub icon_font: String,
     /// Outline around the bar; 0 turns it off.
     pub border_width: f32,
     pub border_style: BorderStyle,
+    /// Outline placement; automatic leaves the top of an attached bar open.
+    pub border_edges: BorderEdges,
     pub border_color: Rgba,
     /// Drop shadow under the bar.
     pub shadow: bool,
@@ -203,9 +368,9 @@ pub struct BarConfig {
     pub shadow_color: Rgba,
     /// Connector names (`DP-1`) to show a bar on. Empty means every monitor.
     pub outputs: Vec<String>,
-    pub left: Vec<Widget>,
-    pub center: Vec<Widget>,
-    pub right: Vec<Widget>,
+    pub left: Vec<BarItem>,
+    pub center: Vec<BarItem>,
+    pub right: Vec<BarItem>,
 }
 
 impl Default for BarConfig {
@@ -221,21 +386,24 @@ impl Default for BarConfig {
             gap: 8,
             font: "Noto Sans".into(),
             font_size: 13.0,
+            font_weight: TextWeight::Automatic,
+            pixel_font_weight: TextWeight::Automatic,
             icon_font: "Material Symbols Rounded".into(),
             blur: false,
             look: Look::Smooth,
             pixel_font: PixelFont::Tiny5,
             border_width: 0.0,
             border_style: BorderStyle::Solid,
+            border_edges: BorderEdges::Auto,
             border_color: Rgba([0xff, 0xff, 0xff, 0x33]),
             shadow: false,
             shadow_blur: 12.0,
             shadow_offset: 4.0,
             shadow_color: Rgba([0, 0, 0, 0x66]),
             outputs: Vec::new(),
-            left: vec![Widget::Workspaces],
-            center: vec![Widget::Media, Widget::WindowTitle],
-            right: vec![
+            left: vec![Widget::Workspaces.into()],
+            center: vec![Widget::Media.into(), Widget::WindowTitle.into()],
+            right: [
                 Widget::Tray,
                 Widget::Bluetooth,
                 Widget::Network,
@@ -245,13 +413,24 @@ impl Default for BarConfig {
                 Widget::Clock,
                 Widget::Notifications,
                 Widget::QuickSettings,
-            ],
+            ]
+            .map(BarItem::from)
+            .to_vec(),
         }
     }
 }
 
 impl BarConfig {
+    /// Text weight for the active look.
+    pub fn text_weight(&self) -> TextWeight {
+        match self.look {
+            Look::Smooth => self.font_weight,
+            Look::Pixel => self.pixel_font_weight,
+        }
+    }
+
     pub const MAX_BORDER_WIDTH: f32 = 8.0;
+    pub const MAX_ITEMS: usize = 64;
     pub const MAX_SHADOW_BLUR: f32 = 32.0;
     pub const MAX_SHADOW_OFFSET: f32 = 16.0;
 
@@ -267,17 +446,29 @@ impl BarConfig {
     }
 
     pub(crate) fn sanitize(&mut self) {
-        let bound = |v: f32, max: f32| {
-            if v.is_finite() {
-                v.clamp(0.0, max)
-            } else {
-                0.0
+        let max_radius = self.height as f32 / 2.;
+        for items in [&mut self.left, &mut self.center, &mut self.right] {
+            items.truncate(Self::MAX_ITEMS);
+            for item in items {
+                item.style.sanitize(max_radius);
+                item.device = truncate_chars(&item.device, BarItem::MAX_DEVICE_CHARS);
             }
-        };
+        }
+        self.radius = bound(self.radius, self.height as f32 / 2.);
         self.border_width = bound(self.border_width, Self::MAX_BORDER_WIDTH);
         self.shadow_blur = bound(self.shadow_blur, Self::MAX_SHADOW_BLUR);
         self.shadow_offset = bound(self.shadow_offset, Self::MAX_SHADOW_OFFSET);
     }
+}
+
+/// Which edges of the menu bar receive an outline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BorderEdges {
+    #[default]
+    Auto,
+    All,
+    Bottom,
 }
 
 /// Bar outline stroke.
@@ -478,6 +669,69 @@ pub enum Look {
     Pixel,
 }
 
+/// Text weight override, or the component's original weight when automatic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextWeight {
+    #[default]
+    Automatic,
+    Thin,
+    ExtraLight,
+    Light,
+    Regular,
+    Medium,
+    Semibold,
+    Bold,
+    ExtraBold,
+    Black,
+}
+
+impl TextWeight {
+    pub const ALL: [Self; 10] = [
+        Self::Automatic,
+        Self::Thin,
+        Self::ExtraLight,
+        Self::Light,
+        Self::Regular,
+        Self::Medium,
+        Self::Semibold,
+        Self::Bold,
+        Self::ExtraBold,
+        Self::Black,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Thin => "Thin",
+            Self::ExtraLight => "Extra light",
+            Self::Light => "Light",
+            Self::Regular => "Regular",
+            Self::Medium => "Medium",
+            Self::Semibold => "Semibold",
+            Self::Bold => "Bold",
+            Self::ExtraBold => "Extra bold",
+            Self::Black => "Black",
+        }
+    }
+
+    /// Numeric OpenType weight, or no override for automatic typography.
+    pub fn value(self) -> Option<u16> {
+        match self {
+            Self::Automatic => None,
+            Self::Thin => Some(100),
+            Self::ExtraLight => Some(200),
+            Self::Light => Some(300),
+            Self::Regular => Some(400),
+            Self::Medium => Some(500),
+            Self::Semibold => Some(600),
+            Self::Bold => Some(700),
+            Self::ExtraBold => Some(800),
+            Self::Black => Some(900),
+        }
+    }
+}
+
 /// Pixel-look font family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -485,13 +739,30 @@ pub enum PixelFont {
     #[default]
     Tiny5,
     Monocraft,
+    GeistPixel,
+    Vt323,
+    PixelifySans,
+    Handjet,
 }
 
 impl PixelFont {
+    pub const ALL: [Self; 6] = [
+        Self::Tiny5,
+        Self::Monocraft,
+        Self::GeistPixel,
+        Self::Vt323,
+        Self::PixelifySans,
+        Self::Handjet,
+    ];
+
     pub fn family(self) -> &'static str {
         match self {
             Self::Tiny5 => "Tiny5",
             Self::Monocraft => "Monocraft",
+            Self::GeistPixel => "Geist Pixel",
+            Self::Vt323 => "VT323",
+            Self::PixelifySans => "Pixelify Sans",
+            Self::Handjet => "Handjet",
         }
     }
 }
@@ -667,9 +938,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bar_border_edges_and_radius_round_trip() {
+        for (name, edges) in [
+            ("auto", BorderEdges::Auto),
+            ("all", BorderEdges::All),
+            ("bottom", BorderEdges::Bottom),
+        ] {
+            let c = Config::parse(&format!(
+                "[bar]\nborder_edges = \"{name}\"\nheight = 40\nradius = 1000\n"
+            ))
+            .unwrap();
+            assert_eq!(c.bar.border_edges, edges);
+            assert_eq!(c.bar.radius, 20.);
+            assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
+        }
+        assert_eq!(
+            Config::parse("").unwrap().bar.border_edges,
+            BorderEdges::Auto
+        );
+    }
+
+    #[test]
     fn capture_widget_parses() {
         let c = Config::parse("[bar]\nright = [\"capture\"]").unwrap();
-        assert_eq!(c.bar.right, [Widget::Capture]);
+        assert_eq!(c.bar.right, [BarItem::from(Widget::Capture)]);
+    }
+
+    #[test]
+    fn bar_items_parse_from_names_and_tables() {
+        let c = Config::parse(
+            r##"[bar]
+right = ["clock", { widget = "device_battery", device = "F4:73", icon = "mouse", icon_color = "#ff000080", border_width = 1.5, radius = 4.0 }]"##,
+        )
+        .unwrap();
+        assert_eq!(c.bar.right[0], BarItem::from(Widget::Clock));
+        let item = &c.bar.right[1];
+        assert_eq!(item.widget, Widget::DeviceBattery);
+        assert_eq!(item.device, "F4:73");
+        assert_eq!(item.style.icon, "mouse");
+        assert_eq!(item.style.icon_color, Some(Rgba([0xff, 0, 0, 0x80])));
+        assert_eq!(
+            (item.style.border_width, item.style.radius),
+            (1.5, Some(4.0))
+        );
+        assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
+        assert!(
+            Config::parse("[bar]\nright = [{ widget = \"clock\", colour = \"#fff\" }]").is_err()
+        );
+    }
+
+    #[test]
+    fn default_items_serialize_as_plain_names() {
+        let saved: toml::Value = toml::from_str(&Config::default().to_toml()).unwrap();
+        assert_eq!(saved["bar"]["left"][0].as_str(), Some("workspaces"));
+    }
+
+    #[test]
+    fn hostile_item_styles_are_bounded() {
+        let long = "x".repeat(10_000);
+        let many = vec!["\"clock\""; 500].join(",");
+        let c = Config::parse(&format!(
+            "[bar]\nheight = 32\nleft = [{many}]\nright = [{{ widget = \"device_battery\", icon = \"{long}\", device = \"{long}\", border_width = inf, radius = -3.0 }}]"
+        ))
+        .unwrap();
+        assert_eq!(c.bar.left.len(), 64);
+        let s = &c.bar.right[0].style;
+        assert_eq!(s.icon.chars().count(), 64);
+        assert_eq!(c.bar.right[0].device.chars().count(), 128);
+        assert_eq!(s.border_width, 0.0);
+        assert_eq!(s.radius, Some(0.0));
+        let c = Config::parse(
+            "[bar]\nright = [{ widget = \"clock\", border_width = 99, radius = 99 }]",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                c.bar.right[0].style.border_width,
+                c.bar.right[0].style.radius
+            ),
+            (4.0, Some(16.0))
+        );
     }
 
     #[test]
@@ -706,6 +1054,47 @@ mod tests {
         assert_eq!(c.bar.pixel_font.family(), "Monocraft");
     }
     #[test]
+    fn text_weights_default_to_automatic_and_reject_unknown_values() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.bar.font_weight, TextWeight::Automatic);
+        assert_eq!(config.bar.pixel_font_weight, TextWeight::Automatic);
+        for field in ["font_weight", "pixel_font_weight"] {
+            for value in ["0", "1000", "-1", "nan", "\"unknown\""] {
+                assert!(Config::parse(&format!("[bar]\n{field} = {value}")).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn font_weights_round_trip_separately_for_each_look() {
+        let config =
+            Config::parse("[bar]\nfont_weight = \"light\"\npixel_font_weight = \"bold\"").unwrap();
+        let saved = config.to_toml();
+        let values: toml::Value = toml::from_str(&saved).unwrap();
+        assert_eq!(values["bar"]["font_weight"].as_str(), Some("light"));
+        assert_eq!(values["bar"]["pixel_font_weight"].as_str(), Some("bold"));
+        assert_eq!(Config::parse(&saved).unwrap(), config);
+    }
+
+    #[test]
+    fn pixel_font_options_round_trip() {
+        for (name, font, family) in [
+            ("tiny5", PixelFont::Tiny5, "Tiny5"),
+            ("monocraft", PixelFont::Monocraft, "Monocraft"),
+            ("geist_pixel", PixelFont::GeistPixel, "Geist Pixel"),
+            ("vt323", PixelFont::Vt323, "VT323"),
+            ("pixelify_sans", PixelFont::PixelifySans, "Pixelify Sans"),
+            ("handjet", PixelFont::Handjet, "Handjet"),
+        ] {
+            let config = Config::parse(&format!("[bar]\npixel_font = \"{name}\"")).unwrap();
+            assert_eq!(config.bar.pixel_font, font, "font option {name}");
+            assert_eq!(font.family(), family, "font option {name}");
+            let serialized = toml::to_string(&config).unwrap();
+            assert_eq!(Config::parse(&serialized).unwrap().bar.pixel_font, font);
+        }
+    }
+
+    #[test]
     fn equalizer_bands_are_validated() {
         let eq = EqualizerConfig::default();
         assert!(!eq.enabled);
@@ -734,7 +1123,7 @@ mod tests {
     fn round_trips_through_toml() {
         let mut c = Config::default();
         c.colors.background = Rgba([1, 2, 3, 4]);
-        c.bar.left = vec![Widget::Settings, Widget::Clock];
+        c.bar.left = vec![Widget::Settings.into(), Widget::Clock.into()];
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
     }
 
@@ -753,7 +1142,10 @@ mod tests {
             "##,
         )
         .unwrap();
-        assert_eq!(c.bar.left, [Widget::Clock, Widget::Workspaces]);
+        assert_eq!(
+            c.bar.left,
+            [BarItem::from(Widget::Clock), Widget::Workspaces.into()]
+        );
         assert!(c.bar.right.is_empty());
         assert_eq!(c.colors.accent, Rgba([0x89, 0xb4, 0xfa, 0xff]));
         assert_eq!(c.colors.background, Rgba([0x11, 0x11, 0x1b, 0x80]));

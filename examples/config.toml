@@ -4,6 +4,7 @@
 
 # For a notch: width = 600, radius = 14, margin_top = 0.
 # For a floating bar: margin_top = 6, margin_x = 8, radius = 10.
+# For a pill: height = 32, margin_top = 8, margin_x = 16, radius = 16.
 [bar]
 height = 32               # logical px
 width = 0                 # 0 fills the monitor between the side gaps
@@ -15,12 +16,15 @@ spacing = 10.0            # between widgets (sections get twice this)
 gap = 8                   # space between the bar and the windows below
 font = "Noto Sans"
 font_size = 13.0
+font_weight = "automatic"  # smooth text: "automatic", "thin", "extra_light", "light", "regular", "medium", "semibold", "bold", "extra_bold", "black"
+pixel_font_weight = "automatic"  # pixel text; same choices, saved separately
 blur = false              # blur behind the notch (needs a transparent background color)
 look = "smooth"           # "smooth" (rounded, soft) or "pixel" (square frames, pixel font)
-pixel_font = "tiny5"      # pixel look font: "tiny5" or "monocraft"
+pixel_font = "tiny5"      # "tiny5", "monocraft", "geist_pixel", "vt323", "pixelify_sans", "handjet"
 icon_font = "Material Symbols Rounded"  # icons are written by name, e.g. "schedule"
 border_width = 0.0        # outline around the bar; 0 = none (max 8)
 border_style = "solid"    # "solid" or "dashed"
+border_edges = "auto"     # "auto" (open top when attached), "all", or "bottom"
 border_color = "#ffffff33"
 shadow = false            # drop shadow under the bar
 shadow_blur = 12.0        # softness (max 32); 0 = hard edge
@@ -29,8 +33,13 @@ shadow_color = "#00000066"
 outputs = []              # e.g. ["DP-1"]; empty = every monitor
 # Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
 # "weather", "bluetooth", "volume", "network", "battery", "stats", "updates", "quick_settings", "power", "capture",
-# "settings". Reorder freely;
+# "settings", "device_battery". Reorder freely, and repeat a widget as often as you like;
 # the three lists are laid out left to right inside the notch.
+# Any entry can be a table with its own look (Settings → Menu Bar → click an item):
+#   { widget = "device_battery", device = "F4:73:35:AA:BB:CC", icon = "mouse",
+#     icon_color = "#89b4fa", border_width = 1.0, border_color = "#ffffff33", radius = 6.0 }
+# icon: Material Symbols name, blank = automatic. border_width: 0-4. radius: unset = 5.
+# device (device_battery only): UPower serial or native path; blank = first device found.
 left = ["workspaces"]
 center = ["media", "window_title"]
 right = ["tray", "bluetooth", "network", "volume", "battery", "weather", "clock", "notifications", "quick_settings"]

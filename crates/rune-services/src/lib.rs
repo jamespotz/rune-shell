@@ -17,6 +17,7 @@ pub mod icons;
 pub mod lock;
 pub mod media;
 pub mod notifications;
+pub mod polkit;
 pub mod stats;
 pub mod system;
 pub mod theme;

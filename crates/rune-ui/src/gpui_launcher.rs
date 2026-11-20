@@ -124,6 +124,11 @@ impl Render for LauncherView {
             let glyph = |name: &str| {
                 div()
                     .font_family(config.bar.icon_font.clone())
+                    .when(
+                        crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL)
+                            != gpui::FontWeight::NORMAL,
+                        |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+                    )
                     .text_size(px(26.))
                     .child(name.to_owned())
                     .into_any_element()
@@ -171,6 +176,11 @@ impl Render for LauncherView {
                             move || {
                                 div()
                                     .font_family(font.clone())
+                                    .when(
+                                        crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL)
+                                            != gpui::FontWeight::NORMAL,
+                                        |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+                                    )
                                     .text_color(foreground)
                                     .text_size(px(26.))
                                     .child("mood")
@@ -242,7 +252,9 @@ impl Render for LauncherView {
                         .child(
                             div()
                                 .text_size(px(15.))
-                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .font_weight(crate::gpui_widgets::font_weight(
+                                    gpui::FontWeight::MEDIUM,
+                                ))
                                 .truncate()
                                 .child(title),
                         )
@@ -339,7 +351,7 @@ impl Render for LauncherView {
                         .px(px(6.))
                         .py(px(6.))
                         .text_size(px(20.))
-                        .font_weight(gpui::FontWeight::LIGHT)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::LIGHT))
                         .child(crate::gpui_widgets::icon(config, "search", 24.).text_color(muted))
                         .child(div().flex_1().child(self.input.clone())),
                 )
@@ -390,7 +402,7 @@ mod tests {
                 TextInput::bind_keys(cx);
                 let mut config = crate::Config::default();
                 config.bar.look = look;
-                crate::gpui_widgets::set_look(look, config.bar.pixel_font);
+                crate::gpui_widgets::set_look(&config.bar);
                 let (actions, _) = tokio::sync::mpsc::unbounded_channel();
                 let (_, events) = tokio::sync::mpsc::unbounded_channel();
                 let (mut app, _) = Shell::new(config, events, actions, false);

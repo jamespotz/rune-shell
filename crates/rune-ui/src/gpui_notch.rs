@@ -64,13 +64,20 @@ impl Render for Notch {
                 1 => section.justify_center(),
                 _ => section.justify_end(),
             };
-            for (index, widget) in widgets.iter().enumerate() {
+            for (index, item) in widgets.iter().enumerate() {
                 let dispatch = self.dispatch.clone();
                 let id = format!("section-{section_index}-widget-{index}");
-                let element = match widget {
+                let element = match item.widget {
                     Widget::Workspaces => {
                         let foreground = color(config.colors.foreground);
-                        let mut slots = div().id(id.clone()).flex().items_center().gap(px(2.));
+                        let mut slots = crate::gpui_widgets::item_style(
+                            div().id(id.clone()),
+                            &item.style,
+                            config,
+                        )
+                        .flex()
+                        .items_center()
+                        .gap(px(2.));
                         for workspace in crate::notch::workspace_ids(config, &app.snapshot.hypr) {
                             let active = app
                                 .snapshot
@@ -114,7 +121,9 @@ impl Render for Notch {
                                     .text_size(px(bar.font_size * 0.92))
                                     .text_color(crate::notch::mix(rest, foreground, t))
                                     .when(active, |slot| {
-                                        slot.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        slot.font_weight(crate::gpui_widgets::font_weight(
+                                            gpui::FontWeight::SEMIBOLD,
+                                        ))
                                     })
                                     .bg(fill)
                                     .hover(|style| style.bg(foreground.opacity(0.18)))
@@ -147,25 +156,28 @@ impl Render for Notch {
                                 )
                             })
                             .unwrap_or_default();
-                        div()
+                        crate::gpui_widgets::item_style(div(), &item.style, config)
                             .px(px(4.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                             .truncate()
                             .child(title)
                             .into_any_element()
                     }
                     Widget::Clock => {
                         let mut clock = crate::gpui_widgets::heading(crate::gpui_widgets::row());
-                        if !config.clock.icon.is_empty() {
-                            clock = clock.child(crate::gpui_widgets::icon(
+                        if !config.clock.icon.is_empty() || !item.style.icon.is_empty() {
+                            clock = clock.child(crate::gpui_widgets::item_icon(
                                 config,
+                                item,
                                 &config.clock.icon,
                                 bar.font_size * 1.25,
                             ));
                         }
                         crate::gpui_widgets::bar_button(
                             app,
-                            *widget,
+                            item,
                             id,
                             clock.child(app.snapshot.now.format(&config.clock.format).to_string()),
                             Message::Toggle(Panel::Calendar),
@@ -175,16 +187,21 @@ impl Render for Notch {
                     }
                     Widget::Settings => crate::gpui_widgets::bar_button(
                         app,
-                        *widget,
+                        item,
                         id,
-                        crate::gpui_widgets::icon(config, "settings", bar.font_size * 1.25),
+                        crate::gpui_widgets::item_icon(
+                            config,
+                            item,
+                            "settings",
+                            bar.font_size * 1.25,
+                        ),
                         Message::ToggleSettings,
                         &dispatch,
                     )
                     .into_any_element(),
-                    widget => match crate::gpui_widgets::bar_widget(
+                    _ => match crate::gpui_widgets::bar_widget(
                         app,
-                        *widget,
+                        item,
                         id,
                         &self.dispatch,
                         &mut self.images,
@@ -245,7 +262,7 @@ impl Render for Notch {
             .font_family(crate::gpui_widgets::text_font(config))
             .text_size(px(bar.font_size))
             .text_color(color(config.colors.foreground))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::MEDIUM))
             .child(
                 crate::gpui_widgets::bar_outline(div(), bar)
                     .w_full()
@@ -299,9 +316,24 @@ mod tests {
             .with_quit_mode(QuitMode::Explicit)
             .run(|cx| {
                 let mut shell = crate::gpui_panels::tests::populated_shell();
-                shell.config.bar.left = vec![Widget::Workspaces, Widget::Tray];
+                shell.config.bar.left = vec![Widget::Workspaces.into(), Widget::Tray.into()];
                 shell.config.bar.center.clear();
-                shell.config.bar.right = Widget::ALL.to_vec();
+                shell.config.bar.right = Widget::ALL.map(Into::into).to_vec();
+                let styled = crate::config::WidgetStyle {
+                    icon: "star".into(),
+                    icon_color: Some(crate::config::Rgba([0xff, 0, 0, 0xff])),
+                    border_width: 1.5,
+                    border_color: None,
+                    radius: Some(0.),
+                };
+                for item in &mut shell.config.bar.right {
+                    item.style = styled.clone();
+                }
+                shell.config.bar.left[0].style = styled;
+                shell.config.bar.right.push(crate::config::BarItem {
+                    device: "absent".into(),
+                    ..Widget::DeviceBattery.into()
+                });
                 shell.game_mode = true;
                 shell.config.bar.border_width = 2.;
                 shell.config.bar.border_style = crate::config::BorderStyle::Dashed;

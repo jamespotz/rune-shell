@@ -189,6 +189,7 @@ impl Render for Overlay {
                     .size_full()
                     .text_color(color(app.config.colors.foreground))
                     .font_family(crate::gpui_widgets::text_font(&app.config))
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                         if !*hovered {
                             swipe_end(this, window, cx);

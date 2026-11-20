@@ -29,7 +29,7 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
         Widget::Volume => Panel::Sound,
         Widget::Network => Panel::Wifi,
         Widget::Bluetooth => Panel::Bluetooth,
-        Widget::Battery => Panel::Battery,
+        Widget::Battery | Widget::DeviceBattery => Panel::Battery,
         Widget::Weather => Panel::Weather,
         Widget::Clock => Panel::Calendar,
         Widget::Notifications => Panel::Notifications,
@@ -46,7 +46,7 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
 pub(crate) fn bar_has(bar: &crate::config::BarConfig, widget: crate::config::Widget) -> bool {
     [&bar.left, &bar.center, &bar.right]
         .iter()
-        .any(|section| section.contains(&widget))
+        .any(|section| section.iter().any(|item| item.widget == widget))
 }
 
 pub(crate) fn media_label(media: &rune_services::media::Media, max_chars: usize) -> String {
@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(widget_panel(Widget::Updates), Some(Panel::Updates));
         let mut bar = Config::default().bar;
         assert!(!bar_has(&bar, Widget::Capture));
-        bar.center.push(Widget::Capture);
+        bar.center.push(Widget::Capture.into());
         assert!(bar_has(&bar, Widget::Capture));
     }
     use rune_services::hyprland::Workspace;

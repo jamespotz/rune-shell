@@ -31,10 +31,19 @@ pub(crate) struct SettingsView {
     hypr_drag: Option<(String, usize, gpui::Point<gpui::Pixels>, BezierView)>,
     /// The open dropdown on the Hyprland pages.
     hypr_select: Option<String>,
+    /// Installed font families, read once when settings open.
+    fonts: Vec<String>,
+    /// Search box inside the font dropdown.
+    font_search: Entity<TextInput>,
     /// "Not now" on the setup card.
     hypr_later: bool,
     /// The Network status card shows DNS, security and MAC.
     net_details: bool,
+    /// The open colour picker and the setting it edits.
+    picker: Option<(
+        crate::settings::ColorTarget,
+        Entity<crate::controls::color_picker::ColorPicker>,
+    )>,
 }
 impl SettingsView {
     pub fn new(
@@ -49,7 +58,30 @@ impl SettingsView {
         let page = shell.read(cx).settings_ui.page;
         let colors = shell.read(cx).config.colors;
         let icon_font = shell.read(cx).config.bar.icon_font.clone().into();
+        let font_search = cx.new(|cx| {
+            let mut input = TextInput::new("", "Search fonts", cx);
+            input.set_text_size(12.);
+            input
+        });
+        cx.subscribe_in(
+            &font_search,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::Changed(_) => cx.notify(),
+                InputEvent::Submit => {
+                    let query = this.font_search.read(cx).text().to_lowercase();
+                    if let Some(font) = matching_fonts(&this.fonts, &query).next() {
+                        let msg = Msg::Text(Field::Font, font.clone());
+                        this.hypr_select = None;
+                        (this.dispatch)(crate::Message::Settings(msg), window, cx);
+                    }
+                }
+            },
+        )
+        .detach();
         Self {
+            fonts: cx.text_system().all_font_names(),
+            font_search,
             colors,
             icon_font,
             add_target: Section::Right,
@@ -61,6 +93,7 @@ impl SettingsView {
             hypr_select: None,
             hypr_later: false,
             net_details: false,
+            picker: None,
             focus,
             page,
             shell,
@@ -101,6 +134,11 @@ impl SettingsView {
             .children(leading.map(|glyph| {
                 div()
                     .font_family(self.icon_font.clone())
+                    .when(
+                        crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL)
+                            != gpui::FontWeight::NORMAL,
+                        |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+                    )
                     .text_size(px(18.))
                     .text_color(color(colors.muted))
                     .child(glyph.to_owned())
@@ -122,6 +160,11 @@ impl SettingsView {
                 line.child(
                     div()
                         .font_family(self.icon_font.clone())
+                        .when(
+                            crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL)
+                                != gpui::FontWeight::NORMAL,
+                            |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+                        )
                         .text_size(px(18.))
                         .text_color(color(colors.accent))
                         .child("check"),
@@ -144,6 +187,11 @@ impl SettingsView {
             .size(px(26.))
             .rounded(crate::gpui_widgets::corner(6.))
             .font_family(self.icon_font.clone())
+            .when(
+                crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL)
+                    != gpui::FontWeight::NORMAL,
+                |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+            )
             .text_size(px(17.))
             .text_color(color(if destructive {
                 colors.urgent
@@ -162,6 +210,7 @@ impl SettingsView {
     }
     fn segmented(&self, id: &str, options: Vec<(String, bool, Msg)>) -> AnyElement {
         let mut control = row()
+            .flex_wrap()
             .gap(px(2.))
             .p(px(2.))
             .rounded(crate::gpui_widgets::corner(7.))
@@ -179,7 +228,9 @@ impl SettingsView {
                         segment
                             .bg(color(self.colors.accent))
                             .text_color(color(self.colors.on_accent))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                     })
                     .when(!selected, |segment| {
                         segment.hover(|style| style.bg(gpui::rgba(0xffffff12)))
@@ -193,6 +244,25 @@ impl SettingsView {
         }
         control.into_any_element()
     }
+    fn font_weights(
+        &self,
+        c: &Config,
+        look: crate::config::Look,
+        selected: crate::config::TextWeight,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (id, label) = match look {
+            crate::config::Look::Smooth => ("smooth-font-weight", "Smooth font weight"),
+            crate::config::Look::Pixel => ("pixel-font-weight", "Pixel font weight"),
+        };
+        let options = crate::config::TextWeight::ALL
+            .into_iter()
+            .map(|weight| (weight.label().to_owned(), Msg::FontWeight(look, weight)))
+            .collect();
+        let select = self.hypr_select(c, id.to_owned(), selected.label(), options, cx);
+        self.labeled(label, select)
+    }
+
     fn labeled(&self, label: &str, control: AnyElement) -> AnyElement {
         row()
             .w_full()
@@ -448,8 +518,33 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.slider_row(
+            c,
+            format!("number:{num:?}"),
+            label,
+            parameters,
+            move |value| Msg::Num(num, value),
+            window,
+            cx,
+        )
+    }
+    /// A labelled slider; `edit` turns the step-snapped value into a message.
+    /// The first `edit` given for a `key` is kept, so keys must identify their target.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI view helpers take window and context"
+    )]
+    fn slider_row(
+        &mut self,
+        c: &Config,
+        key: String,
+        label: &str,
+        parameters: (f32, (f32, f32), f32),
+        edit: impl Fn(f32) -> Msg + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (value, range, step) = parameters;
-        let key = format!("number:{num:?}");
         let entity = if let Some(entity) = self.sliders.get(&key) {
             entity.update(cx, |s, _| s.sync(range, value, color(c.colors.accent)));
             entity.clone()
@@ -459,7 +554,7 @@ impl SettingsView {
             cx.subscribe_in(&entity, window, move |_, _, event, window, cx| {
                 if let SliderEvent::Change(value) = event {
                     dispatch(
-                        crate::Message::Settings(Msg::Num(num, (*value / step).round() * step)),
+                        crate::Message::Settings(edit((*value / step).round() * step)),
                         window,
                         cx,
                     )
@@ -550,7 +645,7 @@ fn hero(
                 .child(
                     div()
                         .text_size(px(15.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                         .child(page.label().1),
                 )
                 .child(crate::gpui_widgets::muted(c, description)),
@@ -573,11 +668,14 @@ fn code(text: &str) -> AnyElement {
 fn swatch(value: crate::config::Rgba, size: f32) -> gpui::Div {
     div()
         .flex_none()
+        .relative()
         .size(px(size))
         .rounded(crate::gpui_widgets::corner(9999.))
+        .overflow_hidden()
         .border_1()
         .border_color(gpui::rgba(0xffffff33))
-        .bg(color(value))
+        .child(crate::controls::color_picker::checkerboard(4, 4, size / 4.))
+        .child(div().absolute().inset_0().bg(color(value)))
 }
 fn group(title: &str, children: Vec<AnyElement>) -> AnyElement {
     section(title, None, children)
@@ -614,7 +712,7 @@ fn section(title: &str, trailing: Option<AnyElement>, children: Vec<AnyElement>)
                 .child(
                     crate::gpui_widgets::heading(div())
                         .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                         .opacity(0.6)
                         .child(title.to_owned()),
                 )
@@ -718,7 +816,9 @@ impl SettingsView {
                     if selected {
                         chip.bg(color(c.colors.accent))
                             .text_color(color(c.colors.on_accent))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(crate::gpui_widgets::font_weight(
+                                gpui::FontWeight::SEMIBOLD,
+                            ))
                     } else {
                         chip.bg(gpui::rgba(0xffffff12))
                             .hover(|style| style.bg(gpui::rgba(0xffffff24)))
@@ -859,6 +959,7 @@ fn widget_glyph(widget: Widget) -> &'static str {
         Widget::QuickSettings => "toggle_on",
         Widget::Power => "power_settings_new",
         Widget::Capture => "photo_camera",
+        Widget::DeviceBattery => "battery_full",
         Widget::Settings => "settings",
     }
 }
@@ -867,7 +968,7 @@ const SECTIONS: [(&str, Section); 3] = [
     ("Center", Section::Center),
     ("Right", Section::Right),
 ];
-fn section_items(c: &Config, section: Section) -> &[Widget] {
+fn section_items(c: &Config, section: Section) -> &[crate::config::BarItem] {
     match section {
         Section::Left => &c.bar.left,
         Section::Center => &c.bar.center,
@@ -891,9 +992,9 @@ fn bar_preview(c: &Config, window: &Window, cx: &gpui::App) -> AnyElement {
     let height = c.bar.height as f32;
     let top = c.bar.margin_top as f32;
     let glyph_size = (height * 0.5).clamp(10., 20.);
-    let item = |widget: Widget| -> AnyElement {
-        let glyph = |name: &str| crate::gpui_widgets::icon(c, name, glyph_size);
-        match widget {
+    let item = |entry: &crate::config::BarItem| -> AnyElement {
+        let glyph = |name: &str| crate::gpui_widgets::item_icon(c, entry, name, glyph_size);
+        let content = match entry.widget {
             Widget::Workspaces => row()
                 .gap(px(4.))
                 .children((0..c.workspaces.min.clamp(1, 10)).map(|index| {
@@ -919,13 +1020,17 @@ fn bar_preview(c: &Config, window: &Window, cx: &gpui::App) -> AnyElement {
                 ))
                 .into_any_element(),
             widget => glyph(widget_glyph(widget)).into_any_element(),
-        }
+        };
+        crate::gpui_widgets::item_style(div(), &entry.style, c)
+            .px(px(2.))
+            .child(content)
+            .into_any_element()
     };
     let section = |section: Section| {
         row()
             .gap(px(c.bar.spacing))
             .flex_none()
-            .children(section_items(c, section).iter().map(|&widget| item(widget)))
+            .children(section_items(c, section).iter().map(item))
     };
     let mut bar = crate::gpui_widgets::frame(row())
         .absolute()
@@ -982,9 +1087,299 @@ fn bar_preview(c: &Config, window: &Window, cx: &gpui::App) -> AnyElement {
         .into_any_element()
 }
 impl SettingsView {
+    /// A colour preview that opens the colour picker for `target`.
+    fn color_swatch(
+        &mut self,
+        value: crate::config::Rgba,
+        target: crate::settings::ColorTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::controls::color_picker::{ColorPicker, ColorPickerEvent};
+        let colors = self.colors;
+        let mut element = div()
+            .id(format!("swatch:{target:?}"))
+            .relative()
+            .flex_none()
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.85))
+            .active(|style| style.opacity(0.7))
+            .child(swatch(value, 18.))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                let picker = cx.new(|cx| ColorPicker::new(value, colors, cx));
+                let dispatch = this.dispatch.clone();
+                cx.subscribe_in(
+                    &picker,
+                    window,
+                    move |this, _, event, window, cx| match event {
+                        ColorPickerEvent::Change(value) => dispatch(
+                            crate::Message::Settings(crate::settings::color_message(
+                                target, *value,
+                            )),
+                            window,
+                            cx,
+                        ),
+                        ColorPickerEvent::Close => {
+                            this.picker = None;
+                            window.focus(&this.focus, cx);
+                            cx.notify();
+                        }
+                    },
+                )
+                .detach();
+                window.focus(&picker.read(cx).focus_handle(), cx);
+                this.picker = Some((target, picker));
+                cx.notify();
+            }));
+        if let Some((_, picker)) = self.picker.as_ref().filter(|(open, _)| *open == target) {
+            picker.update(cx, |picker, cx| picker.sync(value, colors, cx));
+            element = element.child(gpui::deferred(
+                gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .mt(px(4.))
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            // Only reclaim focus the picker held, so a clicked text field keeps its own.
+                            if let Some((_, picker)) = this.picker.take()
+                                && picker.read(cx).focus_handle().contains_focused(window, cx)
+                            {
+                                window.focus(&this.focus, cx);
+                            }
+                            cx.notify();
+                        }))
+                        .child(picker.clone()),
+                ),
+            ));
+        }
+        element.into_any_element()
+    }
+    /// Style and device controls for the bar item selected in the layout.
+    fn widget_settings(
+        &mut self,
+        c: &Config,
+        (section, index): (Section, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::config::IconSupport;
+        use crate::settings::ItemEdit;
+        let item = section_items(c, section).get(index)?.clone();
+        let slot = format!("{section:?}:{index}");
+        let edit = move |edit: ItemEdit| Msg::Item(section, index, edit);
+        let mut rows = Vec::new();
+        let support = item.widget.icon_support();
+        if support == IconSupport::Full {
+            let automatic = match item.widget {
+                Widget::Clock => c.clock.icon.as_str(),
+                widget => widget_glyph(widget),
+            };
+            let input = self.item_input(
+                format!("item-icon:{slot}"),
+                item.style.icon.clone(),
+                automatic,
+                move |text| Some(edit(ItemEdit::Icon(text.trim().to_owned()))),
+                window,
+                cx,
+            );
+            rows.push(self.labeled(
+                "Icon (Material Symbols name; blank is automatic)",
+                div().w(px(240.)).child(input).into_any_element(),
+            ));
+        }
+        if support != IconSupport::None {
+            rows.push(self.item_color(
+                format!("item-icon-color:{slot}"),
+                "Icon colour",
+                (item.style.icon_color, c.colors.foreground),
+                crate::settings::ColorTarget::Item(
+                    section,
+                    index,
+                    crate::settings::ItemColor::Icon,
+                ),
+                move |tint| edit(ItemEdit::IconColor(tint)),
+                window,
+                cx,
+            ));
+        }
+        rows.push(self.slider_row(
+            c,
+            format!("item-border:{slot}"),
+            "Border width (0 for none)",
+            (
+                item.style.border_width,
+                (0., crate::config::WidgetStyle::MAX_BORDER_WIDTH),
+                0.5,
+            ),
+            move |width| edit(ItemEdit::BorderWidth(width)),
+            window,
+            cx,
+        ));
+        if item.style.border_width > 0. {
+            let mut automatic = c.colors.foreground;
+            automatic.0[3] = 0x33;
+            rows.push(self.item_color(
+                format!("item-border-color:{slot}"),
+                "Border colour",
+                (item.style.border_color, automatic),
+                crate::settings::ColorTarget::Item(
+                    section,
+                    index,
+                    crate::settings::ItemColor::Border,
+                ),
+                move |border| edit(ItemEdit::BorderColor(border)),
+                window,
+                cx,
+            ));
+        }
+        if crate::gpui_widgets::pixel_look() {
+            rows.push(
+                crate::gpui_widgets::muted(c, "The pixel look keeps corners square.")
+                    .into_any_element(),
+            );
+        } else {
+            let radius = self.slider_row(
+                c,
+                format!("item-radius:{slot}"),
+                "Corner radius",
+                (
+                    item.style
+                        .radius
+                        .unwrap_or(crate::gpui_widgets::ITEM_RADIUS),
+                    (0., c.bar.height as f32 / 2.),
+                    1.,
+                ),
+                move |radius| edit(ItemEdit::Radius(Some(radius))),
+                window,
+                cx,
+            );
+            rows.push(radius);
+            if item.style.radius.is_some() {
+                rows.push(self.labeled(
+                    "",
+                    self.primary(
+                        &format!("item-radius-auto:{slot}"),
+                        "Automatic radius",
+                        edit(ItemEdit::Radius(None)),
+                    ),
+                ));
+            }
+        }
+        if item.widget == Widget::DeviceBattery {
+            let peripherals = self.shell.read(cx).snapshot.peripherals.clone();
+            let choices = crate::settings::device_choices(&peripherals, &item.device);
+            let current = choices
+                .iter()
+                .find(|(key, _)| *key == item.device)
+                .map_or("First available", |(_, label)| label.as_str())
+                .to_owned();
+            let options = choices
+                .into_iter()
+                .map(|(key, label)| (label, edit(ItemEdit::Device(key))))
+                .collect();
+            let select = self.hypr_select(c, format!("item-device:{slot}"), &current, options, cx);
+            rows.push(self.labeled("Device", select));
+        }
+        if support == IconSupport::Full {
+            rows.push(
+                crate::gpui_widgets::muted(
+                    c,
+                    "A custom icon replaces status icons such as muted volume. Leave it blank for automatic icons.",
+                )
+                .into_any_element(),
+            );
+        }
+        Some(group(&format!("{} settings", item.widget), rows))
+    }
+    /// A text field for one bar item; `edit` returns `None` to ignore the text.
+    fn item_input(
+        &mut self,
+        id: String,
+        value: String,
+        placeholder: &str,
+        edit: impl Fn(&str) -> Option<Msg> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some((last, entity)) = self.inputs.get_mut(&id) {
+            if last != &value {
+                entity.update(cx, |input, cx| input.sync(&value, placeholder, cx));
+                *last = value.clone();
+            }
+        } else {
+            let entity = cx.new(|cx| {
+                let mut input = TextInput::new(&value, placeholder, cx);
+                input.set_text_size(13.);
+                input
+            });
+            let dispatch = self.dispatch.clone();
+            // The stored value stays the last config value synced, so half-typed text survives re-renders.
+            cx.subscribe_in(&entity, window, move |_, _, event, window, cx| {
+                if let InputEvent::Changed(value) = event
+                    && let Some(msg) = edit(value)
+                {
+                    dispatch(crate::Message::Settings(msg), window, cx);
+                }
+            })
+            .detach();
+            self.inputs.insert(id.clone(), (value, entity));
+        }
+        div()
+            .w_full()
+            .rounded(crate::gpui_widgets::corner(6.))
+            .bg(gpui::rgba(0xffffff12))
+            .child(self.inputs[&id].1.clone())
+            .into_any_element()
+    }
+    /// Swatch, hex field and automatic reset for an optional bar item colour.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI view helpers take window and context"
+    )]
+    fn item_color(
+        &mut self,
+        id: String,
+        label: &str,
+        (value, automatic): (Option<crate::config::Rgba>, crate::config::Rgba),
+        target: crate::settings::ColorTarget,
+        edit: impl Fn(Option<crate::config::Rgba>) -> Msg + Clone + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let text = value.map(String::from).unwrap_or_default();
+        let typed = edit.clone();
+        let input = self.item_input(
+            id.clone(),
+            text,
+            "Automatic",
+            move |text| {
+                let text = text.trim();
+                if text.is_empty() {
+                    Some(typed(None))
+                } else {
+                    crate::config::Rgba::parse(text).map(|tint| typed(Some(tint)))
+                }
+            },
+            window,
+            cx,
+        );
+        let mut control = row()
+            .w(px(240.))
+            .gap(px(8.))
+            .child(self.color_swatch(value.unwrap_or(automatic), target, cx))
+            .child(div().flex_1().child(input));
+        if value.is_some() {
+            control = control.child(self.glyph(
+                format!("{id}:auto"),
+                "format_color_reset",
+                edit(None),
+                false,
+            ));
+        }
+        self.labeled(label, control.into_any_element())
+    }
     /// Left, Center and Right columns of draggable items, then a shelf of every item.
     fn bar_layout(&self, c: &Config, cx: &mut Context<Self>) -> AnyElement {
         let accent = color(c.colors.accent);
+        let current = self.shell.read(cx).settings_ui.selected();
         let ghost = {
             let font = self.icon_font.clone();
             let colors = self.colors;
@@ -1004,7 +1399,7 @@ impl SettingsView {
             move |drag: &DraggedWidget, window: &mut Window, cx: &mut gpui::App| {
                 let msg = match drag.from {
                     Some(from) => Msg::Place(from, (section, at)),
-                    None => Msg::Insert(section, at, drag.widget),
+                    None => Msg::Insert(section, at, drag.widget.into()),
                 };
                 dispatch(crate::Message::Settings(msg), window, cx)
             }
@@ -1049,10 +1444,24 @@ impl SettingsView {
                             cx.notify();
                         })),
                 );
-            for (index, &widget) in list.iter().enumerate() {
+            for (index, widget) in list.iter().map(|entry| entry.widget).enumerate() {
+                let selected = current == Some((section, index));
+                let select = self.dispatch.clone();
                 lane = lane.child(
                     crate::gpui_widgets::frame(row())
                         .id(format!("chip:{section:?}:{index}:{widget:?}"))
+                        // Unselected pixel chips keep the frame's own outline.
+                        .when(selected || !crate::gpui_widgets::pixel_look(), |chip| {
+                            chip.border_1().border_color(if selected {
+                                accent
+                            } else {
+                                gpui::rgba(0x00000000)
+                            })
+                        })
+                        .on_click(move |_, window, cx| {
+                            let next = (!selected).then_some((section, index));
+                            select(crate::Message::Settings(Msg::Select(next)), window, cx)
+                        })
                         .w_full()
                         .gap(px(6.))
                         .pl(px(4.))
@@ -1105,9 +1514,11 @@ impl SettingsView {
         }
         let mut shelf = row().w_full().flex_wrap().gap(px(6.));
         for widget in Widget::ALL {
-            let used = SECTIONS
-                .iter()
-                .any(|&(_, section)| section_items(c, section).contains(&widget));
+            let used = SECTIONS.iter().any(|&(_, section)| {
+                section_items(c, section)
+                    .iter()
+                    .any(|entry| entry.widget == widget)
+            });
             let dispatch = self.dispatch.clone();
             let target = self.add_target;
             shelf = shelf.child(
@@ -1129,7 +1540,7 @@ impl SettingsView {
                     .child(widget.to_string())
                     .on_click(move |_, window, cx| {
                         dispatch(
-                            crate::Message::Settings(Msg::Add(target, widget)),
+                            crate::Message::Settings(Msg::Add(target, widget.into())),
                             window,
                             cx,
                         )
@@ -1271,6 +1682,34 @@ impl SettingsView {
         options: Vec<(String, Msg)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.select(c, id, current, options, false, cx)
+    }
+    /// The font dropdown: installed families filtered by a search box.
+    fn font_select(&self, c: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let id = "font-family";
+        let open = self.hypr_select.as_deref() == Some(id);
+        let options = if open {
+            let query = self.font_search.read(cx).text().to_lowercase();
+            // shortcut: shows the first 200 matches, add virtualization if users need to scroll past them.
+            matching_fonts(&self.fonts, &query)
+                .take(200)
+                .map(|font| (font.clone(), Msg::Text(Field::Font, font.clone())))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let select = self.select(c, id.to_owned(), &c.bar.font, options, true, cx);
+        self.labeled("Font", select)
+    }
+    fn select(
+        &self,
+        c: &Config,
+        id: String,
+        current: &str,
+        options: Vec<(String, Msg)>,
+        searchable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let open = self.hypr_select.as_deref() == Some(id.as_str());
         let toggle_id = id.clone();
         let mut select = div()
@@ -1293,12 +1732,17 @@ impl SettingsView {
                     .child(current.to_owned())
                     .child(crate::gpui_widgets::icon(c, "expand_more", 16.).opacity(0.6)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.hypr_select = if this.hypr_select.as_deref() == Some(toggle_id.as_str()) {
                     None
                 } else {
                     Some(toggle_id.clone())
                 };
+                if searchable && this.hypr_select.is_some() {
+                    this.font_search
+                        .update(cx, |input, cx| input.sync("", "Search fonts", cx));
+                    window.focus(&this.font_search.focus_handle(cx), cx);
+                }
                 cx.notify();
             }));
         if open {
@@ -1322,6 +1766,25 @@ impl SettingsView {
                     this.hypr_select = None;
                     cx.notify();
                 }));
+            if searchable {
+                menu = menu.child(
+                    div()
+                        .mb(px(4.))
+                        .rounded(crate::gpui_widgets::corner(5.))
+                        .bg(gpui::rgba(0xffffff14))
+                        .child(self.font_search.clone()),
+                );
+                if options.is_empty() {
+                    menu = menu.child(
+                        div()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .text_size(px(12.))
+                            .opacity(0.6)
+                            .child("No matching fonts"),
+                    );
+                }
+            }
             for (label, msg) in options {
                 let selected = label == current;
                 let dispatch = self.dispatch.clone();
@@ -1350,7 +1813,7 @@ impl SettingsView {
             select = select.child(gpui::deferred(
                 gpui::anchored()
                     .snap_to_window_with_margin(px(8.))
-                    .child(div().mt(px(28.)).child(menu)),
+                    .child(div().mt(px(4.)).child(menu)),
             ));
         }
         select.into_any_element()
@@ -1749,7 +2212,7 @@ impl SettingsView {
             .child(
                 crate::gpui_widgets::heading(div())
                     .text_size(px(14.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .child("Let Rune manage Hyprland settings"),
             )
             .child(
@@ -1778,6 +2241,7 @@ impl SettingsView {
             .bg(gpui::rgba(0x15151880))
             .text_size(px(12.))
             .font_family(crate::gpui_widgets::text_font(c))
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
             .child(line(path, color(c.colors.muted)))
             .child(line(
                 format!("  {}", live.entry.last_line),
@@ -1801,7 +2265,7 @@ impl SettingsView {
             .px(px(12.))
             .bg(accent)
             .text_color(color(c.colors.on_accent))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
         };
         let later = div()
             .id("hypr-later")
@@ -1998,7 +2462,9 @@ impl SettingsView {
                                 crate::gpui_widgets::heading(div())
                                     .truncate()
                                     .text_size(px(17.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(crate::gpui_widgets::font_weight(
+                                        gpui::FontWeight::SEMIBOLD,
+                                    ))
                                     .child(title.to_owned()),
                             )
                             .child(
@@ -2282,7 +2748,7 @@ impl SettingsView {
             .gap(px(8.))
             .child(
                 crate::gpui_widgets::heading(div())
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .child("Join Other Network"),
             )
             .child(self.labeled(
@@ -3173,6 +3639,7 @@ impl SettingsView {
             .rounded(crate::gpui_widgets::corner(7.))
             .bg(gpui::rgba(0x15151880))
             .font_family(crate::gpui_widgets::text_font(c))
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
             .text_size(px(12.));
         for line in text.lines() {
             let tone = if line.starts_with("--") {
@@ -3242,11 +3709,11 @@ fn lock_preview(c: &Config, s: &State) -> AnyElement {
                 .child(
                     crate::gpui_widgets::heading(div())
                         .text_size(px(if pixel { 44. } else { 40. }))
-                        .font_weight(if pixel {
+                        .font_weight(crate::gpui_widgets::font_weight(if pixel {
                             gpui::FontWeight::NORMAL
                         } else {
                             gpui::FontWeight::LIGHT
-                        })
+                        }))
                         .child(time),
                 )
                 .when(lock.show_date, |col| {
@@ -3264,7 +3731,9 @@ fn lock_preview(c: &Config, s: &State) -> AnyElement {
                             crate::gpui_widgets::heading(div())
                                 .mt(px(3.))
                                 .text_size(px(6.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(crate::gpui_widgets::font_weight(
+                                    gpui::FontWeight::SEMIBOLD,
+                                ))
                                 .child(user),
                         )
                 })
@@ -3611,7 +4080,8 @@ impl Render for SettingsView {
                 items.push(group(
                     "Text",
                     vec![
-                        field!(Font, "Font (any installed family)"),
+                        self.font_select(&c, cx),
+                        self.font_weights(&c, crate::config::Look::Smooth, c.bar.font_weight, cx),
                         field!(IconFont, "Icon font (Material Symbols family)"),
                         number!(FontSize, "Size", c.bar.font_size, 9., 20., 0.5),
                     ],
@@ -3625,11 +4095,13 @@ impl Render for SettingsView {
                     (Field::Muted, "Secondary text", c.colors.muted),
                     (Field::Urgent, "Alerts", c.colors.urgent),
                 ] {
+                    let preview =
+                        self.color_swatch(value, crate::settings::ColorTarget::Field(field), cx);
                     colors.push(
                         row()
                             .w_full()
                             .gap(px(10.))
-                            .child(swatch(value, 18.))
+                            .child(preview)
                             .child(
                                 div()
                                     .flex_1()
@@ -3667,23 +4139,30 @@ impl Render for SettingsView {
                         vec![
                             self.segmented(
                                 "pixel-font",
-                                [
-                                    crate::config::PixelFont::Tiny5,
-                                    crate::config::PixelFont::Monocraft,
-                                ]
-                                .into_iter()
-                                .map(|font| {
-                                    (
-                                        font.family().into(),
-                                        c.bar.pixel_font == font,
-                                        Msg::PixelFont(font),
-                                    )
-                                })
-                                .collect(),
+                                crate::config::PixelFont::ALL
+                                    .into_iter()
+                                    .map(|font| {
+                                        (
+                                            font.family().into(),
+                                            c.bar.pixel_font == font,
+                                            Msg::PixelFont(font),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                            self.font_weights(
+                                &c,
+                                crate::config::Look::Pixel,
+                                c.bar.pixel_font_weight,
+                                cx,
                             ),
                         ],
                     ));
                 }
+                items.push(note(
+                    &c,
+                    "Automatic keeps Rune's original text weights. Other choices use the closest weight available in the selected font.",
+                ));
                 items.push(group(
                     "Materials",
                     vec![flag!(Blur, "Translucent menu bar and panels", c.bar.blur)],
@@ -3707,11 +4186,10 @@ impl Render for SettingsView {
                 items.push(hero(
                     &c,
                     Page::Bar,
-                    "Drag items to arrange them. Changes apply instantly.",
+                    "Choose a shape, customize its border, and arrange your items.",
                     Some(self.segmented("bar-shape", shapes)),
                 ));
                 items.push(bar_preview(&c, window, cx));
-                items.push(group("Layout", vec![self.bar_layout(&c, cx)]));
                 let mut shape = vec![
                     number!(Height, "Height", c.bar.height, 24., 56., 1.),
                     number!(
@@ -3727,10 +4205,10 @@ impl Render for SettingsView {
                 if !crate::gpui_widgets::pixel_look() {
                     shape.push(number!(
                         Radius,
-                        "Corner rounding",
+                        "Corner radius (half the height makes a pill)",
                         c.bar.radius,
                         0.,
-                        28.,
+                        c.bar.height as f32 / 2.,
                         1.
                     ));
                 }
@@ -3743,16 +4221,23 @@ impl Render for SettingsView {
                     1.
                 ));
                 items.push(group("Shape", shape));
+                items.push(note(&c, if crate::gpui_widgets::pixel_look() {
+                    "The pixel look keeps corners square. Switch to Smooth in Appearance for rounded or pill shapes."
+                } else {
+                    "Use a gap above the bar to round all four corners. The Pill preset sets the radius to half the height."
+                }));
                 let swatch_field = |this: &mut Self,
                                     field: Field,
                                     label: &str,
                                     value,
                                     window: &mut Window,
                                     cx: &mut Context<Self>| {
+                    let preview =
+                        this.color_swatch(value, crate::settings::ColorTarget::Field(field), cx);
                     row()
                         .w_full()
                         .gap(px(10.))
-                        .child(swatch(value, 18.))
+                        .child(preview)
                         .child(
                             div()
                                 .flex_1()
@@ -3783,6 +4268,25 @@ impl Render for SettingsView {
                                     label.into(),
                                     c.bar.border_style == style,
                                     Msg::BorderStyle(style),
+                                )
+                            })
+                            .collect(),
+                        ),
+                    );
+                    border.push(
+                        self.segmented(
+                            "bar-border-edges",
+                            [
+                                (crate::config::BorderEdges::Auto, "Automatic"),
+                                (crate::config::BorderEdges::All, "All edges"),
+                                (crate::config::BorderEdges::Bottom, "Bottom edge"),
+                            ]
+                            .into_iter()
+                            .map(|(edges, label)| {
+                                (
+                                    label.into(),
+                                    c.bar.border_edges == edges,
+                                    Msg::BorderEdges(edges),
                                 )
                             })
                             .collect(),
@@ -3826,6 +4330,10 @@ impl Render for SettingsView {
                     ));
                 }
                 items.push(group("Shadow", shadow));
+                items.push(group("Layout", vec![self.bar_layout(&c, cx)]));
+                if let Some(selected) = s.selected() {
+                    items.extend(self.widget_settings(&c, selected, window, cx));
+                }
                 items.push(group(
                     "Spacing",
                     vec![
@@ -4204,7 +4712,9 @@ impl Render for SettingsView {
                                 .into_any_element(),
                                 div()
                                     .text_size(px(28.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(crate::gpui_widgets::font_weight(
+                                        gpui::FontWeight::SEMIBOLD,
+                                    ))
                                     .child(code.clone())
                                     .into_any_element(),
                             ],
@@ -4669,7 +5179,7 @@ impl Render for SettingsView {
                     .pt(px(if index > 0 { 12. } else { 2. }))
                     .pb(px(4.))
                     .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
                     .text_color(foreground.opacity(0.4))
                     .child(if crate::gpui_widgets::pixel_look() {
                         title.to_uppercase()
@@ -4741,6 +5251,7 @@ impl Render for SettingsView {
             .overflow_hidden()
             .items_start()
             .font_family(crate::gpui_widgets::text_font(&c))
+            .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
             .text_size(px(13.))
             .text_color(foreground)
             .bg(crate::gpui_widgets::material(
@@ -4764,7 +5275,9 @@ impl Render for SettingsView {
                             .child(
                                 crate::gpui_widgets::heading(div())
                                     .text_size(px(15.))
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(crate::gpui_widgets::font_weight(
+                                        gpui::FontWeight::BOLD,
+                                    ))
                                     .child(s.page.label().1),
                             )
                             .child(self.glyph("settings-close", "close", Msg::Close, false)),
@@ -4795,6 +5308,13 @@ impl Render for SettingsView {
     }
 }
 
+/// Installed families whose name contains the lowercase `query`.
+fn matching_fonts<'a>(fonts: &'a [String], query: &'a str) -> impl Iterator<Item = &'a String> {
+    fonts
+        .iter()
+        .filter(move |font| font.to_lowercase().contains(query))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4808,6 +5328,369 @@ mod tests {
             connection: None,
             link: system::LinkDetails::default(),
         }
+    }
+
+    #[test]
+    #[ignore = "opens native font settings; run individually on Wayland"]
+    fn native_font_weight_controls() {
+        use crate::config::{Look, TextWeight};
+
+        gpui_platform::application()
+            .with_quit_mode(gpui::QuitMode::Explicit)
+            .run(|cx| {
+                TextInput::bind_keys(cx);
+                let mut config = Config::default();
+                let pixel = std::env::var("RUNE_TEST_LOOK").as_deref() == Ok("pixel");
+                config.bar.look = if pixel { Look::Pixel } else { Look::Smooth };
+                config.bar.pixel_font = crate::config::PixelFont::PixelifySans;
+                crate::gpui_widgets::set_look(&config.bar);
+                for fallback in [gpui::FontWeight::NORMAL, gpui::FontWeight::SEMIBOLD] {
+                    assert_eq!(
+                        crate::gpui_widgets::font_weight(fallback),
+                        fallback,
+                        "automatic preserves body and heading weights"
+                    );
+                }
+                config.bar.font_weight = TextWeight::Light;
+                config.bar.pixel_font_weight = TextWeight::Bold;
+                crate::gpui_widgets::set_look(&config.bar);
+                let expected = if pixel {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::LIGHT
+                };
+                for fallback in [gpui::FontWeight::NORMAL, gpui::FontWeight::SEMIBOLD] {
+                    assert_eq!(crate::gpui_widgets::font_weight(fallback), expected);
+                }
+                let mut root = crate::gpui_widgets::surface(
+                    &config,
+                    crate::gpui_widgets::Material::Content,
+                    12.,
+                );
+                assert_eq!(root.style().text.font_weight, Some(expected));
+                let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+                let (_, events) = tokio::sync::mpsc::unbounded_channel();
+                let (mut app, _) = crate::App::new(config, events, actions, false);
+                app.settings_ui.page = Page::Appearance;
+                let shell = cx.new(|_| app);
+                let dispatch: Dispatch = {
+                    let shell = shell.clone();
+                    std::rc::Rc::new(move |message, _, cx| {
+                        shell.update(cx, |app, cx| {
+                            let _ = app.update(message);
+                            crate::gpui_widgets::set_look(&app.config.bar);
+                            cx.notify();
+                        });
+                    })
+                };
+                cx.open_window(
+                    crate::gpui_surfaces::options(
+                        &crate::Surface::Settings,
+                        (1000, 1080),
+                        None,
+                        true,
+                        0,
+                    ),
+                    |window, cx| cx.new(|cx| SettingsView::new(shell, dispatch, window, cx)),
+                )
+                .unwrap();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(700))
+                        .await;
+                    cx.background_executor()
+                        .spawn(async move {
+                            let path = if pixel {
+                                "/tmp/rune-font-weights-pixel.png"
+                            } else {
+                                "/tmp/rune-font-weights-smooth.png"
+                            };
+                            let status = std::process::Command::new("grim")
+                                .arg(path)
+                                .status()
+                                .unwrap();
+                            assert!(status.success(), "grim {path} failed: {status}");
+                        })
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
+    }
+
+    #[test]
+    #[ignore = "opens menu bar settings and a bar; requires Wayland"]
+    fn native_menu_bar_shape_controls() {
+        gpui_platform::application()
+            .with_quit_mode(gpui::QuitMode::Explicit)
+            .run(|cx| {
+                TextInput::bind_keys(cx);
+                let mut config = Config::default();
+                if std::env::var("RUNE_TEST_LOOK").as_deref() == Ok("pixel") {
+                    config.bar.look = crate::config::Look::Pixel;
+                }
+                crate::gpui_widgets::set_look(&config.bar);
+                let pixel = config.bar.look == crate::config::Look::Pixel;
+                let mut state = State::default();
+                state.update(&mut config, Msg::Num(Num::Height, 40.));
+                state.update(&mut config, Msg::Shape(BarShape::Pill));
+                state.update(&mut config, Msg::Num(Num::BorderWidth, 2.));
+                state.update(
+                    &mut config,
+                    Msg::BorderEdges(crate::config::BorderEdges::All),
+                );
+                let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+                let (_, events) = tokio::sync::mpsc::unbounded_channel();
+                let (mut app, _) = crate::App::new(config, events, actions, false);
+                app.settings_ui.page = Page::Bar;
+                let shell = cx.new(|_| app);
+                let dispatch: Dispatch = {
+                    let shell = shell.clone();
+                    std::rc::Rc::new(move |message, _, cx| {
+                        shell.update(cx, |app, cx| {
+                            let _ = app.update(message);
+                            cx.notify();
+                        })
+                    })
+                };
+                let handle = cx
+                    .open_window(
+                        crate::gpui_surfaces::options(
+                            &crate::Surface::Settings,
+                            (1000, 1080),
+                            None,
+                            true,
+                            0,
+                        ),
+                        |window, cx| {
+                            cx.new(|cx| SettingsView::new(shell.clone(), dispatch, window, cx))
+                        },
+                    )
+                    .unwrap();
+                cx.open_window(
+                    crate::gpui_surfaces::options(
+                        &crate::Surface::Bar(String::new()),
+                        (0, 48),
+                        None,
+                        false,
+                        0,
+                    ),
+                    |_, cx| {
+                        cx.new(|cx| {
+                            crate::gpui_notch::Notch::new(
+                                shell,
+                                String::new(),
+                                std::rc::Rc::new(|_, _, _| {}),
+                                cx,
+                            )
+                        })
+                    },
+                )
+                .unwrap();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    cx.update(|cx| {
+                        handle
+                            .update(cx, |view, _, _| {
+                                assert_eq!(view.sliders.contains_key("number:Radius"), !pixel);
+                                assert!(view.sliders.contains_key("number:BorderWidth"));
+                                assert!(view.inputs.contains_key("field:BorderColor"));
+                            })
+                            .unwrap()
+                    });
+                    cx.background_executor()
+                        .spawn(async move {
+                            let path = if pixel {
+                                "/tmp/rune-menu-bar-pixel.png"
+                            } else {
+                                "/tmp/rune-menu-bar-smooth.png"
+                            };
+                            let status = std::process::Command::new("grim")
+                                .arg(path)
+                                .status()
+                                .unwrap();
+                            assert!(status.success(), "grim failed: {status}");
+                        })
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
+    }
+
+    #[test]
+    #[ignore = "opens settings with widget settings and a colour picker; requires Wayland"]
+    fn native_widget_settings_and_color_picker() {
+        gpui_platform::application()
+            .with_quit_mode(gpui::QuitMode::Explicit)
+            .run(|cx| {
+                TextInput::bind_keys(cx);
+                let mut config = Config::default();
+                let pixel = std::env::var("RUNE_TEST_LOOK").as_deref() == Ok("pixel");
+                if pixel {
+                    config.bar.look = crate::config::Look::Pixel;
+                }
+                crate::gpui_widgets::set_look(&config.bar);
+                let page = if std::env::var("RUNE_TEST_PAGE").as_deref() == Ok("appearance") {
+                    Page::Appearance
+                } else {
+                    Page::Bar
+                };
+                config.bar.right = vec![
+                    crate::config::BarItem {
+                        device: "F4:73:35:00:00:01".into(),
+                        style: crate::config::WidgetStyle {
+                            border_width: 1.5,
+                            icon_color: Some(crate::config::Rgba([0x89, 0xb4, 0xfa, 0xff])),
+                            ..Default::default()
+                        },
+                        ..Widget::DeviceBattery.into()
+                    },
+                    Widget::Clock.into(),
+                ];
+                let (actions, _) = tokio::sync::mpsc::unbounded_channel();
+                let (_, events) = tokio::sync::mpsc::unbounded_channel();
+                let (mut app, _) = crate::App::new(config, events, actions, false);
+                app.settings_ui.page = page;
+                app.settings_ui
+                    .update(&mut app.config, Msg::Select(Some((Section::Right, 0))));
+                app.snapshot.peripherals = vec![rune_services::system::Peripheral {
+                    key: "F4:73:35:00:00:01".into(),
+                    name: "MX Master 3S".into(),
+                    kind: rune_services::system::PeripheralKind::Mouse,
+                    percent: 12.,
+                    charging: true,
+                }];
+                let shell = cx.new(|_| app);
+                let dispatch: Dispatch = {
+                    let shell = shell.clone();
+                    std::rc::Rc::new(move |message, _, cx| {
+                        shell.update(cx, |app, cx| {
+                            let _ = app.update(message);
+                            cx.notify();
+                        })
+                    })
+                };
+                let handle = cx
+                    .open_window(
+                        crate::gpui_surfaces::options(
+                            &crate::Surface::Settings,
+                            (1000, 1080),
+                            None,
+                            true,
+                            0,
+                        ),
+                        |window, cx| {
+                            cx.new(|cx| SettingsView::new(shell.clone(), dispatch, window, cx))
+                        },
+                    )
+                    .unwrap();
+                cx.open_window(
+                    crate::gpui_surfaces::options(
+                        &crate::Surface::Bar(String::new()),
+                        (0, 32),
+                        None,
+                        false,
+                        0,
+                    ),
+                    |_, cx| {
+                        cx.new(|cx| {
+                            crate::gpui_notch::Notch::new(
+                                shell,
+                                String::new(),
+                                std::rc::Rc::new(|_, _, _| {}),
+                                cx,
+                            )
+                        })
+                    },
+                )
+                .unwrap();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(400))
+                        .await;
+                    cx.update(|cx| {
+                        handle
+                            .update(cx, |view, _, cx| {
+                                if page == Page::Bar {
+                                    assert!(view.inputs.contains_key("item-icon:Right:0"));
+                                    assert!(view.inputs.contains_key("item-icon-color:Right:0"));
+                                    assert!(view.inputs.contains_key("item-border-color:Right:0"));
+                                    assert!(view.sliders.contains_key("item-border:Right:0"));
+                                    assert_eq!(
+                                        view.sliders.contains_key("item-radius:Right:0"),
+                                        !pixel
+                                    );
+                                    let field = view.inputs["item-icon-color:Right:0"].1.clone();
+                                    field.update(cx, |input, cx| {
+                                        input.sync("#ff00008", "", cx);
+                                        cx.emit(InputEvent::Changed("#ff00008".into()));
+                                    });
+                                    view.shell.update(cx, |_, cx| cx.notify());
+                                }
+                                let target = if page == Page::Bar {
+                                    crate::settings::ColorTarget::Item(
+                                        Section::Right,
+                                        0,
+                                        crate::settings::ItemColor::Icon,
+                                    )
+                                } else {
+                                    crate::settings::ColorTarget::Field(Field::Accent)
+                                };
+                                let colors = view.colors;
+                                let picker = cx.new(|cx| {
+                                    crate::controls::color_picker::ColorPicker::new(
+                                        crate::config::Rgba([0x89, 0xb4, 0xfa, 0xc0]),
+                                        colors,
+                                        cx,
+                                    )
+                                });
+                                view.picker = Some((target, picker));
+                                cx.notify();
+                            })
+                            .unwrap()
+                    });
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(400))
+                        .await;
+                    if page == Page::Bar {
+                        cx.update(|cx| {
+                            handle
+                                .update(cx, |view, _, cx| {
+                                    let field = &view.inputs["item-icon-color:Right:0"].1;
+                                    assert_eq!(
+                                        field.read(cx).text(),
+                                        "#ff00008",
+                                        "a half-typed colour survives a re-render"
+                                    );
+                                })
+                                .unwrap()
+                        });
+                    }
+                    cx.background_executor()
+                        .spawn(async move {
+                            let path = format!(
+                                "/tmp/rune-widget-settings-{}-{}.png",
+                                if pixel { "pixel" } else { "smooth" },
+                                if page == Page::Bar {
+                                    "bar"
+                                } else {
+                                    "appearance"
+                                }
+                            );
+                            let status = std::process::Command::new("grim")
+                                .arg(path)
+                                .status()
+                                .unwrap();
+                            assert!(status.success(), "grim failed: {status}");
+                        })
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
     }
 
     #[test]
@@ -4932,7 +5815,7 @@ mod tests {
                 if std::env::var("RUNE_TEST_LOOK").as_deref() == Ok("pixel") {
                     config.bar.look = crate::config::Look::Pixel;
                 }
-                crate::gpui_widgets::set_look(config.bar.look, config.bar.pixel_font);
+                crate::gpui_widgets::set_look(&config.bar);
                 let (actions, _) = tokio::sync::mpsc::unbounded_channel();
                 let (_, events) = tokio::sync::mpsc::unbounded_channel();
                 let (app, _) = crate::App::new(config, events, actions, false);
@@ -5393,5 +6276,17 @@ mod tests {
                 })
                 .detach();
             });
+    }
+
+    #[test]
+    fn font_search_matches_case_insensitively() {
+        let fonts = [
+            "Noto Sans".to_owned(),
+            "Fira Code".to_owned(),
+            "noto mono".to_owned(),
+        ];
+        let found: Vec<_> = super::matching_fonts(&fonts, "noto").collect();
+        assert_eq!(found, [&fonts[0], &fonts[2]]);
+        assert_eq!(super::matching_fonts(&fonts, "").count(), 3);
     }
 }

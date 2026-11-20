@@ -49,6 +49,18 @@ pub fn wifi_icon(strength: u8) -> &'static str {
     }
 }
 
+/// The peripheral a device battery widget shows: its saved key, or the first one when unset.
+pub(crate) fn device_for<'a>(
+    peripherals: &'a [rune_services::system::Peripheral],
+    key: &str,
+) -> Option<&'a rune_services::system::Peripheral> {
+    if key.is_empty() {
+        peripherals.first()
+    } else {
+        peripherals.iter().find(|p| p.key == key)
+    }
+}
+
 pub(crate) fn battery_icon(b: &Battery) -> &'static str {
     if b.charging || b.full {
         return "battery_charging_full";
@@ -105,5 +117,22 @@ mod tests {
         assert_eq!(battery_icon(&bat(100.0, false)), "battery_full");
         assert_eq!(battery_icon(&bat(3.0, false)), "battery_0_bar");
         assert_eq!(battery_icon(&bat(50.0, true)), "battery_charging_full");
+    }
+
+    #[test]
+    fn device_battery_hidden_when_absent() {
+        use rune_services::system::{Peripheral, PeripheralKind};
+        let mouse = Peripheral {
+            key: "AA".into(),
+            name: "MX".into(),
+            kind: PeripheralKind::Mouse,
+            percent: 40.0,
+            charging: false,
+        };
+        let list = [mouse.clone()];
+        assert_eq!(device_for(&list, ""), Some(&mouse));
+        assert_eq!(device_for(&list, "AA"), Some(&mouse));
+        assert_eq!(device_for(&list, "BB"), None);
+        assert_eq!(device_for(&[], ""), None);
     }
 }

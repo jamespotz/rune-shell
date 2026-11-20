@@ -1,27 +1,36 @@
 //! Shared GPUI primitives and status widgets used by the notch and panels.
 use crate::{
     App as Shell, Config, Message, Panel,
-    config::{Rgba, Widget},
+    config::{BarItem, IconSupport, Rgba, Widget},
     gpui_images::Images,
     gpui_notch::Dispatch,
 };
 use gpui::{AnimationExt, AnyElement, Div, MouseButton, Stateful, div, img, prelude::*, px};
 
 static PIXEL_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-pub(crate) fn set_look(look: crate::config::Look, font: crate::config::PixelFont) {
-    let value = match (look, font) {
-        (crate::config::Look::Smooth, _) => 0,
-        (crate::config::Look::Pixel, crate::config::PixelFont::Tiny5) => 1,
-        (crate::config::Look::Pixel, crate::config::PixelFont::Monocraft) => 2,
+static TEXT_WEIGHT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+pub(crate) fn set_look(bar: &crate::config::BarConfig) {
+    let (look, font) = (bar.look, bar.pixel_font);
+    TEXT_WEIGHT.store(
+        bar.text_weight().value().unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let value = match look {
+        crate::config::Look::Smooth => 0,
+        crate::config::Look::Pixel => crate::config::PixelFont::ALL
+            .iter()
+            .position(|candidate| *candidate == font)
+            .and_then(|index| index.checked_add(1))
+            .and_then(|index| u8::try_from(index).ok())
+            .unwrap_or(0),
     };
     PIXEL_FONT.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 fn pixel_font() -> Option<&'static str> {
-    match PIXEL_FONT.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(crate::config::PixelFont::Tiny5.family()),
-        2 => Some(crate::config::PixelFont::Monocraft.family()),
-        _ => None,
-    }
+    let index = PIXEL_FONT.load(std::sync::atomic::Ordering::Relaxed);
+    crate::config::PixelFont::ALL
+        .get(usize::from(index.checked_sub(1)?))
+        .map(|font| font.family())
 }
 pub(crate) fn pixel_look() -> bool {
     pixel_font().is_some()
@@ -29,8 +38,7 @@ pub(crate) fn pixel_look() -> bool {
 pub(crate) fn corner(radius: f32) -> gpui::Pixels {
     if pixel_look() { px(0.) } else { px(radius) }
 }
-/// The bar's configured outline and drop shadow. A notch flush with the top edge
-/// has no top stroke; the pixel look keeps strokes whole.
+/// The bar's configured outline and drop shadow, with whole-pixel strokes in the pixel look.
 pub(crate) fn bar_outline<E: Styled>(element: E, bar: &crate::config::BarConfig) -> E {
     let width = if pixel_look() {
         bar.border_width.round()
@@ -39,10 +47,14 @@ pub(crate) fn bar_outline<E: Styled>(element: E, bar: &crate::config::BarConfig)
     };
     let mut element = element;
     if width > 0. {
-        element = if bar.margin_top == 0 {
-            element.border_x(px(width)).border_b(px(width))
-        } else {
-            element.border(px(width))
+        element = match bar.border_edges {
+            crate::config::BorderEdges::Bottom => element.border_b(px(width)),
+            crate::config::BorderEdges::Auto if bar.margin_top == 0 => {
+                element.border_x(px(width)).border_b(px(width))
+            }
+            crate::config::BorderEdges::Auto | crate::config::BorderEdges::All => {
+                element.border(px(width))
+            }
         }
         .border_color(color(bar.border_color));
         if bar.border_style == crate::config::BorderStyle::Dashed {
@@ -60,6 +72,13 @@ pub(crate) fn bar_outline<E: Styled>(element: E, bar: &crate::config::BarConfig)
     }
     element
 }
+pub(crate) fn font_weight(fallback: gpui::FontWeight) -> gpui::FontWeight {
+    match TEXT_WEIGHT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => fallback,
+        weight => gpui::FontWeight(f32::from(weight)),
+    }
+}
+
 pub(crate) fn text_font(config: &Config) -> gpui::SharedString {
     match pixel_font() {
         Some(family) => family.into(),
@@ -143,6 +162,10 @@ pub(crate) fn color(value: Rgba) -> gpui::Rgba {
 pub(crate) fn icon(config: &Config, name: &str, size: f32) -> Div {
     div()
         .font_family(config.bar.icon_font.clone())
+        .when(
+            crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL) != gpui::FontWeight::NORMAL,
+            |icon| icon.font_weight(gpui::FontWeight::NORMAL),
+        )
         .text_size(px(size))
         .child(name.to_owned())
 }
@@ -208,6 +231,7 @@ pub(crate) fn surface(config: &Config, kind: Material, radius: f32) -> Div {
         .bg(material(config, kind))
         .text_color(color(config.colors.foreground))
         .font_family(text_font(config))
+        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::NORMAL))
         .text_size(px(13.))
 }
 pub(crate) fn section_label(config: &Config, label: impl Into<gpui::SharedString>) -> Div {
@@ -215,7 +239,7 @@ pub(crate) fn section_label(config: &Config, label: impl Into<gpui::SharedString
         .px(px(6.))
         .pt(px(4.))
         .text_size(px(11.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
         .text_color(color(config.colors.muted))
         .child(label.into())
 }
@@ -380,24 +404,61 @@ pub(crate) fn visualizer(app: &Shell, count: usize, width: f32, height: f32) -> 
     )
 }
 
+/// Corner radius of a bar item when its style leaves it unset.
+pub(crate) const ITEM_RADIUS: f32 = 5.;
+
+/// A placed widget's own outline and corner radius.
+pub(crate) fn item_style<E: Styled>(
+    element: E,
+    style: &crate::config::WidgetStyle,
+    config: &Config,
+) -> E {
+    let element = element.rounded(corner(style.radius.unwrap_or(ITEM_RADIUS)));
+    let width = if pixel_look() {
+        style.border_width.round()
+    } else {
+        style.border_width
+    };
+    if width <= 0. {
+        return element;
+    }
+    let border = style
+        .border_color
+        .map_or_else(|| color(config.colors.foreground).opacity(0.2), color);
+    element.border(px(width)).border_color(border)
+}
+
+/// A bar item's glyph: its custom icon and colour where the widget supports them.
+pub(crate) fn item_icon(config: &Config, item: &BarItem, automatic: &str, size: f32) -> Div {
+    let support = item.widget.icon_support();
+    let name = if support == IconSupport::Full && !item.style.icon.is_empty() {
+        item.style.icon.as_str()
+    } else {
+        automatic
+    };
+    let glyph = icon(config, name, size);
+    match item.style.icon_color {
+        Some(tint) if support != IconSupport::None => glyph.text_color(color(tint)),
+        _ => glyph,
+    }
+}
+
 pub(crate) fn bar_button(
     app: &Shell,
-    widget: Widget,
+    bar_item: &BarItem,
     id: impl Into<gpui::ElementId>,
     content: impl IntoElement,
     message: Message,
     dispatch: &Dispatch,
 ) -> Stateful<Div> {
     let fg = color(app.config.colors.foreground);
-    let open =
-        crate::notch::widget_panel(widget).is_some_and(|panel| app.panels.current() == Some(panel));
+    let open = crate::notch::widget_panel(bar_item.widget)
+        .is_some_and(|panel| app.panels.current() == Some(panel));
     let dispatch = dispatch.clone();
-    row()
-        .id(id)
+    item_style(row().id(id), &bar_item.style, &app.config)
         .gap(px(5.))
         .px(px(8.))
         .h(px((app.config.bar.height as f32 - 6.).max(12.)))
-        .rounded(crate::gpui_widgets::corner(5.))
         .when(open, |item| item.bg(fg.opacity(0.18)))
         .hover(|style| style.bg(fg.opacity(0.18)))
         .active(|style| style.bg(fg.opacity(0.26)))
@@ -409,6 +470,9 @@ pub(crate) fn bar_button(
         })
 }
 
+/// Device batteries at or below this percentage show in the alert colour.
+const LOW_DEVICE_BATTERY: f64 = 15.;
+
 fn update_badge(config: &Config, text: String, fill: Rgba) -> Div {
     div()
         .px(px(5.))
@@ -416,7 +480,7 @@ fn update_badge(config: &Config, text: String, fill: Rgba) -> Div {
         .bg(color(fill))
         .text_color(color(config.colors.on_accent))
         .text_size(px(11.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(crate::gpui_widgets::font_weight(gpui::FontWeight::SEMIBOLD))
         .child(text)
 }
 
@@ -439,14 +503,15 @@ pub(crate) fn recording_chip(app: &Shell, id: String, dispatch: &Dispatch) -> An
 
 pub(crate) fn bar_widget(
     app: &Shell,
-    widget: Widget,
+    item: &BarItem,
     id: String,
     dispatch: &Dispatch,
     images: &mut Images,
 ) -> Option<AnyElement> {
     let c = &app.config;
+    let widget = item.widget;
     let size = c.bar.font_size * 1.25;
-    let glyph = |name: &str| icon(c, name, size);
+    let glyph = |name: &str| item_icon(c, item, name, size);
     let toggle = |panel: Panel| Message::Toggle(panel);
     Some(match widget {
         Widget::Volume => {
@@ -455,7 +520,7 @@ pub(crate) fn bar_widget(
             let mute = dispatch.clone();
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 glyph(crate::status::volume_icon(volume)),
                 toggle(Panel::Sound),
@@ -480,7 +545,7 @@ pub(crate) fn bar_widget(
             let network = app.snapshot.network.as_ref()?;
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 glyph(crate::status::network_icon(network)),
                 toggle(Panel::Wifi),
@@ -492,7 +557,7 @@ pub(crate) fn bar_widget(
             let battery = app.snapshot.battery.as_ref()?;
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 glyph(crate::status::battery_icon(battery)),
                 toggle(Panel::Battery),
@@ -544,8 +609,7 @@ pub(crate) fn bar_widget(
                     .text_color(color(c.colors.muted))
                     .child(glyph("system_update_alt")),
             };
-            bar_button(app, widget, id, content, toggle(Panel::Updates), dispatch)
-                .into_any_element()
+            bar_button(app, item, id, content, toggle(Panel::Updates), dispatch).into_any_element()
         }
         Widget::Stats => {
             let stats = app.snapshot.stats.as_ref()?;
@@ -556,7 +620,7 @@ pub(crate) fn bar_widget(
             if let Some(temp) = stats.temp {
                 items = items.child(content("thermostat", format!("{temp}°")));
             }
-            bar_button(app, widget, id, items, toggle(Panel::System), dispatch).into_any_element()
+            bar_button(app, item, id, items, toggle(Panel::System), dispatch).into_any_element()
         }
         Widget::Bluetooth => {
             let bt = &app.snapshot.bt;
@@ -573,7 +637,7 @@ pub(crate) fn bar_widget(
             };
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 glyph(name),
                 toggle(Panel::Bluetooth),
@@ -585,7 +649,7 @@ pub(crate) fn bar_widget(
             let weather = app.snapshot.weather.as_ref()?;
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 row()
                     .gap(px(4.))
@@ -601,7 +665,7 @@ pub(crate) fn bar_widget(
         }
         Widget::Notifications => bar_button(
             app,
-            widget,
+            item,
             id,
             glyph(if app.snapshot.notif.dnd {
                 "notifications_off"
@@ -614,7 +678,7 @@ pub(crate) fn bar_widget(
         .into_any_element(),
         Widget::QuickSettings => bar_button(
             app,
-            widget,
+            item,
             id,
             glyph("toggle_on"),
             toggle(Panel::Quick),
@@ -623,7 +687,7 @@ pub(crate) fn bar_widget(
         .into_any_element(),
         Widget::Power => bar_button(
             app,
-            widget,
+            item,
             id,
             glyph("power_settings_new"),
             toggle(Panel::Power),
@@ -633,7 +697,7 @@ pub(crate) fn bar_widget(
         Widget::Capture if app.snapshot.recording.is_some() => recording_chip(app, id, dispatch),
         Widget::Capture => bar_button(
             app,
-            widget,
+            item,
             id,
             glyph("photo_camera"),
             toggle(Panel::Capture),
@@ -651,11 +715,11 @@ pub(crate) fn bar_widget(
                     .size(px((c.bar.height as f32 - 12.).max(12.)))
                     .rounded(crate::gpui_widgets::corner(4.))
                     .into_any_element(),
-                None => icon(c, "music_note", size * 0.9).into_any_element(),
+                None => item_icon(c, item, "music_note", size * 0.9).into_any_element(),
             };
             bar_button(
                 app,
-                widget,
+                item,
                 id,
                 row()
                     .gap(px(6.))
@@ -669,7 +733,7 @@ pub(crate) fn bar_widget(
         }
         Widget::Tray => {
             let fg = color(c.colors.foreground);
-            let mut tray = row().id(id).gap(px(2.));
+            let mut tray = item_style(row().id(id), &item.style, c).gap(px(2.));
             for item in &app.snapshot.tray {
                 let picture = item
                     .image
@@ -702,6 +766,28 @@ pub(crate) fn bar_widget(
                 tray = tray.child(entry);
             }
             tray.into_any_element()
+        }
+        Widget::DeviceBattery => {
+            let device = crate::status::device_for(&app.snapshot.peripherals, &item.device)?;
+            let low = device.percent <= LOW_DEVICE_BATTERY;
+            let percent = div()
+                .when(low, |text| text.text_color(color(c.colors.urgent)))
+                .child(format!("{:.0}%", device.percent));
+            bar_button(
+                app,
+                item,
+                id,
+                row()
+                    .gap(px(3.))
+                    .child(glyph(device.kind.icon()))
+                    .child(percent)
+                    .when(device.charging, |line| {
+                        line.child(icon(c, "bolt", size * 0.8))
+                    }),
+                toggle(Panel::Battery),
+                dispatch,
+            )
+            .into_any_element()
         }
         Widget::Workspaces | Widget::WindowTitle | Widget::Clock | Widget::Settings => return None,
     })
@@ -803,14 +889,41 @@ impl gpui::Element for NaturalContent {
 mod tests {
     use super::*;
     #[test]
+    fn bar_border_placement_matches_the_selected_edges() {
+        use crate::config::{BarConfig, BorderEdges};
+        for (edges, margin, top, side) in [
+            (BorderEdges::Auto, 0, false, true),
+            (BorderEdges::Auto, 8, true, true),
+            (BorderEdges::All, 0, true, true),
+            (BorderEdges::Bottom, 8, false, false),
+        ] {
+            let bar = BarConfig {
+                border_width: 2.,
+                border_edges: edges,
+                margin_top: margin,
+                ..Default::default()
+            };
+            let mut element = bar_outline(div(), &bar);
+            let widths = &element.style().border_widths;
+            assert_eq!(widths.top, top.then(|| px(2.).into()));
+            assert_eq!(widths.left, side.then(|| px(2.).into()));
+            assert_eq!(widths.right, side.then(|| px(2.).into()));
+            assert_eq!(widths.bottom, Some(px(2.).into()));
+        }
+    }
+
+    #[test]
     fn bar_shadow_keeps_its_softness_in_the_pixel_look() {
         let bar = crate::config::BarConfig {
             shadow: true,
             ..Default::default()
         };
-        set_look(crate::config::Look::Pixel, crate::config::PixelFont::Tiny5);
+        set_look(&crate::config::BarConfig {
+            look: crate::config::Look::Pixel,
+            ..Default::default()
+        });
         let mut shadowed = bar_outline(div(), &bar);
-        set_look(crate::config::Look::Smooth, crate::config::PixelFont::Tiny5);
+        set_look(&crate::config::BarConfig::default());
         let blurs: Vec<_> = shadowed
             .style()
             .box_shadow
