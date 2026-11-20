@@ -67,6 +67,22 @@ Outlook, Apple, Nextcloud, Proton, `webcal://`). Click the clock (or `rune-shell
 for a month view and the day's events, with a **Join** button for Meet, Zoom, Teams, Webex,
 Whereby and Jitsi links. Recurring events, exceptions and time zones are handled. Read-only.
 
+**Focus timer**: add the `focus` widget or run `rune-shell toggle focus`. Start a
+25-minute focus session, a 5-minute break, or a custom countdown of 1–1440 minutes.
+Pause, resume, or stop in the panel. Optional Do Not Disturb applies to the next
+focus session and restores its previous state when stopped or finished, unless
+you changed it yourself. Timers include time spent suspended and reset when Rune
+exits. Completion posts a notification; breaks start manually.
+
+**Upcoming events**: add `upcoming_event` to the bar for the current or next timed
+calendar event, its countdown, and an overlap count. Click to open its day in the
+calendar with the existing Join button. Auto-hide defaults to on: the widget
+appears 15 minutes before an event through its end. Turn it off in Settings →
+Menu Bar → the widget's options, or use `{ widget = "upcoming_event", auto_hide = false }`
+in the bar list, to always show the current/next event or "No upcoming events".
+All-day events stay in the calendar. Bar visibility works independently of reminder
+notifications, including when reminders are off.
+
 **Volume, network, battery and OSD**: the `volume` widget (click to mute, scroll to change),
 `network` (Wi-Fi signal or wired; click for networks), `battery` (hidden without one) and
 `stats` (CPU %, memory %, CPU temperature; click or `rune-shell toggle system` for live CPU, GPU,
@@ -151,6 +167,7 @@ Check the layer-rule syntax against your Hyprland version. The layer namespace i
 | `rune-shell toggle weather` | open or close the forecast |
 | `rune-shell open bluetooth` | open settings on the Bluetooth page |
 | `rune-shell toggle calendar` | open or close the calendar |
+| `rune-shell toggle focus` | open or close the focus timer |
 | `rune-shell screenshot [screen\|all\|window\|selection]` | take a screenshot |
 | `rune-shell record [screen\|window\|selection\|stop]` | start or stop a screen recording |
 | `rune-shell ocr` | copy the text in a selected area |

@@ -956,6 +956,8 @@ fn widget_glyph(widget: Widget) -> &'static str {
         Widget::Battery => "battery_5_bar",
         Widget::Stats => "memory",
         Widget::Updates => "system_update_alt",
+        Widget::Focus => "timer",
+        Widget::UpcomingEvent => "event_upcoming",
         Widget::QuickSettings => "toggle_on",
         Widget::Power => "power_settings_new",
         Widget::Capture => "photo_camera",
@@ -1266,7 +1268,11 @@ impl SettingsView {
         if item.widget.can_auto_hide() {
             rows.push(self.toggle(
                 &format!("item-auto-hide:{slot}"),
-                "Hide when idle",
+                if item.widget == Widget::UpcomingEvent {
+                    "Auto-hide outside event window"
+                } else {
+                    "Hide when idle"
+                },
                 item.auto_hide,
                 edit(ItemEdit::AutoHide(!item.auto_hide)),
             ));

@@ -34,6 +34,8 @@ pub(crate) struct Snapshot {
     pub peripherals: Vec<Peripheral>,
     pub brightness: Option<u8>,
     pub calendar: cal::State,
+    pub upcoming: Option<(usize, usize)>,
+    pub focus: rune_services::focus::State,
     pub updates: rune_services::updates::Updates,
     pub polkit: Option<rune_services::polkit::Request>,
 }
@@ -62,6 +64,8 @@ impl Default for Snapshot {
             peripherals: Vec::new(),
             brightness: None,
             calendar: cal::State::default(),
+            upcoming: None,
+            focus: rune_services::focus::State::default(),
             updates: rune_services::updates::Updates::default(),
             polkit: None,
         }
@@ -72,6 +76,11 @@ impl Default for Snapshot {
 pub(crate) const STATS_HISTORY: usize = 60;
 
 impl Snapshot {
+    pub(crate) fn select_upcoming(&mut self) {
+        self.upcoming = crate::calendar::upcoming(&self.calendar.events, self.now, false)
+            .map(|selected| (selected.index, selected.overlaps));
+    }
+
     pub(crate) fn record_stats(&mut self, stats: Option<rune_services::stats::Stats>) {
         if let Some(sample) = &stats {
             if self.stats_history.len() >= STATS_HISTORY {

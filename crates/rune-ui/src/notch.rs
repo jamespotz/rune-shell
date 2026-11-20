@@ -39,6 +39,8 @@ pub(crate) fn widget_panel(widget: crate::config::Widget) -> Option<crate::Panel
         Widget::Capture => Panel::Capture,
         Widget::Stats => Panel::System,
         Widget::Updates => Panel::Updates,
+        Widget::Focus => Panel::Focus,
+        Widget::UpcomingEvent => Panel::Calendar,
         _ => return None,
     })
 }

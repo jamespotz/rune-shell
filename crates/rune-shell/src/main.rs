@@ -167,6 +167,9 @@ fn daemon() -> Result<()> {
             (None, None, None)
         }
     };
+    let (focus_state, focus_cmds) =
+        rune_services::focus::spawn(notif_cmds.clone(), config.notifications.dnd);
+    forward(focus_state, ui.clone(), UiEvent::Focus);
     let theme_jobs = theme_worker(ui.clone());
     let lock_jobs = lock_worker(ui.clone());
     send_lock(&lock_jobs, &config);
@@ -334,6 +337,11 @@ fn daemon() -> Result<()> {
                         warn!("polkit: agent stopped; dropping a dialog response");
                     }
                 }
+                Action::Focus(cmd) => {
+                    if focus_cmds.send(cmd).is_err() {
+                        warn!("focus: timer service stopped");
+                    }
+                }
                 Action::Updates(cmd) => {
                     let _ = updates_cmds.send(cmd); // the service lives as long as the runtime
                 }
@@ -371,6 +379,14 @@ fn daemon() -> Result<()> {
                 Action::RefreshCalendar => calendar_refresh.notify_one(),
                 Action::Record(cmd) => {
                     let _ = record_cmds.send(cmd); // the recorder lives as long as the runtime
+                }
+                Action::Notif(notifications::Command::SetDnd(on)) => {
+                    if focus_cmds
+                        .send(rune_services::focus::Command::SetDnd(on))
+                        .is_err()
+                    {
+                        warn!("focus: timer service stopped; DND update failed");
+                    }
                 }
                 Action::Notif(cmd) => {
                     if let Some(cmds) = &notif_cmds {

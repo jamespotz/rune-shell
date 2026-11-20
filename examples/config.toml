@@ -33,11 +33,13 @@ shadow_color = "#00000066"
 outputs = []              # e.g. ["DP-1"]; empty = every monitor
 # Widgets: "workspaces", "window_title", "clock", "media", "notifications", "tray",
 # "weather", "bluetooth", "volume", "network", "battery", "stats", "updates", "quick_settings", "power", "capture",
-# "settings", "device_battery". Reorder freely, and repeat a widget as often as you like;
+# "settings", "device_battery", "focus", "upcoming_event". Reorder freely, and repeat a widget as often as you like;
 # the three lists are laid out left to right inside the notch.
 # Any entry can be a table with its own look (Settings → Menu Bar → click an item):
 #   { widget = "device_battery", device = "F4:73:35:AA:BB:CC", icon = "mouse",
 #     icon_color = "#89b4fa", border_width = 1.0, border_color = "#ffffff33", radius = 6.0 }
+# Upcoming events default to auto-hide: shown 15 minutes before an event until it ends.
+#   { widget = "upcoming_event", auto_hide = false } # always show current/next event
 # icon: Material Symbols name, blank = automatic. border_width: 0-4. radius: unset = 5.
 # device (device_battery only): UPower serial or native path; blank = first device found.
 left = ["workspaces"]

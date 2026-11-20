@@ -2,6 +2,7 @@
 use crate::{
     App as Shell, Message, Panel,
     controls::slider::{Slider, SliderEvent},
+    controls::text_input::{InputEvent, TextInput},
     gpui_images::Images,
     gpui_notch::Dispatch,
     gpui_widgets::{
@@ -26,6 +27,8 @@ pub(crate) struct PanelView {
     mic_volume: Entity<Slider>,
     brightness: Entity<Slider>,
     seek: Entity<Slider>,
+    focus_minutes: Entity<TextInput>,
+    focus_dnd: bool,
     images: Images,
     measurement: std::rc::Rc<std::cell::Cell<Option<(u32, u32)>>>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -68,6 +71,30 @@ impl PanelView {
                 },
             ));
         }
+        let focus_minutes = cx.new(|cx| TextInput::new("25", "Minutes", cx));
+        let input_dispatch = dispatch.clone();
+        subscriptions.push(cx.subscribe_in(
+            &focus_minutes,
+            window,
+            move |this, input, event, window, cx| match event {
+                InputEvent::Changed(_) => cx.notify(),
+                InputEvent::Submit => {
+                    if let Ok(minutes) = input.read(cx).text().trim().parse::<u32>()
+                        && (1..=1440).contains(&minutes)
+                    {
+                        input_dispatch(
+                            Message::FocusTimer(rune_services::focus::Command::Start {
+                                minutes,
+                                kind: rune_services::focus::Kind::Focus,
+                                dnd: this.focus_dnd,
+                            }),
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            },
+        ));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
@@ -79,10 +106,125 @@ impl PanelView {
             mic_volume,
             brightness,
             seek,
+            focus_minutes,
+            focus_dnd: false,
             images,
             measurement: std::rc::Rc::new(std::cell::Cell::new(None)),
             _subscriptions: subscriptions,
         }
+    }
+}
+impl PanelView {
+    fn focus_timer(&self, app: &Shell, cx: &Context<Self>) -> AnyElement {
+        use rune_services::focus::{Command, Kind, Status};
+        let c = &app.config;
+        let state = &app.snapshot.focus;
+        let start = |minutes, kind| {
+            Message::FocusTimer(Command::Start {
+                minutes,
+                kind,
+                dnd: self.focus_dnd,
+            })
+        };
+        let title = match state.status {
+            Status::Idle => "Focus timer",
+            _ if state.kind == Kind::Break => "Break",
+            _ => "Focus",
+        };
+        let mut body = column().gap(px(12.)).child(section_label(c, title));
+        if state.status != Status::Idle {
+            body = body
+                .child(crate::gpui_widgets::heading(
+                    div().text_size(px(32.)).child(state.label()),
+                ))
+                .child(
+                    row()
+                        .gap(px(8.))
+                        .child(button(
+                            "focus-pause",
+                            if state.status == Status::Paused {
+                                "Resume"
+                            } else {
+                                "Pause"
+                            },
+                            Message::FocusTimer(if state.status == Status::Paused {
+                                Command::Resume
+                            } else {
+                                Command::Pause
+                            }),
+                            &self.dispatch,
+                        ))
+                        .child(button(
+                            "focus-stop",
+                            "Stop",
+                            Message::FocusTimer(Command::Stop),
+                            &self.dispatch,
+                        )),
+                );
+        }
+        body = body
+            .child(
+                row()
+                    .gap(px(8.))
+                    .child(button(
+                        "focus-start",
+                        "Focus 25 min",
+                        start(25, Kind::Focus),
+                        &self.dispatch,
+                    ))
+                    .child(button(
+                        "focus-break",
+                        "Break 5 min",
+                        start(5, Kind::Break),
+                        &self.dispatch,
+                    )),
+            )
+            .child(section_label(c, "Custom countdown in minutes"))
+            .child(
+                crate::gpui_widgets::frame(div())
+                    .p(px(6.))
+                    .child(self.focus_minutes.clone()),
+            );
+        let minutes = self
+            .focus_minutes
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|minutes| (1..=1440).contains(minutes));
+        body = match minutes {
+            Some(minutes) => body.child(button(
+                "focus-custom",
+                "Start countdown",
+                start(minutes, Kind::Focus),
+                &self.dispatch,
+            )),
+            None => body.child(crate::gpui_widgets::muted(
+                c,
+                "Enter 1 to 1440 whole minutes.",
+            )),
+        };
+        let dnd = button(
+            "focus-dnd",
+            if self.focus_dnd {
+                "Do Not Disturb: On"
+            } else {
+                "Do Not Disturb: Off"
+            },
+            Message::Noop,
+            &self.dispatch,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.focus_dnd = !this.focus_dnd;
+            cx.notify();
+        }));
+        body.child(dnd)
+            .child(crate::gpui_widgets::muted(
+                c,
+                "DND applies to the next focus session. F: focus · B: break · P: pause/resume · S: stop · Tab: custom duration.",
+            ))
+            .into_any_element()
     }
 }
 impl Render for PanelView {
@@ -175,9 +317,15 @@ impl Render for PanelView {
             Panel::Battery => battery(app, &self.dispatch),
             Panel::System => system(app),
             Panel::Updates => updates(app, &self.dispatch),
+            Panel::Focus => self.focus_timer(app, cx),
             Panel::Launcher(_) => div().into_any_element(),
         };
         let dispatch = self.dispatch.clone();
+        let panel_focus = self.focus.clone();
+        let is_focus = self.panel == Panel::Focus;
+        let timer_status = app.snapshot.focus.status;
+        let timer_dnd = self.focus_dnd;
+        let custom_input = self.focus_minutes.clone();
         let width = match self.panel {
             Panel::Media => 300.,
             Panel::Quick => crate::quick::QUICK_W,
@@ -185,6 +333,7 @@ impl Render for PanelView {
             Panel::Capture => crate::capture_panel::CAPTURE_W,
             Panel::Weather => crate::weather::PANEL_W,
             Panel::Calendar => 270.,
+            Panel::Focus => 320.,
             Panel::Notifications => 340.,
             Panel::TrayMenu => crate::tray::MENU_W,
             Panel::Wifi | Panel::Bluetooth | Panel::Sound | Panel::Launcher(_) => DROPDOWN_W,
@@ -204,6 +353,31 @@ impl Render for PanelView {
                 .on_key_down(move |event, window, cx| {
                     if event.keystroke.key == "escape" {
                         dispatch(Message::Escape, window, cx);
+                    } else if is_focus && panel_focus.is_focused(window) {
+                        use rune_services::focus::{Command, Kind, Status};
+                        let start = |minutes, kind| Command::Start {
+                            minutes,
+                            kind,
+                            dnd: timer_dnd,
+                        };
+                        let command = match event.keystroke.key.as_str() {
+                            "f" => Some(start(25, Kind::Focus)),
+                            "b" => Some(start(5, Kind::Break)),
+                            "p" if timer_status == Status::Running => Some(Command::Pause),
+                            "p" if timer_status == Status::Paused => Some(Command::Resume),
+                            "s" => Some(Command::Stop),
+                            "tab" => {
+                                use gpui::Focusable;
+                                custom_input.read(cx).focus_handle(cx).focus(window, cx);
+                                cx.stop_propagation();
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(command) = command {
+                            cx.stop_propagation();
+                            dispatch(Message::FocusTimer(command), window, cx);
+                        }
                     }
                 })
                 .child(
@@ -2561,6 +2735,79 @@ pub(crate) mod tests {
             }],
         ));
         shell
+    }
+
+    #[test]
+    #[ignore = "opens native widget previews; requires Wayland"]
+    fn focus_and_upcoming_widgets_render_in_both_looks() {
+        use crate::config::{BarItem, Look, Widget};
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (actions, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::Config::default();
+        config.bar.left.clear();
+        config.bar.center = vec![Widget::Focus.into(), Widget::UpcomingEvent.into()];
+        config.bar.right.clear();
+        config.bar.width = 650;
+        config.animations.reduce_motion = true;
+        let initial = config.clone();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            let now = Local::now();
+            tx.send(crate::UiEvent::Calendar(rune_services::calendar::State {
+                events: vec![rune_services::calendar::Event {
+                    title: "Project sync".into(),
+                    start: now
+                        .checked_add_signed(chrono::Duration::minutes(8))
+                        .unwrap(),
+                    end: now
+                        .checked_add_signed(chrono::Duration::minutes(38))
+                        .unwrap(),
+                    all_day: false,
+                    location: "Online".into(),
+                    meeting: Some("https://example.invalid/meeting".into()),
+                    calendar: 0,
+                }],
+                errors: Vec::new(),
+            }))
+            .unwrap();
+            tx.send(crate::UiEvent::Focus(rune_services::focus::State {
+                status: rune_services::focus::Status::Running,
+                kind: rune_services::focus::Kind::Focus,
+                remaining: 1122,
+            }))
+            .unwrap();
+            tx.send(crate::UiEvent::Toggle(Panel::Focus)).unwrap();
+            for (name, look) in [("smooth", Look::Smooth), ("pixel", Look::Pixel)] {
+                config.bar.look = look;
+                tx.send(crate::UiEvent::Config(Box::new(config.clone())))
+                    .unwrap();
+                std::thread::sleep(Duration::from_secs(2));
+                if let Ok(directory) = std::env::var("RUNE_TEST_SCREENSHOTS") {
+                    let path = std::path::Path::new(&directory).join(format!("focus-{name}.png"));
+                    assert!(
+                        std::process::Command::new("grim")
+                            .arg(path)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                }
+            }
+            let mut always = BarItem::from(Widget::UpcomingEvent);
+            always.auto_hide = false;
+            config.bar.center = vec![Widget::Focus.into(), always];
+            tx.send(crate::UiEvent::Config(Box::new(config))).unwrap();
+            tx.send(crate::UiEvent::Calendar(
+                rune_services::calendar::State::default(),
+            ))
+            .unwrap();
+            tx.send(crate::UiEvent::Focus(rune_services::focus::State::default()))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            tx.send(crate::UiEvent::Quit).unwrap();
+        });
+        crate::backend::run(initial, rx, actions, false).unwrap();
+        sender.join().unwrap();
     }
 
     #[test]

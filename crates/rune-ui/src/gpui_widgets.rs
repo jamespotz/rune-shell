@@ -565,6 +565,62 @@ pub(crate) fn bar_widget(
             )
             .into_any_element()
         }
+        Widget::Focus => {
+            let timer = &app.snapshot.focus;
+            let content = row().child(glyph("timer")).when(
+                timer.status != rune_services::focus::Status::Idle,
+                |line| {
+                    line.child(timer.label()).when(
+                        timer.status == rune_services::focus::Status::Paused,
+                        |line| line.child(glyph("pause")),
+                    )
+                },
+            );
+            bar_button(app, item, id, content, toggle(Panel::Focus), dispatch).into_any_element()
+        }
+        Widget::UpcomingEvent => {
+            let selected = app.snapshot.upcoming.and_then(|(index, overlaps)| {
+                app.snapshot
+                    .calendar
+                    .events
+                    .get(index)
+                    .map(|event| (event, overlaps))
+            });
+            let selected = selected.filter(|(event, _)| {
+                !item.auto_hide
+                    || event.start.signed_duration_since(app.snapshot.now)
+                        <= chrono::Duration::minutes(15)
+            });
+            match selected {
+                Some((event, overlaps)) => {
+                    let content = row()
+                        .child(glyph("event_upcoming"))
+                        .child(crate::calendar::upcoming_label(event, app.snapshot.now))
+                        .when(overlaps > 0, |line| line.child(format!("+{overlaps}")));
+                    bar_button(
+                        app,
+                        item,
+                        id,
+                        content,
+                        Message::UpcomingEvent(event.start.date_naive()),
+                        dispatch,
+                    )
+                    .into_any_element()
+                }
+                None if item.auto_hide => return None,
+                None => bar_button(
+                    app,
+                    item,
+                    id,
+                    row()
+                        .child(glyph("event_upcoming"))
+                        .child("No upcoming events"),
+                    toggle(Panel::Calendar),
+                    dispatch,
+                )
+                .into_any_element(),
+            }
+        }
         Widget::Updates => {
             use rune_services::updates::Run;
             let updates = &app.snapshot.updates;

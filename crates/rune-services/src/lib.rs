@@ -11,6 +11,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod clock;
 pub mod equalizer;
+pub mod focus;
 pub mod hyprland;
 pub mod hyprland_config;
 pub mod icons;

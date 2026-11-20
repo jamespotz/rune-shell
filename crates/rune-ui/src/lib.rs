@@ -93,6 +93,8 @@ pub(crate) enum Message {
     /// Open, switch to, or close a panel (a bar widget was clicked).
     Toggle(Panel),
     Updates(rune_services::updates::Command),
+    FocusTimer(rune_services::focus::Command),
+    UpcomingEvent(chrono::NaiveDate),
     Polkit(rune_services::polkit::Command),
     MediaControl(Control),
     OpenSettingsPage(settings::Page),
@@ -279,6 +281,22 @@ impl App {
         let reshapes = match &message {
             Message::Ui(UiEvent::Clock(now)) => {
                 now.format("%H%M").to_string() != self.snapshot.now.format("%H%M").to_string()
+                    || self
+                        .snapshot
+                        .upcoming
+                        .and_then(|(index, _)| self.snapshot.calendar.events.get(index))
+                        .is_some_and(|event| {
+                            let old = self.snapshot.now;
+                            let crosses = |boundary| (old < boundary) != (*now < boundary);
+                            crosses(event.start)
+                                || crosses(event.end)
+                                || event
+                                    .start
+                                    .checked_sub_signed(chrono::Duration::minutes(15))
+                                    .is_some_and(crosses)
+                                || crate::calendar::upcoming_label(event, old)
+                                    != crate::calendar::upcoming_label(event, *now)
+                        })
             }
             Message::Ui(
                 UiEvent::Hypr(_)
@@ -294,6 +312,8 @@ impl App {
                 | UiEvent::Peripherals(_)
                 | UiEvent::Stats(_)
                 | UiEvent::Updates(_)
+                | UiEvent::Focus(_)
+                | UiEvent::Calendar(_)
                 | UiEvent::Recording(_)
                 | UiEvent::GameMode(_),
             ) => true,
@@ -319,6 +339,7 @@ impl App {
             }
             Message::Ui(UiEvent::Clock(now)) => {
                 self.snapshot.now = now;
+                self.snapshot.select_upcoming();
                 Effects::none()
             }
             Message::Ui(UiEvent::Config(config)) => {
@@ -479,6 +500,7 @@ impl App {
             Message::Ui(UiEvent::Calendar(state)) => {
                 self.settings_ui.cal_errors = state.errors.clone();
                 self.snapshot.calendar = state;
+                self.snapshot.select_upcoming();
                 Effects::none()
             }
             Message::CalMonth(by) => {
@@ -676,6 +698,20 @@ impl App {
             Message::Ui(UiEvent::Stats(s)) => {
                 self.snapshot.record_stats(s);
                 Effects::none()
+            }
+            Message::FocusTimer(command) => {
+                self.send(Action::Focus(command));
+                Effects::none()
+            }
+            Message::Ui(UiEvent::Focus(state)) => {
+                self.snapshot.focus = state;
+                Effects::none()
+            }
+            Message::UpcomingEvent(day) => {
+                let effects = self.toggle_panel(Panel::Calendar);
+                self.cal_day = day;
+                self.cal_month = day.with_day(1).unwrap_or(day);
+                effects
             }
             Message::Updates(cmd) => {
                 self.send(Action::Updates(cmd));
@@ -1300,6 +1336,7 @@ impl App {
             | Panel::Sound
             | Panel::Battery
             | Panel::System
+            | Panel::Focus
             | Panel::Updates
             | Panel::Capture => {}
         }
@@ -1907,6 +1944,64 @@ mod tests {
         assert_eq!(app.settings_ui.wifi_pick.as_deref(), Some("Office"));
         assert_eq!(app.settings_ui.page(), settings::Page::Network);
         assert!(app.surfaces.is_open(&Surface::Settings));
+        assert_eq!(app.panels.current(), None);
+    }
+
+    #[test]
+    fn upcoming_event_opens_its_day_and_ignores_reminder_setting() {
+        let (mut app, _received) = test_app();
+        app.config.calendar.remind_minutes = 0;
+        let now = Local::now();
+        let start = now.checked_add_signed(chrono::Duration::days(1)).unwrap();
+        app.update(Message::Ui(UiEvent::Calendar(
+            rune_services::calendar::State {
+                events: vec![rune_services::calendar::Event {
+                    title: "Tomorrow".into(),
+                    start,
+                    end: start
+                        .checked_add_signed(chrono::Duration::hours(1))
+                        .unwrap(),
+                    all_day: false,
+                    location: String::new(),
+                    meeting: None,
+                    calendar: 0,
+                }],
+                errors: Vec::new(),
+            },
+        )));
+        assert_eq!(app.snapshot.upcoming, Some((0, 0)));
+        app.update(Message::UpcomingEvent(start.date_naive()));
+        assert_eq!(app.panels.current(), Some(Panel::Calendar));
+        assert_eq!(app.cal_day, start.date_naive());
+        app.update(Message::Ui(UiEvent::Clock(
+            start
+                .checked_add_signed(chrono::Duration::hours(2))
+                .unwrap(),
+        )));
+        assert_eq!(app.snapshot.upcoming, None);
+        app.update(Message::Ui(UiEvent::Clock(now)));
+        assert_eq!(app.snapshot.upcoming, Some((0, 0)));
+    }
+
+    #[test]
+    fn focus_commands_reach_service_and_snapshots_reach_ui() {
+        let (mut app, mut received) = test_app();
+        while received.try_recv().is_ok() {}
+        app.update(Message::FocusTimer(rune_services::focus::Command::Pause));
+        assert_eq!(
+            received.try_recv().unwrap(),
+            Action::Focus(rune_services::focus::Command::Pause)
+        );
+        let state = rune_services::focus::State {
+            status: rune_services::focus::Status::Paused,
+            kind: rune_services::focus::Kind::Focus,
+            remaining: 123,
+        };
+        app.update(Message::Ui(UiEvent::Focus(state.clone())));
+        assert_eq!(app.snapshot.focus, state);
+        app.update(Message::Toggle(Panel::Focus));
+        assert_eq!(app.panels.current(), Some(Panel::Focus));
+        app.update(Message::Escape);
         assert_eq!(app.panels.current(), None);
     }
 

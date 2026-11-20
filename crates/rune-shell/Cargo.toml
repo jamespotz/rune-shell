@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
 notify = "8"
 rune-services = { workspace = true }
 rune-ui = { workspace = true }

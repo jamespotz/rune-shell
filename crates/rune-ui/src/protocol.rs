@@ -58,6 +58,7 @@ pub enum Action {
     Bluetooth(bluetooth::Command),
     /// Check for updates or run topgrade; answered with [`UiEvent::Updates`].
     Updates(updates::Command),
+    Focus(rune_services::focus::Command),
     Screenshot(capture::Target, capture::Options),
     /// Extract text from a selected region.
     Ocr(capture::Options),
@@ -123,6 +124,7 @@ pub enum UiEvent {
     Weather(Option<Weather>),
     Bluetooth(bluetooth::State),
     Updates(updates::Updates),
+    Focus(rune_services::focus::State),
     Geocoded(Result<Vec<Location>, String>),
     Recording(Option<capture::Recording>),
     Calendar(cal::State),

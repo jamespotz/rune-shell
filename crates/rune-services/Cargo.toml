@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+libc = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"
 futures-util = "0.3"

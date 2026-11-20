@@ -24,10 +24,11 @@ pub enum Panel {
     Battery,
     System,
     Updates,
+    Focus,
 }
 
 /// Panels reachable from the CLI (`rune-shell toggle <name>`).
-const NAMED: [(&str, Panel); 16] = [
+const NAMED: [(&str, Panel); 17] = [
     ("launcher", Panel::Launcher(Kind::Apps)),
     ("keybinds", Panel::Launcher(Kind::Keybinds)),
     ("clipboard", Panel::Launcher(Kind::Clipboard)),
@@ -44,6 +45,7 @@ const NAMED: [(&str, Panel); 16] = [
     ("battery", Panel::Battery),
     ("system", Panel::System),
     ("updates", Panel::Updates),
+    ("focus", Panel::Focus),
 ];
 
 impl Panel {
@@ -59,7 +61,7 @@ impl Panel {
     /// Whether the panel takes the keyboard while open (it has a text field).
     /// Such panels are modal and sit in the middle of the screen.
     pub fn grabs_keyboard(self) -> bool {
-        matches!(self, Self::Launcher(_))
+        matches!(self, Self::Launcher(_) | Self::Focus)
     }
 }
 

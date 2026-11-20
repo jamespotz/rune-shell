@@ -107,6 +107,8 @@ pub enum Widget {
     Stats,
     /// Pending package updates; click to check or run topgrade.
     Updates,
+    Focus,
+    UpcomingEvent,
     /// Opens quick settings (Wi-Fi, Bluetooth, DND, volume...).
     QuickSettings,
     /// Opens the power menu.
@@ -118,7 +120,7 @@ pub enum Widget {
 }
 
 impl Widget {
-    pub const ALL: [Widget; 18] = [
+    pub const ALL: [Widget; 20] = [
         Widget::Workspaces,
         Widget::WindowTitle,
         Widget::Clock,
@@ -132,6 +134,8 @@ impl Widget {
         Widget::Battery,
         Widget::Stats,
         Widget::Updates,
+        Widget::Focus,
+        Widget::UpcomingEvent,
         Widget::QuickSettings,
         Widget::Power,
         Widget::Capture,
@@ -178,6 +182,8 @@ impl std::fmt::Display for Widget {
             Widget::Battery => "Battery",
             Widget::Stats => "System stats",
             Widget::Updates => "Updates",
+            Widget::Focus => "Focus timer",
+            Widget::UpcomingEvent => "Upcoming event",
             Widget::QuickSettings => "Quick settings",
             Widget::Power => "Power menu",
             Widget::Capture => "Capture",
@@ -236,7 +242,7 @@ impl Widget {
     pub fn can_auto_hide(self) -> bool {
         matches!(
             self,
-            Widget::Updates | Widget::Media | Widget::DeviceBattery
+            Widget::Updates | Widget::Media | Widget::DeviceBattery | Widget::UpcomingEvent
         )
     }
 }
@@ -1010,6 +1016,16 @@ right = ["clock", { widget = "device_battery", device = "F4:73", icon = "mouse",
         assert!(
             Config::parse("[bar]\nright = [{ widget = \"clock\", colour = \"#fff\" }]").is_err()
         );
+    }
+
+    #[test]
+    fn focus_and_upcoming_widgets_round_trip_with_default_auto_hide() {
+        let config = Config::parse("[bar]\nright = [\"focus\", \"upcoming_event\", { widget = \"upcoming_event\", auto_hide = false }]").unwrap();
+        assert_eq!(config.bar.right[0].widget, Widget::Focus);
+        assert_eq!(config.bar.right[1].widget, Widget::UpcomingEvent);
+        assert!(config.bar.right[1].auto_hide);
+        assert!(!config.bar.right[2].auto_hide);
+        assert_eq!(Config::parse(&config.to_toml()).unwrap(), config);
     }
 
     #[test]
